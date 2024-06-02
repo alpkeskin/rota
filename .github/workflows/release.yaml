@@ -22,7 +22,7 @@ jobs:
       - name: "Create release on GitHub"
         uses: goreleaser/goreleaser-action@v4.4.0
         env:
-          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          G_TOKEN: "${{ secrets.G_TOKEN }}"
         with:
           args: "release --rm-dist"
           version: latest
@@ -39,7 +39,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.G_TOKEN }}
 
       - name: "Build Docker Images"
         uses: docker/build-push-action@v4.1.1
