@@ -1,0 +1,17 @@
+builds:
+  - binary: rota
+    main: cmd/rota/main.go
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm
+      - arm64
+  
+archives:
+  - id: binary
+    format: binary

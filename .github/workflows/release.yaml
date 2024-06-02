@@ -1,0 +1,55 @@
+name: Release & Publish
+on:
+  create:
+    tags:
+      - v*
+
+jobs:
+  release:
+    name: "Release binary"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Check out code"
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: "Set up Go"
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.22
+
+      - name: "Create release on GitHub"
+        uses: goreleaser/goreleaser-action@v4.4.0
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        with:
+          args: "release --rm-dist"
+          version: latest
+
+  publish:
+    name: "Publish to GHCR"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Check out code"
+        uses: actions/checkout@v3
+
+      - name: "Login to GitHub Container Registry"
+        uses: docker/login-action@v2.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Build Docker Images"
+        uses: docker/build-push-action@v4.1.1
+        with:
+          push: false
+          build-args: "VERSION=${{ github.ref_name }}"
+          tags: "${{ github.repository }}:latest,${{ github.repository }}:${{ github.ref_name }}"
+
+      - name: "Re-tagging & Push Images"
+        run: |
+          docker tag ${{ github.repository }}:latest ghcr.io/${{ github.repository }}:latest
+          docker tag ${{ github.repository }}:${{ github.ref_name }} ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          docker push ghcr.io/${{ github.repository }} -a
