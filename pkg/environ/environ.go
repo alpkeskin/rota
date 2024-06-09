@@ -35,6 +35,15 @@ func Init() {
 	auth := ""
 	flag.StringVar(&auth, "auth", "", "")
 
+	check := false
+	flag.BoolVar(&check, "check", false, "")
+
+	output := ""
+	flag.StringVar(&output, "output", "", "")
+
+	timeout := 5
+	flag.IntVar(&timeout, "timeout", 5, "")
+
 	flag.Parse()
 
 	if method != "random" && method != "sequent" {
@@ -45,7 +54,6 @@ func Init() {
 		log.Fatal().Msg("single proxy or proxy file must be provided")
 	}
 
-	// parse auth
 	if auth != "" {
 		authSplit := strings.Split(auth, ":")
 		if len(authSplit) != 2 {
@@ -119,7 +127,10 @@ func Init() {
 		ProxyList: proxyList,
 		Method:    method,
 		Auth:      auth,
+		Check:     check,
+		Output:    output,
+		Timeout:   timeout,
 	}
 
-	config.Ac.Log.Info().Msg("config initialized")
+	config.Ac.Log.Info().Msg("setup completed")
 }

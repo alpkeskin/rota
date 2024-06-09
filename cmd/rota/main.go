@@ -12,6 +12,11 @@ func init() {
 
 func main() {
 	server := server.New()
+	if config.Ac.Check {
+		server.Check()
+		return
+	}
+
 	err := server.Start()
 	if err != nil {
 		config.Ac.Log.Fatal().Msg(err.Error())

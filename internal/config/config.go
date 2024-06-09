@@ -15,4 +15,7 @@ type AppConfig struct {
 	ProxyList []scheme.Proxy
 	Method    string
 	Auth      string
+	Check     bool
+	Output    string
+	Timeout   int
 }
