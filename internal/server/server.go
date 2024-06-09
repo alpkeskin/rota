@@ -24,7 +24,6 @@ func New() *Server {
 // Start starts the proxy server.
 func (s *Server) Start() error {
 	s.setupProxyHandlers()
-	s.configureProxyVerbose()
 
 	config.Ac.Log.Info().Msg(fmt.Sprintf("server started on :%s", config.Ac.Port))
 	err := http.ListenAndServe(fmt.Sprintf(":%s", config.Ac.Port), s.Proxy)
@@ -39,11 +38,7 @@ func (s *Server) Start() error {
 func (s *Server) setupProxyHandlers() {
 	handler := handler.New()
 
+	s.Proxy.OnRequest().HandleConnectFunc(handler.OnConnect)
 	s.Proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
-	s.Proxy.OnRequest().DoFunc(handler.Request)
-}
-
-// configureProxyVerbose sets the verbosity level of the proxy server.
-func (s *Server) configureProxyVerbose() {
-	s.Proxy.Verbose = config.Ac.Verbose
+	s.Proxy.OnRequest().DoFunc(handler.OnRequest)
 }

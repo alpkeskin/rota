@@ -14,5 +14,5 @@ type AppConfig struct {
 	Req       *request.Request
 	ProxyList []scheme.Proxy
 	Method    string
-	Verbose   bool
+	Auth      string
 }
