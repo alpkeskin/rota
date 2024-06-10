@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/alpkeskin/rota/internal/config"
+	"github.com/alpkeskin/rota/internal/vars"
 	"github.com/alpkeskin/rota/pkg/request"
 	"github.com/alpkeskin/rota/pkg/scheme"
 
@@ -38,8 +38,8 @@ func Init() {
 	check := false
 	flag.BoolVar(&check, "check", false, "")
 
-	output := ""
-	flag.StringVar(&output, "output", "", "")
+	outputPath := ""
+	flag.StringVar(&outputPath, "output", "", "")
 
 	timeout := 5
 	flag.IntVar(&timeout, "timeout", 5, "")
@@ -58,6 +58,15 @@ func Init() {
 		authSplit := strings.Split(auth, ":")
 		if len(authSplit) != 2 {
 			log.Fatal().Msg("auth must be in the format user:pass")
+		}
+	}
+
+	var outputFile *os.File
+	if outputPath != "" {
+		var err error
+		outputFile, err = os.Create(outputPath)
+		if err != nil {
+			log.Fatal().Msg(err.Error())
 		}
 	}
 
@@ -120,17 +129,18 @@ func Init() {
 
 	req.ProxyList = proxyList
 
-	config.Ac = &config.AppConfig{
-		Port:      port,
-		Log:       log,
-		Req:       req,
-		ProxyList: proxyList,
-		Method:    method,
-		Auth:      auth,
-		Check:     check,
-		Output:    output,
-		Timeout:   timeout,
+	vars.Ac = &vars.AppConfig{
+		Port:       port,
+		Log:        log,
+		Req:        req,
+		ProxyList:  proxyList,
+		Method:     method,
+		Auth:       auth,
+		Check:      check,
+		OutputFile: outputFile,
+		Timeout:    timeout,
 	}
 
-	config.Ac.Log.Info().Msg("setup completed")
+	println(vars.Banner)
+	vars.Ac.Log.Info().Msg("setup completed")
 }
