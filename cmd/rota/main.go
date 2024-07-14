@@ -11,14 +11,14 @@ func init() {
 }
 
 func main() {
-	server := server.New()
+	srv := server.New()
 	if vars.Ac.Check {
-		server.Check()
+		srv.Check()
 		return
 	}
 
-	err := server.Start()
+	err := srv.Start()
 	if err != nil {
-		vars.Ac.Log.Fatal().Msg(err.Error())
+		vars.Ac.Log.Fatal().Msgf("Failed to start server: %v", err)
 	}
 }

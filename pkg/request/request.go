@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net/http"
 
+	"github.com/alpkeskin/rota/internal/vars"
 	"github.com/alpkeskin/rota/pkg/scheme"
 	"h12.io/socks"
 )
@@ -18,10 +19,10 @@ type Request struct {
 	Cursor     int
 }
 
-func New(method string) *Request {
+func New(method string, proxyList []scheme.Proxy) *Request {
 	return &Request{
 		Client:    &http.Client{},
-		ProxyList: []scheme.Proxy{},
+		ProxyList: proxyList,
 		HopHeaders: []string{
 			"Connection",
 			"Keep-Alive",
@@ -60,22 +61,22 @@ func (r *Request) Transport(proxy scheme.Proxy) (tr *http.Transport, err error) 
 	return tr, nil
 }
 
-// Modify the request by removing hop-by-hop headers and setting the proxy transport.
-func (r *Request) Modify(req *http.Request) (*http.Client, *http.Request) {
+// Modify prepares the request to be sent via a proxy.
+func (r *Request) Modify(req *http.Request) (*http.Client, *http.Request, string) {
 	proxy := r.ChooseProxy()
-	r.Client = &http.Client{Transport: proxy.Transport}
-
-	// http: Request.RequestURI can't be set in client requests.
-	// http://golang.org/src/pkg/net/http/client.go
-	req.RequestURI = ""
-
-	for _, h := range r.HopHeaders {
-		req.Header.Del(h)
+	r.Client = &http.Client{
+		Transport: proxy.Transport,
+		Timeout:   vars.Ac.Timeout,
 	}
 
-	return r.Client, req
+	req.RequestURI = ""
+
+	r.removeHopHeaders(req)
+
+	return r.Client, req, proxy.Host
 }
 
+// ChooseProxy selects a proxy based on the configured method.
 func (r *Request) ChooseProxy() scheme.Proxy {
 	switch r.Method {
 	case "random":
@@ -87,11 +88,13 @@ func (r *Request) ChooseProxy() scheme.Proxy {
 	}
 }
 
+// RandomProxy selects a proxy randomly.
 func (r *Request) RandomProxy() scheme.Proxy {
 	r.Cursor = rand.Intn(len(r.ProxyList))
 	return r.ProxyList[r.Cursor]
 }
 
+// SequentProxy selects the next proxy in sequence.
 func (r *Request) SequentProxy() scheme.Proxy {
 	r.Cursor++
 	if r.Cursor >= len(r.ProxyList) {
@@ -99,4 +102,11 @@ func (r *Request) SequentProxy() scheme.Proxy {
 	}
 
 	return r.ProxyList[r.Cursor]
+}
+
+// removeHopHeaders removes hop-by-hop headers from the request.
+func (r *Request) removeHopHeaders(req *http.Request) {
+	for _, h := range r.HopHeaders {
+		req.Header.Del(h)
+	}
 }
