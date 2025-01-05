@@ -22,6 +22,7 @@ const (
 	msgMetricsRequested       = "metrics requested"
 	msgMethodNotAllowed       = "method not allowed"
 	msgFailedToCollectMetrics = "failed to collect metrics"
+	msgFailedToWriteMetrics   = "failed to write metrics"
 )
 
 type Api struct {
@@ -105,7 +106,12 @@ func (a *Api) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(metrics)
+	err = json.NewEncoder(w).Encode(metrics)
+	if err != nil {
+		slog.Error(msgFailedToWriteMetrics, "error", err)
+		http.Error(w, msgFailedToWriteMetrics, http.StatusInternalServerError)
+		return
+	}
 }
 
 func collectMetrics() (*metrics, error) {

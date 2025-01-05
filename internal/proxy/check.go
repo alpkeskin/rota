@@ -22,6 +22,7 @@ const (
 	msgFailedToCreateRequest     = "failed to create request"
 	msgDeadProxy                 = "dead proxy"
 	msgAliveProxy                = "alive proxy"
+	msgFailedToWriteOutputFile   = "failed to write output file"
 )
 
 type ProxyChecker struct {
@@ -92,6 +93,9 @@ func (pl *ProxyChecker) checkProxy(proxy *Proxy, outputFile *os.File) {
 
 	slog.Info(msgAliveProxy, "proxy", proxy.Host)
 	if outputFile != nil {
-		outputFile.WriteString(proxy.Host + "\n")
+		_, err = outputFile.WriteString(proxy.Host + "\n")
+		if err != nil {
+			slog.Error(msgFailedToWriteOutputFile, "error", err)
+		}
 	}
 }

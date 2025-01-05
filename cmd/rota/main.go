@@ -25,6 +25,8 @@ const (
 	msgFailedToLoadProxies    = "failed to load proxies"
 	msgWatchingProxyFile      = "watching proxy file"
 	msgMissingProxyFile       = "missing proxy file"
+	msgFailedToCheckProxies   = "failed to check proxies"
+	msgFailedToServeApi       = "failed to serve api"
 	msgFailedToListen         = "failed to listen"
 	msgReceivedSignal         = "received signal, shutting down..."
 )
@@ -53,7 +55,11 @@ func main() {
 
 	if cfgManager.Check {
 		proxyChecker := proxy.NewProxyChecker(cfg, proxyServer)
-		proxyChecker.Check()
+		err = proxyChecker.Check()
+		if err != nil {
+			slog.Error(msgFailedToCheckProxies, "error", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -106,5 +112,9 @@ func runApi(cfg *config.Config) {
 	}
 
 	api := api.NewApi(cfg)
-	api.Serve()
+	err := api.Serve()
+	if err != nil {
+		slog.Error(msgFailedToServeApi, "error", err)
+		os.Exit(1)
+	}
 }
