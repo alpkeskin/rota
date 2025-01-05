@@ -1,7 +1,9 @@
-<h1 align="center">
-  <img src="static/rota.svg" alt="rota" width="150px">
-  <br>
-</h1>
+<div align="center" style="margin-bottom: 20px;">
+  <img src="static/rota.png" alt="rota" width="150px">
+  <h1 align="center">
+  Rota - Open Source Proxy Rotator
+  </h1>
+</div>
 
 <p align="center">
 <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
@@ -12,29 +14,25 @@
 </p>
 
 <p align="center">
-  <a href="#features">Features</a> •
+  <a href="#key-highlights">Key Highlights</a> •
   <a href="#installation">Installation</a> •
-  <a href="#usage">Usage</a>
+  <a href="#configuration">Configuration</a> •
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#contributing">Contributing</a> •
+  <a href="#what-is-next">What's Next</a>
 </p>
 
-**Rota** is an incredibly fast proxy rotating tool that allows users to manage and rotate proxy IPs with ease. This open-source application is designed to handle high volumes of requests efficiently, providing seamless IP rotation and proxy checking capabilities. By consolidating multiple services, Rota empowers security researchers and developers to maintain anonymity and enhance their data scraping and web access activities with minimal effort.
+**Rota** is a lightning-fast, self-hosted proxy rotation powerhouse that revolutionizes how you manage and rotate proxies. Built with performance at its core, this robust tool handles thousands of requests per second while seamlessly rotating IPs to maintain your anonymity. Whether you're conducting intensive web scraping operations, performing security research, or need reliable proxy management, Rota delivers enterprise-grade proxy rotation capabilities in an open-source package.
 
-
-
-# Features
-
-🌐 Proxy IP Rotator
-- **🚀 IP Rotation**: Rotates your IP address for every specific request.
-- **✅ Proxy Checker**: Check if your proxy IP is still alive.
-- **🌍 Supports All HTTP/S Methods**: All HTTP and HTTPS methods are supported.
-- **🔄 HTTP, SOCKS v4(A) & v5 Protocols**: Compatible with all major proxy protocols.
-
-
-🛠️ Ease of Use
-- **📂 User-Friendly**: Simply run it against your proxy file and choose the desired action.
-- **💻 Cross-Platform**: Works seamlessly on Windows, Linux, Mac, or even Raspberry Pi.
-- **🔗 Easy Integration**: Easily integrates with upstream proxies (e.g., *Burp Suite*) and proxy chains (e.g., *OWASP ZAP*).
-
+# Key Highlights
+- 🚀 Self-hosted solution with complete control over your proxy infrastructure
+- ⚡ Blazing-fast performance optimized for high-throughput operations
+- 🔄 Advanced proxy rotation with intelligent IP management
+- 🌍 Supports HTTP, SOCKS v4(A) & v5 Protocols
+- ✅ Built-in proxy checker to maintain a healthy proxy pool
+- 🌐 Perfect companion for web scraping and data collection projects
+- 🔍 Cross-platform compatibility (Windows, Linux, Mac, Raspberry Pi)
+- 🔗 Easy integration with upstream proxies (e.g., *Burp Suite*) and proxy chains (e.g., *OWASP ZAP*)
 
 # Installation
 
@@ -48,64 +46,96 @@ go install -v github.com/alpkeskin/rota/cmd/rota@latest
 docker pull ghcr.io/alpkeskin/rota:latest
 ```
 
-# Usage
-```sh
-rota -h
-```
-This will display help for the tool. Here are all the flags it supports.
-
-```
-  -auth string
-    	Authentication credentials in the format user:pass
-  -check
-    	Enable check mode
-  -file string
-    	File containing proxy URLs
-  -method string
-    	Method to use (random or sequent) (default "random")
-  -output string
-    	Output file path
-  -port string
-    	Port to use (default "8080")
-  -proxy string
-    	Proxy URL
-  -retries int
-    	Number of retries (default 3)
-  -timeout int
-    	Request timeout in seconds (default 5)
-  -verbose
-    	Enable verbose mode
-```
-
-## Basics
-
-Basic Start:
-```sh
-rota --file proxies.txt
-```
-
-Start with spesific port:
-```sh
-rota --file live.txt --port 4444
-```
-
-Start with Authorization:
-```sh
-rota --file live.txt --auth user:pass
-```
-
-Proxy List Checking:
-```sh
-rota --file proxies.txt --check
-```
-
-Output flag for live proxies (txt)
-```sh
-rota --file proxies.txt --check --output live.txt
-```
-
-### Deep Dive
+### Docker Run
 
 ```sh
-rota --file live.txt --port 1234 --retries 5 --timeout 10 --method sequent --auth user:pass --verbose
+docker run \           
+  --name rota-proxy \
+  -p 8080:8080 \
+  -p 8081:8081 \
+  -v "$(pwd)/config.yml:/etc/rota/config.yml" \
+  -v "$(pwd)/proxies.txt:/etc/rota/proxies.txt" \
+  rota:latest --config /etc/rota/config.yml
 ```
+note: If API is not enabled, dont use `-p 8081:8081`
+
+# Configuration
+
+Example configuration file can be found in [config.yml](config.yml)
+
+* `proxy_file`: Path to the proxy file
+* `file_watch`: Watch for file changes and reload proxies
+* `proxy`: Proxy configurations
+  - `port`: Proxy server port
+  - `authentication`: Authentication configurations
+    - `enabled`: Enable basic authentication
+    - `username`: Username
+    - `password`: Password
+  - `rotation`: Rotation configurations
+    - `method`: Rotation method (random, roundrobin)
+    - `remove_unhealthy`: Remove unhealthy proxies from rotation
+    - `fallback`: Recommended for continuous operation in case of proxy failures
+    - `fallback_max_retries`: Number of retries for fallback. If this is reached, the response will be returned "bad gateway"
+    - `timeout`: Timeout for proxy requests
+    - `retries`: Number of retries to get a healthy proxy
+* `api`: API configurations
+  - `enabled`: Enable API endpoints
+  - `port`: API server port
+* `healthcheck`: Healthcheck configurations
+  - `output`: Output method (file, stdout)
+  - `file`: Path to the healthcheck file
+  - `timeout`: Timeout for healthcheck requests
+  - `workers`: Number of workers to check proxies
+  - `url`: URL to check proxies
+  - `status`: Status code to check proxies
+  - `headers`: Headers to check proxies
+* `logging`: Logging configurations
+  - `stdout`: Log to stdout
+  - `file`: Path to the log file
+  - `level`: Log level (debug, info, warn, error, fatal)
+
+### Proxies file pattern
+
+Proxies file should be in the following format:
+```
+scheme://ip:port
+
+Example:
+socks5://192.111.137.37:18762
+```
+
+# Quick Start
+
+```sh
+rota --config config.yml
+```
+
+Default config file path is `config.yml` so you can use `rota` without any arguments.
+
+### Proxy Checker
+```sh
+rota --config config.yml --check
+```
+
+
+# Contributing
+
+Contributions are welcome! Please feel free to submit a PR. If you have any questions, please feel free to open an issue or contact me on [LinkedIn](https://www.linkedin.com/in/alpkeskin/).
+**Please ensure your pull requests are meaningful and add value to the project. Pull requests that do not contribute significant improvements or fixes will not be accepted.**
+
+# What's Next
+
+- [ ] Dashboard for monitoring and managing proxies
+- [ ] Add more proxy rotation methods (e.g., least_connections)
+- [ ] Add CA certificates for Rota
+- [ ] Performance and memory usage improvements
+- [ ] Add more healthcheck methods (e.g., ping)
+- [ ] Add database support for enterprise usage (Not planned)
+
+
+##
+> Thanks for your interest in Rota. I hope you enjoy using it.
+>
+> [LinkedIn](https://www.linkedin.com/in/alpkeskin)
+> [Twitter](https://x.com/alpkeskindev)
+> [GitHub](https://github.com/alpkeskin)

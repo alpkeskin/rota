@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+      - v1
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.23.4
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run unit tests
+        run: go test -v ./... -coverprofile=coverage.txt -covermode=atomic
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.txt
+          flags: unittests
+          fail_ci_if_error: true
+
+      - name: Run linter
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest 

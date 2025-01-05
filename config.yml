@@ -1,0 +1,36 @@
+proxy_file: "proxies.txt"
+file_watch: true # watch for file changes and reload proxies
+
+proxy:
+  port: 8080 # proxy server port
+  authentication:
+    enabled: false # enable basic authentication
+    username: "admin"
+    password: "admin"
+  rotation:
+    method: "random" # random, roundrobin
+    remove_unhealthy: true # remove unhealthy proxies from rotation
+    fallback: true # recommended for continuous operation in case of proxy failures
+    fallback_max_retries: 10 # number of retries for fallback. if this is reached, the response will be returned "bad gateway"
+    timeout: 30 # seconds
+    retries: 2 # number of retries to get a healthy proxy
+
+api:
+  enabled: true # enable API endpoints
+  port: 8081 # API server port
+
+healthcheck:
+  output:
+    method: "file" # file, stdout
+    file: "healthcheck.txt" # save healthy proxies to this file
+  timeout: 30 # seconds
+  workers: 20 # number of workers to check proxies
+  url: "https://api.ipify.org" # only GET method is supported
+  status: 200
+  headers:
+    - "Content-Type: application/json"
+
+logging:
+  stdout: true
+  file: "rota.log"
+  level: "info"
