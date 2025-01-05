@@ -24,3 +24,6 @@ go.work.sum
 # Other
 .DS_Store
 *.txt
+
+# Logs
+*.log
