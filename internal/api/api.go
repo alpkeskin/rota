@@ -204,7 +204,12 @@ func (a *Api) handleProxies(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(jsonProxies)
+	_, err = w.Write(jsonProxies)
+	if err != nil {
+		slog.Error(msgFailedToWriteProxies, "error", err)
+		http.Error(w, msgFailedToWriteProxies, http.StatusInternalServerError)
+		return
+	}
 }
 
 func collectMetrics() (*metrics, error) {
