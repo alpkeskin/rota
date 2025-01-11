@@ -13,6 +13,14 @@ import (
 	"h12.io/socks"
 )
 
+const (
+	msgFailedToCreateProxy       = "failed to create proxy"
+	msgProxiesLoadedSuccessfully = "proxies loaded successfully"
+	msgLoadingProxies            = "loading proxies"
+	msgFailedToLoadProxies       = "failed to load proxies"
+	msgUnsupportedProxyScheme    = "unsupported proxy scheme"
+)
+
 type ProxyLoader struct {
 	cfg         *config.Config
 	proxyServer *ProxyServer
@@ -32,11 +40,14 @@ func (pl *ProxyLoader) Load() error {
 		return fmt.Errorf("%s: %w", msgFailedToLoadProxies, err)
 	}
 
-	lines := strings.Split(string(data), "\n")
+	content := strings.TrimSpace(string(data))
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	lines := strings.Split(content, "\n")
 	for _, line := range lines {
 		proxy, err := pl.CreateProxy(line)
 		if err != nil {
-			return err
+			slog.Error(msgFailedToCreateProxy, "error", err, "proxy", line)
+			continue
 		}
 
 		pl.proxyServer.AddProxy(proxy)

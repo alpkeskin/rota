@@ -18,6 +18,7 @@
   <a href="#installation">Installation</a> •
   <a href="#configuration">Configuration</a> •
   <a href="#quick-start">Quick Start</a> •
+  <a href="#api">API</a> •
   <a href="#contributing">Contributing</a> •
   <a href="#what-is-next">What's Next</a>
 </p>
@@ -102,6 +103,8 @@ scheme://ip:port
 
 Example:
 socks5://192.111.137.37:18762
+http://192.111.137.37:9911
+https://192.111.137.37:9911
 ```
 
 # Quick Start
@@ -109,13 +112,21 @@ socks5://192.111.137.37:18762
 ```sh
 rota --config config.yml
 ```
-
-Default config file path is `config.yml` so you can use `rota` without any arguments.
+Default config file path is `config.yml`. **So you can use `rota` without any arguments.** That's it! 🎉
 
 ### Proxy Checker
 ```sh
 rota --config config.yml --check
 ```
+
+## API
+
+For now, API is enabled by default. You can disabled it by setting `api.enabled` to `false` in your config file.
+
+Endpoints:
+- `/healthz`: Healthcheck endpoint
+- `/proxies`: Get all proxies
+- `/metrics`: Get metrics
 
 
 # Contributing

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/alpkeskin/rota/internal/config"
+	"github.com/alpkeskin/rota/internal/proxy"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -16,8 +17,8 @@ func TestNewApi(t *testing.T) {
 			Port: 8081,
 		},
 	}
-
-	api := NewApi(cfg)
+	proxyServer := proxy.NewProxyServer(cfg)
+	api := NewApi(cfg, proxyServer)
 	assert.NotNil(t, api)
 	assert.Equal(t, cfg, api.cfg)
 }
@@ -48,7 +49,8 @@ func TestHandleMetrics(t *testing.T) {
 			Port: 8080,
 		},
 	}
-	api := NewApi(cfg)
+	proxyServer := proxy.NewProxyServer(cfg)
+	api := NewApi(cfg, proxyServer)
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,4 +89,38 @@ func TestCollectMetrics(t *testing.T) {
 	assert.GreaterOrEqual(t, metrics.DiskTotal, uint64(0))
 	assert.GreaterOrEqual(t, metrics.GoRoutines, 0)
 	assert.GreaterOrEqual(t, metrics.ThreadCount, 0)
+}
+
+func TestHandleProxies(t *testing.T) {
+	cfg := &config.Config{
+		Api: config.ApiConfig{
+			Port: 8080,
+		},
+	}
+	proxyServer := proxy.NewProxyServer(cfg)
+	api := NewApi(cfg, proxyServer)
+
+	req := httptest.NewRequest(http.MethodGet, "/proxies", nil)
+	w := httptest.NewRecorder()
+
+	api.handleProxies(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestHandleHealthcheck(t *testing.T) {
+	cfg := &config.Config{
+		Api: config.ApiConfig{
+			Port: 8080,
+		},
+	}
+	proxyServer := proxy.NewProxyServer(cfg)
+	api := NewApi(cfg, proxyServer)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+
+	api.handleHealthcheck(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
 }
