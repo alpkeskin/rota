@@ -67,7 +67,7 @@ func main() {
 	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
 
 	go runFileWatcher(cfg, proxyLoader, done)
-	go runApi(cfg)
+	go runApi(cfg, proxyServer)
 	go proxyServer.Listen()
 
 	<-done
@@ -106,12 +106,12 @@ func runFileWatcher(cfg *config.Config, proxyLoader *proxy.ProxyLoader, done cha
 	}
 }
 
-func runApi(cfg *config.Config) {
+func runApi(cfg *config.Config, proxyServer *proxy.ProxyServer) {
 	if !cfg.Api.Enabled {
 		return
 	}
 
-	api := api.NewApi(cfg)
+	api := api.NewApi(cfg, proxyServer)
 	err := api.Serve()
 	if err != nil {
 		slog.Error(msgFailedToServeApi, "error", err)
