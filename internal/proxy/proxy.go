@@ -95,6 +95,7 @@ func (ps *ProxyServer) getProxy() *Proxy {
 }
 
 func (ps *ProxyServer) Listen() {
+	ps.goProxy.CertStore = NewCertStorage()
 	ps.setUpHandlers()
 	time.Sleep(500 * time.Millisecond)
 
