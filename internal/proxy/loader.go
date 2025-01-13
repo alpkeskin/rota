@@ -44,6 +44,10 @@ func (pl *ProxyLoader) Load() error {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
 	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 		proxy, err := pl.CreateProxy(line)
 		if err != nil {
 			slog.Error(msgFailedToCreateProxy, "error", err, "proxy", line)
