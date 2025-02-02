@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"testing"
 
 	"github.com/alpkeskin/rota/internal/config"
@@ -23,26 +22,23 @@ func TestNewProxyServer(t *testing.T) {
 	assert.NotNil(t, ps)
 	assert.NotNil(t, ps.goProxy)
 	assert.Empty(t, ps.Proxies)
+	assert.Empty(t, ps.ProxyHistory)
 	assert.Equal(t, cfg, ps.cfg)
+	assert.Equal(t, 0, len(ps.Proxies))
+	assert.Equal(t, 0, len(ps.ProxyHistory))
 }
 
 func TestAddProxy(t *testing.T) {
 	ps := NewProxyServer(&config.Config{})
-
-	testProxy := &Proxy{
+	proxy := &Proxy{
+		Host:   "test.proxy:8080",
 		Scheme: "http",
-		Host:   "example.com",
-		Url: &url.URL{
-			Scheme: "http",
-			Host:   "example.com",
-		},
-		Transport: &http.Transport{},
 	}
 
-	ps.AddProxy(testProxy)
+	ps.AddProxy(proxy)
 
-	assert.Len(t, ps.Proxies, 1)
-	assert.Equal(t, testProxy, ps.Proxies[0])
+	assert.Equal(t, 1, len(ps.Proxies))
+	assert.Equal(t, proxy, ps.Proxies[0])
 }
 
 func TestSetUpHandlers(t *testing.T) {
@@ -132,21 +128,6 @@ func TestRemoveUnhealthyProxy(t *testing.T) {
 	assert.Equal(t, proxy3, ps.Proxies[1])
 }
 
-func TestRemoveHopHeaders(t *testing.T) {
-	ps := NewProxyServer(&config.Config{})
-	req, _ := http.NewRequest("GET", "http://example.com", nil)
-
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Proxy-Authorization", "test-auth")
-	req.Header.Set("Transfer-Encoding", "chunked")
-
-	ps.removeHopHeaders(req)
-
-	assert.Empty(t, req.Header.Get("Connection"))
-	assert.Empty(t, req.Header.Get("Proxy-Authorization"))
-	assert.Empty(t, req.Header.Get("Transfer-Encoding"))
-}
-
 func TestUnauthorizedResponse(t *testing.T) {
 	ps := NewProxyServer(&config.Config{})
 	req, _ := http.NewRequest("GET", "http://example.com", nil)
@@ -175,4 +156,25 @@ func TestBadGatewayResponse(t *testing.T) {
 
 	assert.Equal(t, StatusBadGateway, resp.StatusCode)
 	assert.Equal(t, "Bad Gateway", resp.Status)
+}
+
+func TestProxyRotation(t *testing.T) {
+	ps := NewProxyServer(&config.Config{
+		Proxy: config.ProxyConfig{
+			Rotation: config.ProxyRotationConfig{
+				Method: "least_conn",
+			},
+		},
+	})
+
+	proxy1 := &Proxy{Host: "proxy1", UsageCount: 5}
+	proxy2 := &Proxy{Host: "proxy2", UsageCount: 3}
+	proxy3 := &Proxy{Host: "proxy3", UsageCount: 3}
+
+	ps.AddProxy(proxy1)
+	ps.AddProxy(proxy2)
+	ps.AddProxy(proxy3)
+
+	selectedProxy := ps.getProxy()
+	assert.Contains(t, []*Proxy{proxy2, proxy3}, selectedProxy)
 }

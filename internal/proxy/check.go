@@ -12,15 +12,6 @@ import (
 	"github.com/gammazero/workerpool"
 )
 
-const (
-	msgCheckingProxies          = "checking proxies"
-	msgFailedToCreateOutputFile = "failed to create output file"
-	msgFailedToCreateRequest    = "failed to create request"
-	msgDeadProxy                = "dead proxy"
-	msgAliveProxy               = "alive proxy"
-	msgFailedToWriteOutputFile  = "failed to write output file"
-)
-
 type ProxyChecker struct {
 	cfg         *config.Config
 	proxyServer *ProxyServer

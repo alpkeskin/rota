@@ -1,3 +1,5 @@
+version: 2
+
 builds:
   - binary: rota
     main: cmd/rota/main.go

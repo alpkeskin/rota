@@ -28,9 +28,11 @@
 # Key Highlights
 - 🚀 Self-hosted solution with complete control over your proxy infrastructure
 - ⚡ Blazing-fast performance optimized for high-throughput operations
-- 🔄 Advanced proxy rotation with intelligent IP management
+- 🔄 Advanced proxy rotation with intelligent IP management (random, roundrobin least_conn, time_based)
+- 🤖 Automatic proxy pool management (real-time file monitoring and automatic removal of unhealthy proxies)
 - 🌍 Supports HTTP, SOCKS v4(A) & v5 Protocols
 - ✅ Built-in proxy checker to maintain a healthy proxy pool
+- 🔒 Rate limiting to prevent abuse
 - 🌐 Perfect companion for web scraping and data collection projects
 - 🔍 Cross-platform compatibility (Windows, Linux, Mac, Raspberry Pi)
 - 🔗 Easy integration with upstream proxies (e.g., *Burp Suite*) and proxy chains (e.g., *OWASP ZAP*)
@@ -73,12 +75,18 @@ Example configuration file can be found in [config.yml](config.yml)
     - `username`: Username
     - `password`: Password
   - `rotation`: Rotation configurations
-    - `method`: Rotation method (random, roundrobin)
+    - `method`: Rotation method (random, roundrobin, least_conn, time_based)
+    - `time_based`: Time-based rotation configurations (only if method is time_based)
+      - `interval`: Interval in seconds
     - `remove_unhealthy`: Remove unhealthy proxies from rotation
     - `fallback`: Recommended for continuous operation in case of proxy failures
     - `fallback_max_retries`: Number of retries for fallback. If this is reached, the response will be returned "bad gateway"
     - `timeout`: Timeout for proxy requests
     - `retries`: Number of retries to get a healthy proxy
+  - `rate_limit`: Rate limiting configurations
+    - `enabled`: Enable rate limiting
+    - `interval`: Interval in seconds
+    - `max_requests`: Maximum number of requests per interval
 * `api`: API configurations
   - `enabled`: Enable API endpoints
   - `port`: API server port
@@ -101,7 +109,7 @@ Proxies file should be in the following format:
 ```
 scheme://ip:port
 
-Example:
+Examples:
 socks5://192.111.137.37:18762
 http://192.111.137.37:9911
 https://192.111.137.37:9911
@@ -124,24 +132,15 @@ rota --config config.yml --check
 For now, API is enabled by default. You can disabled it by setting `api.enabled` to `false` in your config file.
 
 Endpoints:
-- `/healthz`: Healthcheck endpoint
-- `/proxies`: Get all proxies
-- `/metrics`: Get metrics
-
+- `/healthz`: Health check endpoint to monitor the service status
+- `/proxies`: Returns a list of all currently available proxies in the pool, including their status and performance metrics
+- `/metrics`: Provides detailed system metrics
+- `/history`: Shows a chronological log of proxy rotations, requests, and any errors encountered during operation
 
 # Contributing
 
 Contributions are welcome! Please feel free to submit a PR. If you have any questions, please feel free to open an issue or contact me on [LinkedIn](https://www.linkedin.com/in/alpkeskin/).
 **Please ensure your pull requests are meaningful and add value to the project. Pull requests that do not contribute significant improvements or fixes will not be accepted.**
-
-# What's Next
-
-- [ ] Dashboard for monitoring and managing proxies
-- [ ] Add more proxy rotation methods (e.g., least_connections)
-- [ ] Add CA certificates for Rota
-- [ ] Performance and memory usage improvements
-- [ ] Add more healthcheck methods (e.g., ping)
-- [ ] Add database support for enterprise usage (Not planned)
 
 
 ##

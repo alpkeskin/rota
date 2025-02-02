@@ -8,12 +8,18 @@ proxy:
     username: "admin"
     password: "admin"
   rotation:
-    method: "random" # random, roundrobin
+    method: "random" # random, roundrobin, least_conn, time_based
+    time_based:
+      interval: 120 # seconds
     remove_unhealthy: true # remove unhealthy proxies from rotation
     fallback: true # recommended for continuous operation in case of proxy failures
     fallback_max_retries: 10 # number of retries for fallback. if this is reached, the response will be returned "bad gateway"
     timeout: 30 # seconds
     retries: 2 # number of retries to get a healthy proxy
+  rate_limit:
+    enabled: false # enable rate limiting
+    interval: 1 # seconds
+    max_requests: 100 # maximum number of requests per interval
 
 api:
   enabled: true # enable API endpoints

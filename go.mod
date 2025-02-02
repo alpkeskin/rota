@@ -9,8 +9,10 @@ require (
 	github.com/goccy/go-yaml v1.15.13
 	github.com/google/uuid v1.6.0
 	github.com/shirou/gopsutil/v3 v3.24.5
+	github.com/spf13/pflag v1.0.6
 	github.com/stretchr/testify v1.10.0
 	golang.org/x/exp v0.0.0-20241217172543-b2144cdd0a67
+	golang.org/x/time v0.9.0
 	h12.io/socks v1.0.3
 )
 
