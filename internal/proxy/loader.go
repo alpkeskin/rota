@@ -13,14 +13,6 @@ import (
 	"h12.io/socks"
 )
 
-const (
-	msgFailedToCreateProxy       = "failed to create proxy"
-	msgProxiesLoadedSuccessfully = "proxies loaded successfully"
-	msgLoadingProxies            = "loading proxies"
-	msgFailedToLoadProxies       = "failed to load proxies"
-	msgUnsupportedProxyScheme    = "unsupported proxy scheme"
-)
-
 type ProxyLoader struct {
 	cfg         *config.Config
 	proxyServer *ProxyServer

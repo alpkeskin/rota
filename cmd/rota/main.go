@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,10 +11,12 @@ import (
 	"github.com/alpkeskin/rota/internal/config"
 	"github.com/alpkeskin/rota/internal/logging"
 	"github.com/alpkeskin/rota/internal/proxy"
-	"github.com/alpkeskin/rota/pkg/watcher"
+	"github.com/alpkeskin/rota/internal/watcher"
+	"github.com/spf13/pflag"
 )
 
 const (
+	msgVersion                = "rota proxy v1.2.0"
 	msgConfigPathRequired     = "config file path is required"
 	msgFailedToLoadConfig     = "failed to load config"
 	msgConfigLoadedSuccess    = "config loaded successfully"
@@ -35,6 +36,11 @@ func main() {
 	cfgManager, err := setupConfig()
 	if err != nil {
 		panic(err)
+	}
+
+	if cfgManager.Version {
+		fmt.Println(msgVersion)
+		os.Exit(0)
 	}
 
 	logger, err := logging.NewLogger(cfgManager.Config)
@@ -75,16 +81,29 @@ func main() {
 }
 
 func setupConfig() (*config.ConfigManager, error) {
-	configPath := flag.String("config", "config.yml", "config file path")
-	check := flag.Bool("check", false, "check proxies")
-	flag.Parse()
+	var (
+		configPath string
+		check      bool
+		version    bool
+	)
 
-	configManager, err := config.NewConfigManager(*configPath)
+	pflag.StringVarP(&configPath, "config", "c", "config.yml", "Path to configuration file")
+	pflag.BoolVarP(&check, "check", "t", false, "Test if proxy servers are operational")
+	pflag.BoolVarP(&version, "version", "v", false, "Display Rota proxy version number")
+	pflag.Usage = func() {
+		fmt.Println("Usage: rota [options]")
+		pflag.PrintDefaults()
+		os.Exit(0)
+	}
+	pflag.Parse()
+
+	configManager, err := config.NewConfigManager(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", msgFailedToLoadConfig, err)
 	}
 
-	configManager.Check = *check
+	configManager.Check = check
+	configManager.Version = version
 	return configManager, nil
 }
 

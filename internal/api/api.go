@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	"sort"
 	"time"
 
 	"github.com/alpkeskin/rota/internal/config"
@@ -15,55 +16,10 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
-const (
-	msgApiServerStarted         = "API server started"
-	msgCertRequested            = "cert requested"
-	msgFailedToCreateCert       = "failed to create cert"
-	msgFailedToWriteCert        = "failed to write cert"
-	msgMethodNotAllowed         = "method not allowed"
-	msgFailedToCollectMetrics   = "failed to collect metrics"
-	msgFailedToWriteMetrics     = "failed to write metrics"
-	msgFailedToWriteHealthcheck = "failed to write healthcheck"
-	msgFailedToReadProxies      = "failed to read proxies"
-	msgFailedToWriteProxies     = "failed to write proxies"
-	msgHealthcheckRequested     = "healthcheck requested"
-	msgProxiesRequested         = "proxies requested"
-	msgMetricsRequested         = "metrics requested"
-)
-
 type Api struct {
 	cfg         *config.Config
 	proxyServer *proxy.ProxyServer
 	startTime   time.Time
-}
-
-type responseWriter struct {
-	http.ResponseWriter
-	statusCode int
-}
-
-type metrics struct {
-	Timestamp string  `json:"timestamp"`
-	Status    string  `json:"status"`
-	Uptime    float64 `json:"uptime"`
-
-	// Memory metrics
-	TotalMemory uint64  `json:"total_memory_mb"`
-	UsedMemory  uint64  `json:"used_memory_mb"`
-	MemoryUsage float64 `json:"memory_usage_percent"`
-
-	// CPU metrics
-	CPUUsage float64 `json:"cpu_usage_percent"`
-
-	// Disk metrics
-	DiskTotal uint64  `json:"disk_total_gb"`
-	DiskUsed  uint64  `json:"disk_used_gb"`
-	DiskUsage float64 `json:"disk_usage_percent"`
-
-	// Go runtime metrics
-	GoRoutines  int    `json:"goroutines"`
-	ThreadCount int    `json:"threads"`
-	GCPauses    uint32 `json:"gc_pauses"`
 }
 
 func NewApi(cfg *config.Config, proxyServer *proxy.ProxyServer) *Api {
@@ -75,6 +31,7 @@ func (a *Api) Serve() error {
 	mux.HandleFunc("/metrics", a.handleMetrics)
 	mux.HandleFunc("/healthz", a.handleHealthcheck)
 	mux.HandleFunc("/proxies", a.handleProxies)
+	mux.HandleFunc("/history", a.handleHistory)
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", a.cfg.Api.Port),
 		Handler: mux,
@@ -83,11 +40,6 @@ func (a *Api) Serve() error {
 	slog.Info(msgApiServerStarted, "port", a.cfg.Api.Port)
 
 	return server.ListenAndServe()
-}
-
-func (rw *responseWriter) WriteHeader(code int) {
-	rw.statusCode = code
-	rw.ResponseWriter.WriteHeader(code)
 }
 
 func (a *Api) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -183,16 +135,16 @@ func (a *Api) handleProxies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type proxyResponse struct {
-		Scheme string `json:"scheme"`
-		Host   string `json:"host"`
-	}
-
 	responses := make([]proxyResponse, len(a.proxyServer.Proxies))
 	for i, p := range a.proxyServer.Proxies {
 		responses[i] = proxyResponse{
-			Scheme: p.Scheme,
-			Host:   p.Host,
+			Scheme:              p.Scheme,
+			Host:                p.Host,
+			LatestUsageStatus:   p.LatestUsageStatus,
+			LatestUsageAt:       p.LatestUsageAt,
+			LatestUsageDuration: p.LatestUsageDuration,
+			AvgUsageDuration:    p.AvgUsageDuration,
+			UsageCount:          p.UsageCount,
 		}
 	}
 
@@ -208,6 +160,40 @@ func (a *Api) handleProxies(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error(msgFailedToWriteProxies, "error", err)
 		http.Error(w, msgFailedToWriteProxies, http.StatusInternalServerError)
+		return
+	}
+}
+
+func (a *Api) handleHistory(w http.ResponseWriter, r *http.Request) {
+	rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+	w = rw
+
+	defer func() {
+		slog.Info(msgHistoryRequested,
+			"status", rw.statusCode,
+			"method", r.Method,
+			"url", r.URL.String(),
+			"ip", r.RemoteAddr,
+		)
+	}()
+
+	history := a.proxyServer.ProxyHistory
+	sort.Slice(history, func(i, j int) bool {
+		return history[i].UsedAt > history[j].UsedAt
+	})
+
+	jsonHistory, err := json.Marshal(history)
+	if err != nil {
+		slog.Error(msgFailedToWriteHistory, "error", err)
+		http.Error(w, msgFailedToWriteHistory, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, err = w.Write(jsonHistory)
+	if err != nil {
+		slog.Error(msgFailedToWriteHistory, "error", err)
+		http.Error(w, msgFailedToWriteHistory, http.StatusInternalServerError)
 		return
 	}
 }

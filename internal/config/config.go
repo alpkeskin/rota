@@ -7,9 +7,10 @@ import (
 )
 
 type ConfigManager struct {
-	Config *Config
-	Check  bool
-	path   string
+	Config  *Config
+	Check   bool
+	Version bool
+	path    string
 }
 
 func NewConfigManager(path string) (*ConfigManager, error) {

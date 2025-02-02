@@ -13,6 +13,7 @@ type ProxyConfig struct {
 	Port           int                       `yaml:"port"`
 	Authentication ProxyAuthenticationConfig `yaml:"authentication"`
 	Rotation       ProxyRotationConfig       `yaml:"rotation"`
+	RateLimit      RateLimitConfig           `yaml:"rate_limit"`
 }
 
 type ProxyAuthenticationConfig struct {
@@ -22,12 +23,23 @@ type ProxyAuthenticationConfig struct {
 }
 
 type ProxyRotationConfig struct {
-	Method             string `yaml:"method"`
-	RemoveUnhealthy    bool   `yaml:"remove_unhealthy"`
-	Fallback           bool   `yaml:"fallback"`
-	FallbackMaxRetries int    `yaml:"fallback_max_retries"`
-	Timeout            int    `yaml:"timeout"`
-	Retries            int    `yaml:"retries"`
+	Method             string          `yaml:"method"`
+	TimeBased          TimeBasedConfig `yaml:"time_based"`
+	RemoveUnhealthy    bool            `yaml:"remove_unhealthy"`
+	Fallback           bool            `yaml:"fallback"`
+	FallbackMaxRetries int             `yaml:"fallback_max_retries"`
+	Timeout            int             `yaml:"timeout"`
+	Retries            int             `yaml:"retries"`
+}
+
+type RateLimitConfig struct {
+	Enabled     bool `yaml:"enabled"`
+	Interval    int  `yaml:"interval"`
+	MaxRequests int  `yaml:"max_requests"`
+}
+
+type TimeBasedConfig struct {
+	Interval int `yaml:"interval"`
 }
 
 type ApiConfig struct {
