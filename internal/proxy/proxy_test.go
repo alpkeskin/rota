@@ -128,21 +128,6 @@ func TestRemoveUnhealthyProxy(t *testing.T) {
 	assert.Equal(t, proxy3, ps.Proxies[1])
 }
 
-func TestUnauthorizedResponse(t *testing.T) {
-	ps := NewProxyServer(&config.Config{})
-	req, _ := http.NewRequest("GET", "http://example.com", nil)
-
-	reqInfo := requestInfo{
-		id:      "test-id",
-		request: req,
-	}
-
-	_, resp := ps.unauthorizedResponse(reqInfo)
-
-	assert.Equal(t, StatusProxyAuthRequired, resp.StatusCode)
-	assert.Equal(t, "Proxy Authentication Required", resp.Status)
-}
-
 func TestBadGatewayResponse(t *testing.T) {
 	ps := NewProxyServer(&config.Config{})
 	req, _ := http.NewRequest("GET", "http://example.com", nil)

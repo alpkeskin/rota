@@ -11,6 +11,10 @@ import (
 )
 
 func (ps *ProxyServer) getProxy() *Proxy {
+	if len(ps.Proxies) == 0 {
+		return nil
+	}
+
 	method := ps.cfg.Proxy.Rotation.Method
 	switch method {
 	case "random":
@@ -76,13 +80,25 @@ func (ps *ProxyServer) tryProxy(proxy *Proxy, reqInfo requestInfo) (*http.Respon
 		client := &http.Client{
 			Transport: proxy.Transport,
 			Timeout:   time.Duration(ps.cfg.Proxy.Rotation.Timeout) * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return errors.New(msgStoppedAfter10Redirects)
+				}
+				return nil
+			},
 		}
 		defer client.CloseIdleConnections()
 
 		ps.removeHopHeaders(reqInfo.request)
 		reqInfo.request.RequestURI = ""
+
+		if reqInfo.request.URL != nil {
+			reqInfo.request.Host = reqInfo.request.URL.Host
+		}
+
 		response, err := client.Do(reqInfo.request)
 		duration := time.Since(reqInfo.startAt)
+
 		if err == nil && response != nil {
 			go ps.updateProxyUsage(proxy, reqInfo, duration, "success")
 			slog.Info(msgReqRotationSuccess,
@@ -93,6 +109,7 @@ func (ps *ProxyServer) tryProxy(proxy *Proxy, reqInfo requestInfo) (*http.Respon
 			)
 			return response, nil
 		}
+
 		go ps.updateProxyUsage(proxy, reqInfo, duration, "failed")
 		slog.Error(msgReqRotationError,
 			"error", err,

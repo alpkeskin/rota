@@ -1,13 +1,16 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/alpkeskin/rota/internal/config"
 	"h12.io/socks"
@@ -64,28 +67,57 @@ func (pl *ProxyLoader) CreateProxy(proxyURL string) (*Proxy, error) {
 		return nil, err
 	}
 
-	p := Proxy{
-		Scheme: parsedUrl.Scheme,
-		Host:   proxyURL,
-		Url:    parsedUrl,
+	var username, password string
+	if parsedUrl.User != nil {
+		username = parsedUrl.User.Username()
+		password, _ = parsedUrl.User.Password()
 	}
 
-	tr := &http.Transport{}
+	p := Proxy{
+		Scheme:   parsedUrl.Scheme,
+		Host:     proxyURL,
+		Url:      parsedUrl,
+		Username: username,
+		Password: password,
+	}
+
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS12,
+		MaxVersion:         tls.VersionTLS13,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+		},
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig:     tlsConfig,
+		DisableKeepAlives:   true,
+		MaxIdleConns:        100,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+
 	switch p.Scheme {
 	case "socks4", "socks4a", "socks5":
-		tr = &http.Transport{
-			Dial: socks.Dial(p.Host),
+		proxyAddrURL := &url.URL{
+			Host:   parsedUrl.Host,
+			Scheme: parsedUrl.Scheme,
+			User:   url.UserPassword(username, password),
+		}
+		dialSocks := socks.Dial(proxyAddrURL.String())
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialSocks(network, addr)
 		}
 	case "http", "https":
-		tr = &http.Transport{
-			Proxy: http.ProxyURL(p.Url),
-		}
+		tr.Proxy = http.ProxyURL(p.Url)
 	default:
 		return nil, fmt.Errorf("%s. URL: %s", msgUnsupportedProxyScheme, proxyURL)
 	}
-
-	tr.DisableKeepAlives = true
-	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
 	p.Transport = tr
 	return &p, nil

@@ -107,12 +107,15 @@ Example configuration file can be found in [config.yml](config.yml)
 
 Proxies file should be in the following format:
 ```
-scheme://ip:port
+scheme://ip:port or scheme://username:password@ip:port
 
 Examples:
 socks5://192.111.137.37:18762
 http://192.111.137.37:9911
 https://192.111.137.37:9911
+socks5://admin:admin@192.111.137.37:18762
+http://admin:admin@192.111.137.37:8080
+https://admin:admin@192.111.137.37:8081
 ```
 
 # Quick Start

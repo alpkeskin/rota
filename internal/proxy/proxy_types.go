@@ -13,6 +13,8 @@ type Proxy struct {
 	Host                string
 	Url                 *url.URL
 	Transport           *http.Transport
+	Username            string
+	Password            string
 	LatestUsageStatus   string
 	LatestUsageAt       string
 	LatestUsageDuration string
@@ -65,6 +67,7 @@ const (
 	msgDeadProxy                 = "dead proxy"
 	msgAliveProxy                = "alive proxy"
 	msgFailedToWriteOutputFile   = "failed to write output file"
+	msgStoppedAfter10Redirects   = "stopped after 10 redirects"
 )
 
 var hopHeaders = []string{
