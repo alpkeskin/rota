@@ -20,7 +20,9 @@ func (ps *ProxyServer) handleRequest(r *http.Request, ctx *goproxy.ProxyCtx) (*h
 
 	if r.URL.Scheme == "http" && ps.cfg.Proxy.Authentication.Enabled {
 		if err := ps.authenticateHttp(ctx, reqInfo); err != nil {
-			return ps.unauthorizedResponse(reqInfo)
+			return nil, goproxy.NewResponse(reqInfo.request,
+				goproxy.ContentTypeText, StatusProxyAuthRequired,
+				fmt.Sprintf(msgUnauthorized, reqInfo.id))
 		}
 	}
 
@@ -59,12 +61,6 @@ func (ps *ProxyServer) authenticateHttps(host string, ctx *goproxy.ProxyCtx) (*g
 		return goproxy.RejectConnect, host
 	}
 	return goproxy.MitmConnect, host
-}
-
-func (ps *ProxyServer) unauthorizedResponse(reqInfo requestInfo) (*http.Request, *http.Response) {
-	return nil, goproxy.NewResponse(reqInfo.request,
-		goproxy.ContentTypeText, StatusProxyAuthRequired,
-		fmt.Sprintf(msgUnauthorized, reqInfo.id))
 }
 
 func (ps *ProxyServer) badGatewayResponse(reqInfo requestInfo, err error) (*http.Request, *http.Response) {

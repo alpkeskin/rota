@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	msgVersion                = "rota proxy v1.2.0"
+	msgVersion                = "rota proxy v1.2.1"
 	msgConfigPathRequired     = "config file path is required"
 	msgFailedToLoadConfig     = "failed to load config"
 	msgConfigLoadedSuccess    = "config loaded successfully"
