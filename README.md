@@ -69,6 +69,7 @@ Example configuration file can be found in [config.yml](config.yml)
 * `proxy_file`: Path to the proxy file
 * `file_watch`: Watch for file changes and reload proxies
 * `proxy`: Proxy configurations
+  - `host`: Proxy server host, leaving it empty will bind to all network interfaces
   - `port`: Proxy server port
   - `authentication`: Authentication configurations
     - `enabled`: Enable basic authentication
@@ -81,6 +82,7 @@ Example configuration file can be found in [config.yml](config.yml)
     - `remove_unhealthy`: Remove unhealthy proxies from rotation
     - `fallback`: Recommended for continuous operation in case of proxy failures
     - `fallback_max_retries`: Number of retries for fallback. If this is reached, the response will be returned "bad gateway"
+    - `follow_redirect`: Follow HTTP redirection
     - `timeout`: Timeout for proxy requests
     - `retries`: Number of retries to get a healthy proxy
   - `rate_limit`: Rate limiting configurations
