@@ -81,12 +81,24 @@ func (ps *ProxyServer) tryProxy(proxy *Proxy, reqInfo requestInfo) (*http.Respon
 			Transport: proxy.Transport,
 			Timeout:   time.Duration(ps.cfg.Proxy.Rotation.Timeout) * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 10 {
-					return errors.New(msgStoppedAfter10Redirects)
+				if ps.cfg.Proxy.Rotation.FollowRedirect {
+					if len(via) >= 10 {
+						return errors.New(msgStoppedAfter10Redirects)
+					}
+					
+					return nil
+				} else {
+					slog.Info(msgSkippedFollowingRedirect,
+						"request_id", reqInfo.id,
+						"proxy", proxy.Host,
+						"url", reqInfo.url,
+						"redirect_url", fmt.Sprintf("%s", req.URL.String()),
+					)
+					return http.ErrUseLastResponse
 				}
-				return nil
 			},
 		}
+
 		defer client.CloseIdleConnections()
 
 		ps.removeHopHeaders(reqInfo.request)

@@ -68,6 +68,7 @@ const (
 	msgAliveProxy                = "alive proxy"
 	msgFailedToWriteOutputFile   = "failed to write output file"
 	msgStoppedAfter10Redirects   = "stopped after 10 redirects"
+	msgSkippedFollowingRedirect   = "skipped following redirect"
 )
 
 var hopHeaders = []string{

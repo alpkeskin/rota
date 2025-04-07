@@ -40,9 +40,12 @@ func (ps *ProxyServer) Listen() {
 	ps.setUpHandlers()
 	time.Sleep(500 * time.Millisecond)
 
-	port := fmt.Sprintf(":%d", ps.cfg.Proxy.Port)
-	slog.Info(msgProxyServerStarted, "port", port)
-	err := http.ListenAndServe(port, ps.goProxy)
+	host := ps.cfg.Proxy.Host
+	port := ps.cfg.Proxy.Port
+	address := fmt.Sprintf("%s:%d", host, port)
+
+	slog.Info(msgProxyServerStarted, "address", address)
+	err := http.ListenAndServe(address, ps.goProxy)
 	if err != nil {
 		slog.Error(msgFailedToListen, "error", err)
 		return

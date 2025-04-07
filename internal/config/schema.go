@@ -10,6 +10,7 @@ type Config struct {
 }
 
 type ProxyConfig struct {
+	Host           string                    `yaml:"host"`
 	Port           int                       `yaml:"port"`
 	Authentication ProxyAuthenticationConfig `yaml:"authentication"`
 	Rotation       ProxyRotationConfig       `yaml:"rotation"`
@@ -30,6 +31,7 @@ type ProxyRotationConfig struct {
 	FallbackMaxRetries int             `yaml:"fallback_max_retries"`
 	Timeout            int             `yaml:"timeout"`
 	Retries            int             `yaml:"retries"`
+	FollowRedirect     bool            `yaml:"follow_redirect"`
 }
 
 type RateLimitConfig struct {
