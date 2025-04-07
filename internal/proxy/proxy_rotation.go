@@ -85,14 +85,14 @@ func (ps *ProxyServer) tryProxy(proxy *Proxy, reqInfo requestInfo) (*http.Respon
 					if len(via) >= 10 {
 						return errors.New(msgStoppedAfter10Redirects)
 					}
-					
+
 					return nil
 				} else {
 					slog.Info(msgSkippedFollowingRedirect,
 						"request_id", reqInfo.id,
 						"proxy", proxy.Host,
 						"url", reqInfo.url,
-						"redirect_url", fmt.Sprintf("%s", req.URL.String()),
+						"redirect_url", req.URL.String(),
 					)
 					return http.ErrUseLastResponse
 				}
