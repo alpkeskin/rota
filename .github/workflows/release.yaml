@@ -1,55 +1,146 @@
 name: Release & Publish
+
 on:
-  create:
+  push:
     tags:
-      - v*
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., v1.0.0)"
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  release:
-    name: "Release binary"
+  build-and-push:
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
     steps:
-      - name: "Check out code"
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: "Set up Go"
-        uses: actions/setup-go@v4
-        with:
-          go-version: 1.23.4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: "Create release on GitHub"
-        uses: goreleaser/goreleaser-action@v4.4.0
-        env:
-          GITHUB_TOKEN: "${{ secrets.G_TOKEN }}"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
         with:
-          args: "release --clean"
-          version: latest
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
 
-  publish:
-    name: "Publish to GHCR"
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=Rota Core
+            org.opencontainers.image.description=Rota proxy rotation service
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./core
+          file: ./core/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  create-release:
+    name: Create GitHub Release
     runs-on: ubuntu-latest
+    needs: build-and-push
+    permissions:
+      contents: write
+
     steps:
-      - name: "Check out code"
-        uses: actions/checkout@v3
-
-      - name: "Login to GitHub Container Registry"
-        uses: docker/login-action@v2.2.0
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.G_TOKEN }}
+          fetch-depth: 0
 
-      - name: "Build Docker Images"
-        uses: docker/build-push-action@v4.1.1
-        with:
-          push: false
-          build-args: "VERSION=${{ github.ref_name }}"
-          tags: "${{ github.repository }}:latest,${{ github.repository }}:${{ github.ref_name }}"
-
-      - name: "Re-tagging & Push Images"
+      - name: Generate changelog
+        id: changelog
         run: |
-          docker tag ${{ github.repository }}:latest ghcr.io/${{ github.repository }}:latest
-          docker tag ${{ github.repository }}:${{ github.ref_name }} ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-          docker push ghcr.io/${{ github.repository }} -a
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+
+          # Generate changelog
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" $CURRENT_TAG)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..$CURRENT_TAG)
+          fi
+
+          # Write to file to handle multiline
+          echo "$CHANGELOG" > changelog.txt
+
+          # Set output
+          echo "current_tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
+          echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.changelog.outputs.current_tag }}
+          name: Release ${{ steps.changelog.outputs.current_tag }}
+          body_path: changelog.txt
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.changelog.outputs.current_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull Commands" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.changelog.outputs.current_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

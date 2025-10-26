@@ -1,0 +1,42 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test files
+*.test
+*.out
+coverage.txt
+
+# Dependencies
+vendor/
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+!README.md
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Misc
+Makefile

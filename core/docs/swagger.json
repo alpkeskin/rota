@@ -1,0 +1,1546 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "A high-performance proxy rotation server with health monitoring and intelligent routing\nProvides comprehensive API for managing proxy servers, monitoring their health,\nand configuring rotation strategies.",
+        "title": "Rota Proxy API",
+        "contact": {
+            "name": "API Support",
+            "url": "https://github.com/alpkeskin/rota"
+        },
+        "license": {
+            "name": "LICENSE",
+            "url": "https://github.com/alpkeskin/rota/blob/main/LICENSE"
+        },
+        "version": "1.0.0"
+    },
+    "host": "localhost:8001",
+    "basePath": "/api/v1",
+    "paths": {
+        "/auth/login": {
+            "post": {
+                "description": "Authenticate user and receive JWT token",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "User login",
+                "parameters": [
+                    {
+                        "description": "Login credentials",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.LoginRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Login successful",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.LoginResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Invalid credentials",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/dashboard/charts/response-time": {
+            "get": {
+                "description": "Get response time chart data for visualization",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "dashboard"
+                ],
+                "summary": "Response time chart",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "default": "4h",
+                        "description": "Time interval (e.g., 4h, 24h)",
+                        "name": "interval",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Chart data",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ResponseTimeChartData"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/dashboard/charts/success-rate": {
+            "get": {
+                "description": "Get success rate chart data for visualization",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "dashboard"
+                ],
+                "summary": "Success rate chart",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "default": "4h",
+                        "description": "Time interval (e.g., 4h, 24h)",
+                        "name": "interval",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Chart data",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.SuccessRateChartData"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/dashboard/stats": {
+            "get": {
+                "description": "Get dashboard statistics including proxy and request metrics",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "dashboard"
+                ],
+                "summary": "Dashboard statistics",
+                "responses": {
+                    "200": {
+                        "description": "Dashboard statistics",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.DashboardStats"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/database/health": {
+            "get": {
+                "description": "Check database connection health",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "health"
+                ],
+                "summary": "Database health",
+                "responses": {
+                    "200": {
+                        "description": "Database health information",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/database/stats": {
+            "get": {
+                "description": "Get database connection pool statistics",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "health"
+                ],
+                "summary": "Database statistics",
+                "responses": {
+                    "200": {
+                        "description": "Database pool statistics",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/health": {
+            "get": {
+                "description": "Check if the API server is running and healthy",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "health"
+                ],
+                "summary": "Health check",
+                "responses": {
+                    "200": {
+                        "description": "Health status information",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/logs": {
+            "get": {
+                "description": "Get paginated list of system logs with optional filters",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "logs"
+                ],
+                "summary": "List logs",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "Page number",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 100,
+                        "description": "Items per page",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by log level",
+                        "name": "level",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Search term",
+                        "name": "search",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by source",
+                        "name": "source",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Start time (RFC3339)",
+                        "name": "start_time",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "End time (RFC3339)",
+                        "name": "end_time",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "List of logs",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.LogListResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/logs/export": {
+            "get": {
+                "description": "Export system logs in various formats (txt, json)",
+                "produces": [
+                    "text/plain",
+                    "application/json"
+                ],
+                "tags": [
+                    "logs"
+                ],
+                "summary": "Export logs",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "default": "txt",
+                        "description": "Export format (txt/json)",
+                        "name": "format",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by log level",
+                        "name": "level",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by source",
+                        "name": "source",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Start time (RFC3339)",
+                        "name": "start_time",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "End time (RFC3339)",
+                        "name": "end_time",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Exported file",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/metrics/system": {
+            "get": {
+                "description": "Get current system resource metrics (CPU, memory, disk, runtime)",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "metrics"
+                ],
+                "summary": "System metrics",
+                "responses": {
+                    "200": {
+                        "description": "System metrics",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api_handlers.SystemMetrics"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies": {
+            "get": {
+                "description": "Get paginated list of proxies with optional filters",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "List proxies",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "Page number",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Items per page",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Search term",
+                        "name": "search",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by status",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by protocol",
+                        "name": "protocol",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Sort field",
+                        "name": "sort",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Sort order (asc/desc)",
+                        "name": "order",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "List of proxies",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ProxyListResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Create a new proxy server",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Create proxy",
+                "parameters": [
+                    {
+                        "description": "Proxy details",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.CreateProxyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created proxy",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.Proxy"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/bulk": {
+            "post": {
+                "description": "Create multiple proxy servers at once",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Bulk create proxies",
+                "parameters": [
+                    {
+                        "description": "List of proxies to create",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.BulkCreateProxyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Creation results",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/bulk-delete": {
+            "post": {
+                "description": "Delete multiple proxy servers at once",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Bulk delete proxies",
+                "parameters": [
+                    {
+                        "description": "List of proxy IDs to delete",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.BulkDeleteProxyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Deletion results",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/export": {
+            "get": {
+                "description": "Export proxy list in various formats (txt, json, csv)",
+                "produces": [
+                    "text/plain",
+                    "application/json",
+                    "text/csv"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Export proxies",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "default": "txt",
+                        "description": "Export format (txt/json/csv)",
+                        "name": "format",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by status",
+                        "name": "status",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Exported file",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/reload": {
+            "post": {
+                "description": "Reload proxy pool from database",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Reload proxy pool",
+                "responses": {
+                    "200": {
+                        "description": "Reload confirmation",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/{id}": {
+            "put": {
+                "description": "Update an existing proxy server",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Update proxy",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Proxy ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Updated proxy details",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.UpdateProxyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Updated proxy",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.Proxy"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Delete a proxy server by ID",
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Delete proxy",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Proxy ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Successfully deleted"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/proxies/{id}/test": {
+            "post": {
+                "description": "Test a proxy server's connectivity and performance",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "proxies"
+                ],
+                "summary": "Test proxy",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Proxy ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Test results",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ProxyTestResult"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/settings": {
+            "get": {
+                "description": "Get current system configuration",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "settings"
+                ],
+                "summary": "Get settings",
+                "responses": {
+                    "200": {
+                        "description": "Current settings",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.Settings"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Update system configuration",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "settings"
+                ],
+                "summary": "Update settings",
+                "parameters": [
+                    {
+                        "description": "Updated settings",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.Settings"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Update confirmation",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/settings/reset": {
+            "post": {
+                "description": "Reset configuration to default values",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "settings"
+                ],
+                "summary": "Reset settings",
+                "responses": {
+                    "200": {
+                        "description": "Reset confirmation",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/status": {
+            "get": {
+                "description": "Get detailed system status including proxy and request statistics",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "health"
+                ],
+                "summary": "System status",
+                "responses": {
+                    "200": {
+                        "description": "Detailed status information",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "github_com_alpkeskin_rota_core_internal_models.AuthenticationSettings": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "description": "Enable authentication for proxy requests",
+                    "type": "boolean"
+                },
+                "password": {
+                    "description": "Password for proxy authentication (write-only)",
+                    "type": "string"
+                },
+                "username": {
+                    "description": "Username for proxy authentication",
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.BulkCreateProxyRequest": {
+            "type": "object",
+            "required": [
+                "proxies"
+            ],
+            "properties": {
+                "proxies": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.CreateProxyRequest"
+                    }
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.BulkDeleteProxyRequest": {
+            "type": "object",
+            "required": [
+                "ids"
+            ],
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "integer"
+                    }
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.ChartDataPoint": {
+            "type": "object",
+            "properties": {
+                "time": {
+                    "type": "string"
+                },
+                "value": {
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.CreateProxyRequest": {
+            "type": "object",
+            "required": [
+                "address",
+                "protocol"
+            ],
+            "properties": {
+                "address": {
+                    "type": "string"
+                },
+                "password": {
+                    "type": "string"
+                },
+                "protocol": {
+                    "type": "string",
+                    "enum": [
+                        "http",
+                        "https",
+                        "socks4",
+                        "socks4a",
+                        "socks5"
+                    ]
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.DashboardStats": {
+            "type": "object",
+            "properties": {
+                "active_proxies": {
+                    "type": "integer"
+                },
+                "avg_response_time": {
+                    "type": "integer"
+                },
+                "avg_success_rate": {
+                    "type": "number"
+                },
+                "request_growth": {
+                    "type": "number"
+                },
+                "response_time_delta": {
+                    "type": "integer"
+                },
+                "success_rate_growth": {
+                    "type": "number"
+                },
+                "total_proxies": {
+                    "type": "integer"
+                },
+                "total_requests": {
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.ErrorResponse": {
+            "type": "object",
+            "properties": {
+                "details": {},
+                "error": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.HealthCheckSettings": {
+            "type": "object",
+            "properties": {
+                "headers": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "status": {
+                    "type": "integer"
+                },
+                "timeout": {
+                    "type": "integer"
+                },
+                "url": {
+                    "type": "string"
+                },
+                "workers": {
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.Log": {
+            "type": "object",
+            "properties": {
+                "details": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "level": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "timestamp": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.LogListResponse": {
+            "type": "object",
+            "properties": {
+                "logs": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.Log"
+                    }
+                },
+                "pagination": {
+                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.PaginationMeta"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.LogRetentionSettings": {
+            "type": "object",
+            "properties": {
+                "cleanup_interval_hours": {
+                    "description": "How often to run cleanup (1, 6, 12, 24)",
+                    "type": "integer"
+                },
+                "compression_after_days": {
+                    "description": "Compress logs older than X days (1, 3, 7, 14)",
+                    "type": "integer"
+                },
+                "enabled": {
+                    "description": "Enable automatic log cleanup",
+                    "type": "boolean"
+                },
+                "retention_days": {
+                    "description": "Days to keep logs (7, 15, 30, 60, 90)",
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.LoginRequest": {
+            "type": "object",
+            "required": [
+                "password",
+                "username"
+            ],
+            "properties": {
+                "password": {
+                    "type": "string"
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.LoginResponse": {
+            "type": "object",
+            "properties": {
+                "token": {
+                    "type": "string"
+                },
+                "user": {
+                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.UserInfoResponse"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.PaginationMeta": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer"
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "total_pages": {
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.Proxy": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string"
+                },
+                "avg_response_time": {
+                    "type": "integer"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "last_check": {
+                    "type": "string"
+                },
+                "protocol": {
+                    "type": "string"
+                },
+                "requests": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.ProxyListResponse": {
+            "type": "object",
+            "properties": {
+                "pagination": {
+                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.PaginationMeta"
+                },
+                "proxies": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ProxyWithStats"
+                    }
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.ProxyTestResult": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "response_time": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "tested_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.ProxyWithStats": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string"
+                },
+                "avg_response_time": {
+                    "type": "integer"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "last_check": {
+                    "type": "string"
+                },
+                "protocol": {
+                    "type": "string"
+                },
+                "requests": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "success_rate": {
+                    "type": "number"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.RateLimitSettings": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "interval": {
+                    "description": "in seconds",
+                    "type": "integer"
+                },
+                "max_requests": {
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.ResponseTimeChartData": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ChartDataPoint"
+                    }
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.RotationSettings": {
+            "type": "object",
+            "properties": {
+                "allowed_protocols": {
+                    "description": "[\"http\", \"https\", \"socks4\", \"socks4a\", \"socks5\"], empty means all",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "fallback": {
+                    "type": "boolean"
+                },
+                "fallback_max_retries": {
+                    "type": "integer"
+                },
+                "follow_redirect": {
+                    "type": "boolean"
+                },
+                "max_response_time": {
+                    "description": "in milliseconds, 0 means no limit",
+                    "type": "integer"
+                },
+                "method": {
+                    "type": "string"
+                },
+                "min_success_rate": {
+                    "description": "0-100, 0 means no minimum",
+                    "type": "number"
+                },
+                "remove_unhealthy": {
+                    "type": "boolean"
+                },
+                "retries": {
+                    "type": "integer"
+                },
+                "time_based": {
+                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.TimeBasedSettings"
+                },
+                "timeout": {
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.Settings": {
+            "type": "object",
+            "properties": {
+                "authentication": {
+                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.AuthenticationSettings"
+                },
+                "healthcheck": {
+                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.HealthCheckSettings"
+                },
+                "log_retention": {
+                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.LogRetentionSettings"
+                },
+                "rate_limit": {
+                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.RateLimitSettings"
+                },
+                "rotation": {
+                    "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.RotationSettings"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.SuccessRateChartData": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.SuccessRateDataPoint"
+                    }
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.SuccessRateDataPoint": {
+            "type": "object",
+            "properties": {
+                "failure": {
+                    "type": "integer"
+                },
+                "success": {
+                    "type": "integer"
+                },
+                "time": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.TimeBasedSettings": {
+            "type": "object",
+            "properties": {
+                "interval": {
+                    "description": "in seconds",
+                    "type": "integer"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.UpdateProxyRequest": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "string"
+                },
+                "password": {
+                    "type": "string"
+                },
+                "protocol": {
+                    "type": "string",
+                    "enum": [
+                        "http",
+                        "https",
+                        "socks4",
+                        "socks4a",
+                        "socks5"
+                    ]
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_models.UserInfoResponse": {
+            "type": "object",
+            "properties": {
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_api_handlers.CPUMetrics": {
+            "type": "object",
+            "properties": {
+                "cores": {
+                    "type": "integer"
+                },
+                "percentage": {
+                    "type": "number"
+                }
+            }
+        },
+        "internal_api_handlers.DiskMetrics": {
+            "type": "object",
+            "properties": {
+                "free": {
+                    "type": "integer"
+                },
+                "percentage": {
+                    "type": "number"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "used": {
+                    "type": "integer"
+                }
+            }
+        },
+        "internal_api_handlers.MemoryMetrics": {
+            "type": "object",
+            "properties": {
+                "available": {
+                    "type": "integer"
+                },
+                "percentage": {
+                    "type": "number"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "used": {
+                    "type": "integer"
+                }
+            }
+        },
+        "internal_api_handlers.RuntimeMetrics": {
+            "type": "object",
+            "properties": {
+                "gc_pause_count": {
+                    "type": "integer"
+                },
+                "goroutines": {
+                    "type": "integer"
+                },
+                "mem_alloc": {
+                    "type": "integer"
+                },
+                "mem_sys": {
+                    "type": "integer"
+                },
+                "threads": {
+                    "type": "integer"
+                }
+            }
+        },
+        "internal_api_handlers.SystemMetrics": {
+            "type": "object",
+            "properties": {
+                "cpu": {
+                    "$ref": "#/definitions/internal_api_handlers.CPUMetrics"
+                },
+                "disk": {
+                    "$ref": "#/definitions/internal_api_handlers.DiskMetrics"
+                },
+                "memory": {
+                    "$ref": "#/definitions/internal_api_handlers.MemoryMetrics"
+                },
+                "runtime": {
+                    "$ref": "#/definitions/internal_api_handlers.RuntimeMetrics"
+                }
+            }
+        }
+    },
+    "securityDefinitions": {
+        "BearerAuth": {
+            "description": "Type \"Bearer\" followed by a space and JWT token.",
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header"
+        }
+    }
+}

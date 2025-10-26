@@ -1,0 +1,89 @@
+version: "3.8"
+
+services:
+  rota-core:
+    build:
+      context: ./core
+      dockerfile: Dockerfile
+    container_name: rota-core
+    restart: unless-stopped
+    ports:
+      - "8000:8000" # Proxy port
+      - "8001:8001" # API port
+    environment:
+      - PROXY_PORT=8000
+      - API_PORT=8001
+      - LOG_LEVEL=info
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=rota
+      - DB_PASSWORD=rota_password
+      - DB_NAME=rota
+      - DB_SSLMODE=disable
+      - ROTA_ADMIN_USER=admin
+      - ROTA_ADMIN_PASSWORD=admin
+    networks:
+      - rota-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8001/health",
+        ]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  rota-dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: rota-dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8001
+    networks:
+      - rota-network
+    depends_on:
+      rota-core:
+        condition: service_healthy
+
+  timescaledb:
+    image: timescale/timescaledb:2.22.1-pg17
+    container_name: rota-timescaledb
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=rota
+      - POSTGRES_PASSWORD=rota_password
+      - POSTGRES_DB=rota
+      - TIMESCALEDB_TELEMETRY=off
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+    networks:
+      - rota-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rota -d rota"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+
+volumes:
+  timescaledb-data:
+    driver: local
+
+networks:
+  rota-network:
+    driver: bridge

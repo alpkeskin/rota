@@ -27,3 +27,30 @@ go.work.sum
 
 # Logs
 *.log
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Binaries
+bin/
+dist/
+
+# Coverage
+coverage.txt
+
+# Other
+Makefile
+test_client/
+.claude/
+old_codes/
