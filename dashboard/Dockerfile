@@ -2,13 +2,19 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@10.19.0 --activate
+
 # Install dependencies based on the preferred package manager
-COPY package.json package-lock.json* ./
-RUN npm ci
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
 # Stage 2: Builder
 FROM node:20-alpine AS builder
 WORKDIR /app
+
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@10.19.0 --activate
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -18,7 +24,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
 
 # Build the application
-RUN npm run build
+RUN pnpm run build
 
 # Stage 3: Runner
 FROM node:20-alpine AS runner
