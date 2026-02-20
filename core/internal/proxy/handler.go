@@ -14,7 +14,6 @@ import (
 	"github.com/elazarl/goproxy"
 	"github.com/google/uuid"
 	"h12.io/socks"
-	proxyDialer "golang.org/x/net/proxy"
 )
 
 // UpstreamProxyHandler handles requests with upstream proxy rotation
@@ -560,53 +559,15 @@ func (h *UpstreamProxyHandler) tryConnectWithRetries(selectedProxy *models.Proxy
 // connectViaProxy establishes a connection through a specific proxy
 func (h *UpstreamProxyHandler) connectViaProxy(proxy *models.Proxy, host string) (net.Conn, error) {
 	switch proxy.Protocol {
-	case "socks5":
-		// Create SOCKS5 dialer
-		var dialer proxyDialer.Dialer
-		var err error
-
-		if proxy.Username != nil && *proxy.Username != "" {
-			// Username exists, create auth
-			password := ""
-			if proxy.Password != nil {
-				password = *proxy.Password
-			}
-			auth := &proxyDialer.Auth{
-				User:     *proxy.Username,
-				Password: password,
-			}
-			dialer, err = proxyDialer.SOCKS5("tcp", proxy.Address, auth, proxyDialer.Direct)
-		} else {
-			dialer, err = proxyDialer.SOCKS5("tcp", proxy.Address, nil, proxyDialer.Direct)
-		}
-
-		if err != nil {
-			return nil, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
-		}
+	case "socks4", "socks4a", "socks5":
+		// Create SOCKS dialer
+		proxyURL := proxy.Url()
+		dialer := socks.Dial(proxyURL.String())
 
 		// Connect to target host through proxy
-		conn, err := dialer.Dial("tcp", host)
-		if err != nil {
-			return nil, fmt.Errorf("failed to connect to %s via SOCKS5 proxy %s: %w", host, proxy.Address, err)
-		}
-
-		return conn, nil
-
-	case "socks4", "socks4a":
-		// Create SOCKS4/SOCKS4A dialer
-		var proxyURL string
-
-		if proxy.Username != nil && *proxy.Username != "" {
-			proxyURL = fmt.Sprintf("%s://%s:@%s", proxy.Protocol, *proxy.Username, proxy.Address)
-		} else {
-			proxyURL = fmt.Sprintf("%s://%s", proxy.Protocol, proxy.Address)
-		}
-
-		// Connect to target host through proxy
-		dialer := socks.Dial(proxyURL)
 		conn, err := dialer("tcp", host)
 		if err != nil {
-			return nil, fmt.Errorf("failed to connect to %s via SOCKS4/SOCKS4A proxy %s: %w", host, proxy.Address, err)
+			return nil, fmt.Errorf("failed to connect to %s via %s proxy %s: %w", host, proxy.Protocol, proxy.Address, err)
 		}
 
 		return conn, nil
