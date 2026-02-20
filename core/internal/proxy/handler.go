@@ -13,6 +13,7 @@ import (
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/elazarl/goproxy"
 	"github.com/google/uuid"
+	"h12.io/socks"
 	proxyDialer "golang.org/x/net/proxy"
 )
 
@@ -587,6 +588,25 @@ func (h *UpstreamProxyHandler) connectViaProxy(proxy *models.Proxy, host string)
 		conn, err := dialer.Dial("tcp", host)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to %s via SOCKS5 proxy %s: %w", host, proxy.Address, err)
+		}
+
+		return conn, nil
+
+	case "socks4", "socks4a":
+		// Create SOCKS4/SOCKS4A dialer
+		var proxyURL string
+
+		if proxy.Username != nil && *proxy.Username != "" {
+			proxyURL = fmt.Sprintf("%s://%s:@%s", proxy.Protocol, *proxy.Username, proxy.Address)
+		} else {
+			proxyURL = fmt.Sprintf("%s://%s", proxy.Protocol, proxy.Address)
+		}
+
+		// Connect to target host through proxy
+		dialer := socks.Dial(proxyURL)
+		conn, err := dialer("tcp", host)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to %s via SOCKS4/SOCKS4A proxy %s: %w", host, proxy.Address, err)
 		}
 
 		return conn, nil
