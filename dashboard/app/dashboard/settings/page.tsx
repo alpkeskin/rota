@@ -31,6 +31,9 @@ import {
   Loader2,
   Database,
   ChevronDown,
+  KeyRound,
+  Eye,
+  EyeOff,
 } from "lucide-react"
 import { api } from "@/lib/api"
 import { Settings } from "@/lib/types"
@@ -41,11 +44,25 @@ export default function SettingsPage() {
   const [isLoading, setIsLoading] = React.useState(true)
   const [isSaving, setIsSaving] = React.useState(false)
 
+  // Admin account state
+  const [adminUsername, setAdminUsername] = React.useState("")
+  const [newUsername, setNewUsername] = React.useState("")
+  const [currentPass, setCurrentPass] = React.useState("")
+  const [newPass, setNewPass] = React.useState("")
+  const [confirmPass, setConfirmPass] = React.useState("")
+  const [showPass, setShowPass] = React.useState(false)
+  const [changingPass, setChangingPass] = React.useState(false)
+
   React.useEffect(() => {
     const fetchSettings = async () => {
       try {
-        const data = await api.getSettings()
+        const [data, adminInfo] = await Promise.all([
+          api.getSettings(),
+          api.getAdminInfo(),
+        ])
         setSettings(data)
+        setAdminUsername(adminInfo.username)
+        setNewUsername(adminInfo.username)
       } catch (error) {
         console.error("Failed to fetch settings:", error)
       } finally {
@@ -55,6 +72,32 @@ export default function SettingsPage() {
 
     fetchSettings()
   }, [])
+
+  const handleChangePassword = async () => {
+    if (!currentPass) { toast.error("Enter your current password"); return }
+    if (!newPass) { toast.error("Enter a new password"); return }
+    if (newPass.length < 6) { toast.error("New password must be at least 6 characters"); return }
+    if (newPass !== confirmPass) { toast.error("Passwords don't match"); return }
+
+    setChangingPass(true)
+    try {
+      const opts: any = { current_password: currentPass, new_password: newPass }
+      if (newUsername && newUsername !== adminUsername) {
+        opts.new_username = newUsername
+      }
+      const res = await api.changePassword(opts)
+      setAdminUsername(res.username)
+      setNewUsername(res.username)
+      setCurrentPass("")
+      setNewPass("")
+      setConfirmPass("")
+      toast.success("Credentials updated successfully")
+    } catch (e: any) {
+      toast.error(e.message || "Failed to change password")
+    } finally {
+      setChangingPass(false)
+    }
+  }
 
   const handleSave = async () => {
     if (!settings) return
@@ -123,6 +166,77 @@ export default function SettingsPage() {
           </Button>
         </div>
       </div>
+
+      {/* Admin Account */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <KeyRound className="h-5 w-5" />
+            <CardTitle>Admin Account</CardTitle>
+          </div>
+          <CardDescription>
+            Change the dashboard login credentials. Current user: <strong>{adminUsername}</strong>
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 max-w-md">
+            <div className="space-y-1.5">
+              <Label>Username</Label>
+              <Input
+                value={newUsername}
+                onChange={e => setNewUsername(e.target.value)}
+                placeholder="New username (leave unchanged to keep)"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Current password <span className="text-destructive">*</span></Label>
+              <div className="relative">
+                <Input
+                  type={showPass ? "text" : "password"}
+                  value={currentPass}
+                  onChange={e => setCurrentPass(e.target.value)}
+                  placeholder="Required to confirm any change"
+                  className="pr-10"
+                />
+                <button
+                  type="button"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  onClick={() => setShowPass(v => !v)}
+                >
+                  {showPass ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>New password</Label>
+              <Input
+                type={showPass ? "text" : "password"}
+                value={newPass}
+                onChange={e => setNewPass(e.target.value)}
+                placeholder="Min 6 characters"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Confirm new password</Label>
+              <Input
+                type={showPass ? "text" : "password"}
+                value={confirmPass}
+                onChange={e => setConfirmPass(e.target.value)}
+                placeholder="Repeat new password"
+              />
+            </div>
+            <Button
+              onClick={handleChangePassword}
+              disabled={changingPass || !currentPass || !newPass}
+              className="w-fit"
+            >
+              {changingPass
+                ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving…</>
+                : <><KeyRound className="mr-2 h-4 w-4" />Update credentials</>}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Proxy Rotation Settings - Full Width (Most Important) */}
       <Card>

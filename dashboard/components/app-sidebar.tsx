@@ -13,6 +13,9 @@ import {
   Command,
   Activity,
   LogOut,
+  Download,
+  Layers,
+  Users,
 } from "lucide-react"
 import { useTheme } from "next-themes"
 import { api } from "@/lib/api"
@@ -48,6 +51,21 @@ const navigation = [
     title: "Proxy Management",
     url: "/dashboard/proxies",
     icon: Network,
+  },
+  {
+    title: "Proxy Sources",
+    url: "/dashboard/sources",
+    icon: Download,
+  },
+  {
+    title: "Proxy Pools",
+    url: "/dashboard/pools",
+    icon: Layers,
+  },
+  {
+    title: "Proxy Users",
+    url: "/dashboard/users",
+    icon: Users,
   },
   {
     title: "System Metrics",
