@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/elazarl/goproxy"
@@ -14,27 +15,31 @@ import (
 
 // Server represents the proxy server
 type Server struct {
-	proxy          *goproxy.ProxyHttpServer
-	server         *http.Server
-	logger         *logger.Logger
-	port           int
-	selector       ProxySelector
-	tracker        *UsageTracker
-	handler        *UpstreamProxyHandler
-	authMiddleware *AuthMiddleware
-	rateLimitMw    *RateLimitMiddleware
-	proxyRepo      *repository.ProxyRepository
-	settingsRepo   *repository.SettingsRepository
-	refreshTicker  *time.Ticker
-	cleanupTicker  *time.Ticker
-	stopChan       chan struct{}
+	proxy           *goproxy.ProxyHttpServer
+	server          *http.Server
+	logger          *logger.Logger
+	port            int
+	selector        ProxySelector
+	tracker         *UsageTracker
+	handler         *UpstreamProxyHandler
+	authMiddleware  *AuthMiddleware
+	userAuthMw      *UserAuthMiddleware
+	rateLimitMw     *RateLimitMiddleware
+	proxyRepo       *repository.ProxyRepository
+	settingsRepo    *repository.SettingsRepository
+	refreshTicker   *time.Ticker
+	cleanupTicker   *time.Ticker
+	stopChan        chan struct{}
 }
 
 // New creates a new proxy server instance
 func New(
 	port int,
 	log *logger.Logger,
+	db *database.DB,
 	proxyRepo *repository.ProxyRepository,
+	poolRepo *repository.PoolRepository,
+	userRepo *repository.UserRepository,
 	settingsRepo *repository.SettingsRepository,
 ) (*Server, error) {
 	// Load settings
@@ -67,63 +72,61 @@ func New(
 	authMiddleware := NewAuthMiddleware(settings.Authentication)
 	rateLimitMw := NewRateLimitMiddleware(settings.RateLimit)
 
+	// Create user-aware auth middleware (pool-based routing)
+	userAuthMw := NewUserAuthMiddleware(userRepo, poolRepo, db, authMiddleware, &settings.Rotation, log)
+
 	// Create goproxy instance
 	proxyServer := goproxy.NewProxyHttpServer()
 	proxyServer.Verbose = log.Logger.Enabled(context.Background(), -4) // Enable verbose if debug level
 
 	// CRITICAL: Set ConnectDial to route HTTPS through upstream proxy
 	// This is called for ALL CONNECT requests (HTTPS tunneling)
+	// We store the last pool chain seen by the CONNECT handler in a short-lived map.
 	proxyServer.ConnectDial = func(network string, addr string) (net.Conn, error) {
 		log.Info("ConnectDial called",
 			"source", "proxy",
 			"network", network,
 			"addr", addr,
 		)
-
-		// Connect through upstream proxy with retry logic
 		conn, _, err := handler.ConnectThroughProxyForDial(addr)
 		if err != nil {
-			log.Error("ConnectDial failed",
-				"source", "proxy",
-				"addr", addr,
-				"error", err,
-			)
+			log.Error("ConnectDial failed", "source", "proxy", "addr", addr, "error", err)
 			return nil, err
 		}
-
-		log.Info("ConnectDial succeeded",
-			"source", "proxy",
-			"addr", addr,
-		)
+		log.Info("ConnectDial succeeded", "source", "proxy", "addr", addr)
 		return conn, nil
 	}
 
 	// Setup handlers with middleware chain
 	// Order: Auth -> RateLimit -> Handler
 
-	// HTTP requests
+	// HTTP requests — userAuthMw handles both legacy and pool-based auth
 	proxyServer.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		// Authentication middleware
-		if req, resp := authMiddleware.HandleRequest(req, ctx); resp != nil {
-			return req, resp
+		// User-aware auth: sets PoolChain in context or falls back to legacy auth
+		newReq, resp := userAuthMw.HandleRequest(req, ctx)
+		if resp != nil {
+			return newReq, resp
 		}
+		req = newReq
 
 		// Rate limiting middleware
 		if req, resp := rateLimitMw.HandleRequest(req, ctx); resp != nil {
 			return req, resp
 		}
 
-		// Main handler
+		// Main handler (checks for PoolChain in context automatically)
 		return handler.HandleRequest(req, ctx)
 	})
 
-	// HTTPS CONNECT requests - middleware only (actual dial handled by ConnectDial above)
+	// HTTPS CONNECT requests
 	proxyServer.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		// Authentication middleware
-		if _, resp := authMiddleware.HandleConnect(ctx.Req, ctx); resp != nil {
+		// User-aware auth
+		newReq, resp := userAuthMw.HandleConnect(ctx.Req, ctx)
+		if resp != nil {
 			ctx.Resp = resp
 			return goproxy.RejectConnect, host
 		}
+		ctx.Req = newReq
 
 		// Rate limiting middleware
 		if _, resp := rateLimitMw.HandleConnect(ctx.Req, ctx); resp != nil {
@@ -131,7 +134,8 @@ func New(
 			return goproxy.RejectConnect, host
 		}
 
-		// Allow CONNECT - actual connection will be made by ConnectDial
+		// If a PoolChain is in context, use it for CONNECT too.
+		// ConnectDial below will use the chain for the actual dial.
 		return goproxy.OkConnect, host
 	}))
 
@@ -152,6 +156,7 @@ func New(
 		tracker:        tracker,
 		handler:        handler,
 		authMiddleware: authMiddleware,
+		userAuthMw:     userAuthMw,
 		rateLimitMw:    rateLimitMw,
 		proxyRepo:      proxyRepo,
 		settingsRepo:   settingsRepo,

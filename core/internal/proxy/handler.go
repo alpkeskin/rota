@@ -56,6 +56,22 @@ func (h *UpstreamProxyHandler) HandleRequest(req *http.Request, ctx *goproxy.Pro
 	// Remove hop-by-hop headers
 	h.removeHopByHopHeaders(req)
 
+	// --- Pool-aware path: if a PoolChain was attached by UserAuthMiddleware, use it ---
+	reqCtx := req.Context()
+	if chain, ok := reqCtx.Value(UserChainContextKey).(*PoolChain); ok && chain != nil {
+		resp, proxyID, err := chain.SendWithRetry(req, reqCtx, h.settings, h.logger)
+		duration := int(time.Since(startTime).Milliseconds())
+		if proxyID > 0 {
+			h.recordAsync(proxyID, "", req.URL.String(), req.Method, resp, err, duration, startTime)
+		}
+		if err != nil {
+			h.logger.Error("pool-chain request failed", "request_id", requestID, "error", err)
+			return req, h.badGateway(err.Error())
+		}
+		return req, resp
+	}
+
+	// --- Legacy path: global proxy pool ---
 	// Try to send request through proxy pool with retry/fallback
 	resp, proxyID, err := h.sendWithRetry(req, ctx.Req.Context())
 	duration := int(time.Since(startTime).Milliseconds())
@@ -721,6 +737,30 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// recordAsync records a proxy request asynchronously.
+func (h *UpstreamProxyHandler) recordAsync(proxyID int, proxyAddr, url, method string, resp *http.Response, reqErr error, duration int, ts time.Time) {
+	record := RequestRecord{
+		ProxyID:      proxyID,
+		ProxyAddress: proxyAddr,
+		RequestedURL: url,
+		Method:       method,
+		Success:      reqErr == nil && resp != nil,
+		ResponseTime: duration,
+		Timestamp:    ts,
+	}
+	if resp != nil {
+		record.StatusCode = resp.StatusCode
+	}
+	if reqErr != nil {
+		record.ErrorMessage = reqErr.Error()
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		h.tracker.RecordRequest(ctx, record) //nolint:errcheck
+	}()
 }
 
 // badGateway returns a 502 Bad Gateway response
