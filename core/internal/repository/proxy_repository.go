@@ -88,7 +88,9 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 		SELECT
 			id, address, protocol, username, status,
 			requests, successful_requests, failed_requests,
-			avg_response_time, last_check, created_at, updated_at
+			avg_response_time, last_check,
+			country_code, country_name, region_name, city_name, isp,
+			created_at, updated_at
 		FROM proxies
 		%s
 		ORDER BY %s %s
@@ -109,7 +111,9 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 		err := rows.Scan(
 			&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Status,
 			&p.Requests, &p.SuccessfulRequests, &p.FailedRequests,
-			&p.AvgResponseTime, &p.LastCheck, &p.CreatedAt, &p.UpdatedAt,
+			&p.AvgResponseTime, &p.LastCheck,
+			&p.CountryCode, &p.CountryName, &p.RegionName, &p.CityName, &p.ISP,
+			&p.CreatedAt, &p.UpdatedAt,
 		)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to scan proxy: %w", err)
@@ -131,6 +135,11 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 			SuccessRate:     successRate,
 			AvgResponseTime: p.AvgResponseTime,
 			LastCheck:       p.LastCheck,
+			CountryCode:     p.CountryCode,
+			CountryName:     p.CountryName,
+			RegionName:      p.RegionName,
+			CityName:        p.CityName,
+			ISP:             p.ISP,
 			CreatedAt:       p.CreatedAt,
 			UpdatedAt:       p.UpdatedAt,
 		})
@@ -145,7 +154,9 @@ func (r *ProxyRepository) GetByID(ctx context.Context, id int) (*models.Proxy, e
 		SELECT
 			id, address, protocol, username, password, status,
 			requests, successful_requests, failed_requests,
-			avg_response_time, last_check, last_error, created_at, updated_at
+			avg_response_time, last_check, last_error,
+			country_code, country_name, region_name, city_name, isp,
+			created_at, updated_at
 		FROM proxies
 		WHERE id = $1
 	`
@@ -154,7 +165,9 @@ func (r *ProxyRepository) GetByID(ctx context.Context, id int) (*models.Proxy, e
 	err := r.db.Pool.QueryRow(ctx, query, id).Scan(
 		&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Password, &p.Status,
 		&p.Requests, &p.SuccessfulRequests, &p.FailedRequests,
-		&p.AvgResponseTime, &p.LastCheck, &p.LastError, &p.CreatedAt, &p.UpdatedAt,
+		&p.AvgResponseTime, &p.LastCheck, &p.LastError,
+		&p.CountryCode, &p.CountryName, &p.RegionName, &p.CityName, &p.ISP,
+		&p.CreatedAt, &p.UpdatedAt,
 	)
 
 	if err == pgx.ErrNoRows {
