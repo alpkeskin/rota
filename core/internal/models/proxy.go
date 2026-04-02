@@ -16,6 +16,15 @@ type Proxy struct {
 	AvgResponseTime    int       `json:"avg_response_time"`
 	LastCheck          *time.Time `json:"last_check,omitempty"`
 	LastError          *string   `json:"-"`
+	// GeoIP fields
+	CountryCode   *string   `json:"country_code,omitempty"`
+	CountryName   *string   `json:"country_name,omitempty"`
+	RegionName    *string   `json:"region_name,omitempty"`
+	CityName      *string   `json:"city_name,omitempty"`
+	Latitude      *float64  `json:"latitude,omitempty"`
+	Longitude     *float64  `json:"longitude,omitempty"`
+	ISP           *string   `json:"isp,omitempty"`
+	GeoUpdatedAt  *time.Time `json:"geo_updated_at,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -31,6 +40,12 @@ type ProxyWithStats struct {
 	SuccessRate     float64    `json:"success_rate"`
 	AvgResponseTime int        `json:"avg_response_time"`
 	LastCheck       *time.Time `json:"last_check,omitempty"`
+	// GeoIP fields
+	CountryCode  *string  `json:"country_code,omitempty"`
+	CountryName  *string  `json:"country_name,omitempty"`
+	RegionName   *string  `json:"region_name,omitempty"`
+	CityName     *string  `json:"city_name,omitempty"`
+	ISP          *string  `json:"isp,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
