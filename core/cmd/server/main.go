@@ -78,6 +78,8 @@ func run() error {
 	proxyRepo := repository.NewProxyRepository(db)
 	settingsRepo := repository.NewSettingsRepository(db)
 	logRepo := repository.NewLogRepository(db)
+	poolRepo := repository.NewPoolRepository(db)
+	userRepo := repository.NewUserRepository(db)
 
 	// Add database logging hook for proxy logs
 	log.AddHook(func(level, message string, attrs map[string]any) {
@@ -135,7 +137,7 @@ func run() error {
 	defer logCleanupService.Stop()
 
 	// Create servers
-	proxyServer, err := proxy.New(cfg.ProxyPort, log, proxyRepo, settingsRepo)
+	proxyServer, err := proxy.New(cfg.ProxyPort, log, db, proxyRepo, poolRepo, userRepo, settingsRepo)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy server: %w", err)
 	}

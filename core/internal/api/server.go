@@ -13,6 +13,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/services"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -29,11 +30,12 @@ type ProxyServer interface {
 
 // Server represents the API server
 type Server struct {
-	router *chi.Mux
-	server *http.Server
-	logger *logger.Logger
-	db     *database.DB
-	port   int
+	router    *chi.Mux
+	server    *http.Server
+	logger    *logger.Logger
+	db        *database.DB
+	port      int
+	jwtSecret string
 
 	// Proxy server reference for reloading
 	proxyServer ProxyServer
@@ -48,6 +50,9 @@ type Server struct {
 	websocketHandler     *handlers.WebSocketHandler
 	metricsHandler       *handlers.MetricsHandler
 	documentationHandler *handlers.DocumentationHandler
+	sourceHandler        *handlers.SourceHandler
+	poolHandler          *handlers.PoolHandler
+	userHandler          *handlers.UserHandler
 }
 
 // New creates a new API server instance
@@ -57,6 +62,15 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	logRepo := repository.NewLogRepository(db)
 	settingsRepo := repository.NewSettingsRepository(db)
 	dashboardRepo := repository.NewDashboardRepository(db)
+	sourceRepo := repository.NewSourceRepository(db)
+	poolRepo := repository.NewPoolRepository(db)
+	userRepo := repository.NewUserRepository(db)
+	adminRepo := repository.NewAdminRepository(db)
+
+	// Seed admin credentials from env on first start (no-op if already seeded)
+	if err := adminRepo.Seed(context.Background(), cfg.AdminUser, cfg.AdminPass); err != nil {
+		log.Warn("failed to seed admin credentials", "error", err)
+	}
 
 	// Generate random JWT secret on startup
 	// This ensures all previous tokens become invalid on restart
@@ -69,8 +83,13 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// Create health checker for testing proxies
 	healthChecker := proxy.NewHealthChecker(proxyRepo, settingsRepo, tracker, log)
 
+	// GeoIP + source + pool services
+	geoSvc := services.NewGeoIPService(log)
+	sourceSvc := services.NewSourceService(sourceRepo, proxyRepo, poolRepo, geoSvc, log)
+	poolSvc := services.NewPoolService(poolRepo, proxyRepo, log)
+
 	// Initialize handlers
-	authHandler := handlers.NewAuthHandler(settingsRepo, log, jwtSecret, cfg.AdminUser, cfg.AdminPass)
+	authHandler := handlers.NewAuthHandler(settingsRepo, adminRepo, log, jwtSecret, cfg.AdminUser, cfg.AdminPass)
 	healthHandler := handlers.NewHealthHandler(db, proxyRepo, log)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardRepo, proxyRepo, log)
 	proxyHandler := handlers.NewProxyHandler(proxyRepo, healthChecker, log)
@@ -79,12 +98,16 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	websocketHandler := handlers.NewWebSocketHandler(dashboardRepo, proxyRepo, logRepo, log)
 	metricsHandler := handlers.NewMetricsHandler(log)
 	documentationHandler := handlers.NewDocumentationHandler()
+	sourceHandler := handlers.NewSourceHandler(sourceRepo, sourceSvc, log)
+	poolHandler := handlers.NewPoolHandler(poolRepo, poolSvc, log)
+	userHandler := handlers.NewUserHandler(userRepo, poolRepo, log)
 
 	s := &Server{
 		router:               chi.NewRouter(),
 		logger:               log,
 		db:                   db,
 		port:                 cfg.APIPort,
+		jwtSecret:            jwtSecret,
 		authHandler:          authHandler,
 		healthHandler:        healthHandler,
 		dashboardHandler:     dashboardHandler,
@@ -94,7 +117,14 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 		websocketHandler:     websocketHandler,
 		metricsHandler:       metricsHandler,
 		documentationHandler: documentationHandler,
+		sourceHandler:        sourceHandler,
+		poolHandler:          poolHandler,
+		userHandler:          userHandler,
 	}
+
+	// Start background services
+	sourceSvc.Start(context.Background())
+	poolSvc.Start(context.Background())
 
 	s.setupMiddleware()
 	s.setupRoutes()
@@ -102,9 +132,9 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	s.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", s.port),
 		Handler:      s.router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 10 * time.Minute, // health checks on large pools can take several minutes
+		IdleTimeout:  120 * time.Second,
 	}
 
 	return s
@@ -129,22 +159,28 @@ func (s *Server) setupMiddleware() {
 	s.router.Use(middleware.RealIP)
 	s.router.Use(LoggerMiddleware(s.logger))
 	s.router.Use(middleware.Recoverer)
-	s.router.Use(middleware.Timeout(60 * time.Second))
+	// No global timeout — health-check routes need minutes; individual routes handle their own timeouts
 }
 
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
-	// Public routes (no auth required)
+	// ── Fully public routes ────────────────────────────────────────────────
 	s.router.Get("/health", s.healthHandler.Health)
 
-	// API Documentation
+	// API Documentation (public — read-only reference)
 	s.router.Get("/docs", s.documentationHandler.ServeDocumentation)
 	s.router.Get("/api/v1/swagger.json", s.serveSwaggerJSON)
 
-	// API v1 routes
+	// Auth: only login is public; everything else requires a valid JWT
+	s.router.Post("/api/v1/auth/login", s.authHandler.Login)
+
+	// ── Protected routes (JWT required) ────────────────────────────────────
 	s.router.Route("/api/v1", func(r chi.Router) {
-		// Authentication
-		r.Post("/auth/login", s.authHandler.Login)
+		r.Use(JWTMiddleware(s.jwtSecret))
+
+		// Auth (require token — change-password, whoami)
+		r.Post("/auth/change-password", s.authHandler.ChangePassword)
+		r.Get("/auth/me", s.authHandler.GetAdminInfo)
 
 		// Health & Status
 		r.Get("/status", s.healthHandler.Status)
@@ -178,11 +214,43 @@ func (s *Server) setupRoutes() {
 		r.Get("/settings", s.settingsHandler.Get)
 		r.Put("/settings", s.settingsHandler.Update)
 		r.Post("/settings/reset", s.settingsHandler.Reset)
+
+		// Proxy Sources
+		r.Get("/sources", s.sourceHandler.List)
+		r.Post("/sources", s.sourceHandler.Create)
+		r.Put("/sources/{id}", s.sourceHandler.Update)
+		r.Delete("/sources/{id}", s.sourceHandler.Delete)
+		r.Post("/sources/{id}/fetch", s.sourceHandler.FetchNow)
+		r.Post("/sources/enrich-geo", s.sourceHandler.EnrichGeo)
+
+		// Proxy Users (per-user pool authentication)
+		r.Get("/proxy-users", s.userHandler.List)
+		r.Post("/proxy-users", s.userHandler.Create)
+		r.Get("/proxy-users/{id}", s.userHandler.Get)
+		r.Put("/proxy-users/{id}", s.userHandler.Update)
+		r.Delete("/proxy-users/{id}", s.userHandler.Delete)
+
+		// Proxy Pools
+		r.Get("/pools", s.poolHandler.List)
+		r.Post("/pools", s.poolHandler.Create)
+		r.Get("/pools/geo-summary", s.poolHandler.GeoSummary)
+		r.Get("/pools/geo-countries", s.poolHandler.GeoByCountry)
+		r.Get("/pools/geo-cities/{country_code}", s.poolHandler.GeoCitiesByCountry)
+		r.Get("/pools/{id}", s.poolHandler.Get)
+		r.Put("/pools/{id}", s.poolHandler.Update)
+		r.Delete("/pools/{id}", s.poolHandler.Delete)
+		r.Get("/pools/{id}/proxies", s.poolHandler.GetProxies)
+		r.Post("/pools/{id}/proxies", s.poolHandler.AddProxies)
+		r.Delete("/pools/{id}/proxies", s.poolHandler.RemoveProxies)
+		r.Post("/pools/{id}/sync", s.poolHandler.Sync)
+		r.Post("/pools/{id}/health-check", s.poolHandler.HealthCheck)
+		r.Get("/pools/{id}/health-check/jobs", s.poolHandler.HealthCheckJobs)
+		r.Get("/pools/{id}/health-check/{job_id}", s.poolHandler.HealthCheckStatus)
 	})
 
-	// WebSocket routes
-	s.router.Get("/ws/dashboard", s.websocketHandler.DashboardWebSocket)
-	s.router.Get("/ws/logs", s.websocketHandler.LogsWebSocket)
+	// WebSocket routes — protected via token query param
+	s.router.With(JWTMiddleware(s.jwtSecret)).Get("/ws/dashboard", s.websocketHandler.DashboardWebSocket)
+	s.router.With(JWTMiddleware(s.jwtSecret)).Get("/ws/logs", s.websocketHandler.LogsWebSocket)
 }
 
 // Start starts the API server
