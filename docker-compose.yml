@@ -17,7 +17,7 @@ services:
       - DB_HOST=timescaledb
       - DB_PORT=5432
       - DB_USER=rota
-      - DB_PASSWORD=rota_password
+      - DB_PASSWORD=R0ta_Pg_S3cur3P@ss!
       - DB_NAME=rota
       - DB_SSLMODE=disable
       - ROTA_ADMIN_USER=admin
@@ -46,12 +46,14 @@ services:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=https://sf-rota-api.94.26.232.146.nip.io
     container_name: rota-dashboard
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3020:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8001
+      - NEXT_PUBLIC_API_URL=https://sf-rota-api.94.26.232.146.nip.io
     networks:
       - rota-network
     depends_on:
@@ -66,11 +68,11 @@ services:
       - "5432:5432"
     environment:
       - POSTGRES_USER=rota
-      - POSTGRES_PASSWORD=rota_password
+      - POSTGRES_PASSWORD=R0ta_Pg_S3cur3P@ss!
       - POSTGRES_DB=rota
       - TIMESCALEDB_TELEMETRY=off
     volumes:
-      - timescaledb-data:/var/lib/postgresql/data
+      - ./data/timescaledb:/var/lib/postgresql/data
     networks:
       - rota-network
     healthcheck:
@@ -79,10 +81,6 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 5
-
-volumes:
-  timescaledb-data:
-    driver: local
 
 networks:
   rota-network:

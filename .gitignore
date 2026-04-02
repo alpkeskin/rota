@@ -54,3 +54,6 @@ Makefile
 test_client/
 .claude/
 old_codes/
+
+# Local data volumes (TimescaleDB, etc.)
+data/
