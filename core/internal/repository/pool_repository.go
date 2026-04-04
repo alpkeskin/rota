@@ -227,7 +227,7 @@ func (r *PoolRepository) Delete(ctx context.Context, id int) error {
 func (r *PoolRepository) GetProxies(ctx context.Context, poolID int) ([]models.PoolProxy, error) {
 	query := `
 		SELECT
-			p.id, p.address, p.protocol, p.status,
+			p.id, p.address, p.protocol, p.username, p.password, p.status,
 			p.country_code, p.country_name, p.region_name, p.city_name, p.isp,
 			p.requests, p.successful_requests, p.failed_requests,
 			p.avg_response_time, p.last_check, ppm.added_at
@@ -247,7 +247,7 @@ func (r *PoolRepository) GetProxies(ctx context.Context, poolID int) ([]models.P
 		var pp models.PoolProxy
 		var succReq, failReq int64
 		err := rows.Scan(
-			&pp.ProxyID, &pp.Address, &pp.Protocol, &pp.Status,
+			&pp.ProxyID, &pp.Address, &pp.Protocol, &pp.Username, &pp.Password, &pp.Status,
 			&pp.CountryCode, &pp.CountryName, &pp.RegionName, &pp.CityName, &pp.ISP,
 			&pp.Requests, &succReq, &failReq,
 			&pp.AvgResponseTime, &pp.LastCheck, &pp.AddedAt,

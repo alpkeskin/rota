@@ -69,6 +69,8 @@ type PoolProxy struct {
 	ProxyID         int        `json:"proxy_id"`
 	Address         string     `json:"address"`
 	Protocol        string     `json:"protocol"`
+	Username        *string    `json:"-"`
+	Password        *string    `json:"-"`
 	Status          string     `json:"status"`
 	CountryCode     *string    `json:"country_code,omitempty"`
 	CountryName     *string    `json:"country_name,omitempty"`
@@ -80,6 +82,17 @@ type PoolProxy struct {
 	AvgResponseTime int        `json:"avg_response_time"`
 	LastCheck       *time.Time `json:"last_check,omitempty"`
 	AddedAt         time.Time  `json:"added_at"`
+}
+
+// ToProxy converts a PoolProxy to a Proxy (for transport creation with auth).
+func (pp *PoolProxy) ToProxy() *Proxy {
+	return &Proxy{
+		ID:       pp.ProxyID,
+		Address:  pp.Address,
+		Protocol: pp.Protocol,
+		Username: pp.Username,
+		Password: pp.Password,
+	}
 }
 
 // PoolHealthCheckResult is per-proxy result from a pool health check run

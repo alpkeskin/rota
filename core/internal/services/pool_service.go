@@ -2,8 +2,6 @@ package services
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/gammazero/workerpool"
@@ -138,7 +137,7 @@ func (ps *PoolService) HealthCheckPool(ctx context.Context, poolID int, checkURL
 		i := i
 		pp := pp
 		wp.Submit(func() {
-			res := ps.checkOneProxy(ctx, pp.ProxyID, pp.Address, pp.Protocol, url)
+			res := ps.checkOneProxy(ctx, pp.ToProxy(), url)
 			slots[i].result = res
 		})
 	}
@@ -168,24 +167,24 @@ func (ps *PoolService) HealthCheckPool(ctx context.Context, poolID int, checkURL
 
 // checkOneProxy performs a single proxy health check against the given URL.
 // Uses a 10 second timeout (enough for alive proxies, fast fail for dead ones).
-func (ps *PoolService) checkOneProxy(ctx context.Context, proxyID int, address, protocol, targetURL string) models.ProxyTestResult {
-	return ps.checkOneProxyTimeout(ctx, proxyID, address, protocol, targetURL, 10*time.Second)
+func (ps *PoolService) checkOneProxy(ctx context.Context, p *models.Proxy, targetURL string) models.ProxyTestResult {
+	return ps.checkOneProxyTimeout(ctx, p, targetURL, 10*time.Second)
 }
 
-func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, proxyID int, address, protocol, targetURL string, timeout time.Duration) models.ProxyTestResult {
+func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy, targetURL string, timeout time.Duration) models.ProxyTestResult {
 	start := time.Now()
 	result := models.ProxyTestResult{
-		ID:       proxyID,
-		Address:  address,
+		ID:       p.ID,
+		Address:  p.Address,
 		TestedAt: start,
 	}
 
-	transport, err := buildTransport(address, protocol)
+	transport, err := proxy.CreateProxyTransport(p)
 	if err != nil {
 		result.Status = "failed"
 		msg := err.Error()
 		result.Error = &msg
-		ps.updateProxyStatus(ctx, proxyID, "failed")
+		ps.updateProxyStatus(ctx, p.ID, "failed")
 		return result
 	}
 
@@ -205,7 +204,7 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, proxyID int, ad
 		result.Status = "failed"
 		msg := err.Error()
 		result.Error = &msg
-		ps.updateProxyStatus(ctx, proxyID, "failed")
+		ps.updateProxyStatus(ctx, p.ID, "failed")
 		return result
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Rota/1.0)")
@@ -216,7 +215,7 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, proxyID int, ad
 		result.Status = "failed"
 		msg := err.Error()
 		result.Error = &msg
-		ps.updateProxyStatus(ctx, proxyID, "failed")
+		ps.updateProxyStatus(ctx, p.ID, "failed")
 		return result
 	}
 	defer resp.Body.Close()
@@ -224,12 +223,12 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, proxyID int, ad
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		result.Status = "active"
 		result.ResponseTime = &dur
-		ps.updateProxyStatus(ctx, proxyID, "active")
+		ps.updateProxyStatus(ctx, p.ID, "active")
 	} else {
 		result.Status = "failed"
 		msg := fmt.Sprintf("HTTP %d", resp.StatusCode)
 		result.Error = &msg
-		ps.updateProxyStatus(ctx, proxyID, "failed")
+		ps.updateProxyStatus(ctx, p.ID, "failed")
 	}
 	return result
 }
@@ -239,43 +238,6 @@ func (ps *PoolService) updateProxyStatus(ctx context.Context, proxyID int, statu
 	ps.proxyRepo.GetDB().Pool.Exec(ctx,
 		`UPDATE proxies SET status = $1, last_check = NOW(), updated_at = NOW() WHERE id = $2`,
 		status, proxyID)
-}
-
-// buildTransport creates an http.Transport routed through the given proxy
-func buildTransport(address, protocol string) (*http.Transport, error) {
-	proxyURL := fmt.Sprintf("%s://%s", protocol, address)
-	switch strings.ToLower(protocol) {
-	case "http", "https":
-		parsed, err := parseURL(proxyURL)
-		if err != nil {
-			return nil, err
-		}
-		return &http.Transport{
-			Proxy:           http.ProxyURL(parsed),
-			TLSClientConfig: permissiveTLS(),
-		}, nil
-	case "socks5", "socks4", "socks4a":
-		// Use golang.org/x/net/proxy or h12.io/socks
-		dialer, err := buildSocksDialer(address, protocol)
-		if err != nil {
-			return nil, err
-		}
-		return &http.Transport{
-			DialContext:     dialer,
-			TLSClientConfig: permissiveTLS(),
-		}, nil
-	default:
-		return nil, fmt.Errorf("unsupported protocol: %s", protocol)
-	}
-}
-
-func permissiveTLS() *tls.Config {
-	return &tls.Config{
-		InsecureSkipVerify: true,
-		VerifyPeerCertificate: func(_ [][]byte, _ [][]*x509.Certificate) error {
-			return nil
-		},
-	}
 }
 
 // HealthCheckPoolWithProgress is like HealthCheckPool but calls progressFn after each proxy finishes.
@@ -315,7 +277,7 @@ func (ps *PoolService) HealthCheckPoolWithProgress(
 	for i, pp := range proxies {
 		i, pp := i, pp
 		wp.Submit(func() {
-			res := ps.checkOneProxyTimeout(ctx, pp.ProxyID, pp.Address, pp.Protocol, url, 10*time.Second)
+			res := ps.checkOneProxyTimeout(ctx, pp.ToProxy(), url, 10*time.Second)
 			slots[i] = res
 
 			mu.Lock()
