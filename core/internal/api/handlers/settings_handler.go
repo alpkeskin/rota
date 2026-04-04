@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,16 +13,24 @@ import (
 
 // SettingsHandler handles settings endpoints
 type SettingsHandler struct {
-	settingsRepo *repository.SettingsRepository
-	logger       *logger.Logger
+	settingsRepo     *repository.SettingsRepository
+	logger           *logger.Logger
+	onSettingsUpdate func(ctx context.Context) // called after settings are persisted
 }
 
-// NewSettingsHandler creates a new SettingsHandler
-func NewSettingsHandler(settingsRepo *repository.SettingsRepository, log *logger.Logger) *SettingsHandler {
+// NewSettingsHandler creates a new SettingsHandler.
+// onUpdate is an optional callback invoked after settings are saved (e.g. to reload the proxy server).
+func NewSettingsHandler(settingsRepo *repository.SettingsRepository, log *logger.Logger, onUpdate func(ctx context.Context)) *SettingsHandler {
 	return &SettingsHandler{
-		settingsRepo: settingsRepo,
-		logger:       log,
+		settingsRepo:     settingsRepo,
+		logger:           log,
+		onSettingsUpdate: onUpdate,
 	}
+}
+
+// SetOnUpdate sets the callback invoked after settings are persisted.
+func (h *SettingsHandler) SetOnUpdate(fn func(ctx context.Context)) {
+	h.onSettingsUpdate = fn
 }
 
 // Get handles getting current configuration
@@ -96,6 +105,12 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("settings updated successfully")
+
+	// Reload proxy server so changes take effect immediately
+	if h.onSettingsUpdate != nil {
+		h.onSettingsUpdate(r.Context())
+	}
+
 	h.jsonResponse(w, http.StatusOK, response)
 }
 

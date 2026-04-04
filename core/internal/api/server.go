@@ -95,7 +95,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	dashboardHandler := handlers.NewDashboardHandler(dashboardRepo, proxyRepo, log)
 	proxyHandler := handlers.NewProxyHandler(proxyRepo, healthChecker, log)
 	logsHandler := handlers.NewLogsHandler(logRepo, log)
-	settingsHandler := handlers.NewSettingsHandler(settingsRepo, log)
+	settingsHandler := handlers.NewSettingsHandler(settingsRepo, log, nil) // onUpdate set below
 	websocketHandler := handlers.NewWebSocketHandler(dashboardRepo, proxyRepo, logRepo, log)
 	metricsHandler := handlers.NewMetricsHandler(log)
 	documentationHandler := handlers.NewDocumentationHandler()
@@ -133,6 +133,17 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 		poolHandler:          poolHandler,
 		userHandler:          userHandler,
 	}
+
+	// Wire settings reload: when settings are updated via API, reload proxy server
+	settingsHandler.SetOnUpdate(func(ctx context.Context) {
+		if s.proxyServer != nil {
+			if err := s.proxyServer.ReloadSettings(ctx); err != nil {
+				log.Error("failed to reload proxy settings after update", "error", err)
+			} else {
+				log.Info("proxy settings reloaded after update")
+			}
+		}
+	})
 
 	// Alert watcher + proxy cleanup services
 	alertWatcher := services.NewAlertWatcher(poolRepo, log)
