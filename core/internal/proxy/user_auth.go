@@ -13,7 +13,6 @@ import (
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
-	"github.com/elazarl/goproxy"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -83,11 +82,11 @@ func NewUserAuthMiddleware(
 // HandleRequest is called for every HTTP proxy request.
 // It reads Proxy-Authorization, looks up the user, builds a PoolChain and stores
 // it in the request context so the handler can use it.
-func (m *UserAuthMiddleware) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+func (m *UserAuthMiddleware) HandleRequest(req *http.Request) (*http.Request, *http.Response) {
 	username, password, ok := parseProxyAuth(req)
 	if !ok {
 		// No credentials provided — check legacy auth
-		return m.legacy.HandleRequest(req, ctx)
+		return m.legacy.HandleRequest(req)
 	}
 
 	chain, err := m.resolve(req.Context(), username, password)
@@ -96,7 +95,7 @@ func (m *UserAuthMiddleware) HandleRequest(req *http.Request, ctx *goproxy.Proxy
 		// If legacy auth is enabled and credentials don't match a proxy_user,
 		// still try the legacy path (single admin user)
 		if m.legacy != nil {
-			if _, resp := m.legacy.HandleRequest(req, ctx); resp != nil {
+			if _, resp := m.legacy.HandleRequest(req); resp != nil {
 				return req, resp
 			}
 			// legacy auth passed with these same credentials → allow without pool chain
@@ -113,8 +112,8 @@ func (m *UserAuthMiddleware) HandleRequest(req *http.Request, ctx *goproxy.Proxy
 }
 
 // HandleConnect is the same but for HTTPS CONNECT.
-func (m *UserAuthMiddleware) HandleConnect(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	return m.HandleRequest(req, ctx)
+func (m *UserAuthMiddleware) HandleConnect(req *http.Request) (*http.Request, *http.Response) {
+	return m.HandleRequest(req)
 }
 
 // resolve authenticates the user and returns a warm PoolChain.

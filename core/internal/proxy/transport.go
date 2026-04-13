@@ -5,12 +5,32 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/models"
 	"h12.io/socks"
 	proxyDialer "golang.org/x/net/proxy"
 )
+
+// transportCache caches *http.Transport per proxy address+protocol to avoid
+// creating a new transport (and new connection pool) for every request.
+var transportCache sync.Map
+
+// GetOrCreateTransport returns a cached transport for the given proxy,
+// or creates and caches a new one.
+func GetOrCreateTransport(p *models.Proxy) (*http.Transport, error) {
+	key := p.Protocol + "://" + p.Address
+	if t, ok := transportCache.Load(key); ok {
+		return t.(*http.Transport), nil
+	}
+	t, err := CreateProxyTransport(p)
+	if err != nil {
+		return nil, err
+	}
+	actual, _ := transportCache.LoadOrStore(key, t)
+	return actual.(*http.Transport), nil
+}
 
 // CreateProxyTransport creates an HTTP transport configured for the given proxy
 // This is shared between proxy handler and health checker

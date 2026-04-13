@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	"github.com/alpkeskin/rota/core/internal/models"
-	"github.com/elazarl/goproxy"
 	"golang.org/x/time/rate"
 )
 
@@ -39,7 +38,7 @@ func (m *AuthMiddleware) UpdateSettings(settings models.AuthenticationSettings) 
 }
 
 // HandleRequest validates proxy authentication for HTTP requests
-func (m *AuthMiddleware) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+func (m *AuthMiddleware) HandleRequest(req *http.Request) (*http.Request, *http.Response) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -84,8 +83,8 @@ func (m *AuthMiddleware) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx)
 }
 
 // HandleConnect validates proxy authentication for HTTPS CONNECT requests
-func (m *AuthMiddleware) HandleConnect(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	return m.HandleRequest(req, ctx)
+func (m *AuthMiddleware) HandleConnect(req *http.Request) (*http.Request, *http.Response) {
+	return m.HandleRequest(req)
 }
 
 // unauthorized returns a 407 Proxy Authentication Required response
@@ -133,7 +132,7 @@ func (m *RateLimitMiddleware) UpdateSettings(settings models.RateLimitSettings) 
 }
 
 // HandleRequest validates rate limits for HTTP requests
-func (m *RateLimitMiddleware) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+func (m *RateLimitMiddleware) HandleRequest(req *http.Request) (*http.Request, *http.Response) {
 	if !m.enabled {
 		return req, nil
 	}
@@ -150,8 +149,8 @@ func (m *RateLimitMiddleware) HandleRequest(req *http.Request, ctx *goproxy.Prox
 }
 
 // HandleConnect validates rate limits for HTTPS CONNECT requests
-func (m *RateLimitMiddleware) HandleConnect(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	return m.HandleRequest(req, ctx)
+func (m *RateLimitMiddleware) HandleConnect(req *http.Request) (*http.Request, *http.Response) {
+	return m.HandleRequest(req)
 }
 
 // allow checks if the request is allowed based on rate limiting
