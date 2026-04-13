@@ -87,6 +87,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// GeoIP + source + pool services
 	geoSvc := services.NewGeoIPService(log)
 	sourceSvc := services.NewSourceService(sourceRepo, proxyRepo, poolRepo, geoSvc, log)
+	sourceSvc.SetHealthChecker(healthChecker) // auto health-check after source import
 	poolSvc := services.NewPoolService(poolRepo, proxyRepo, log)
 
 	// Initialize handlers
@@ -153,6 +154,10 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	sourceSvc.Start(context.Background())
 	poolSvc.Start(context.Background())
 	alertWatcher.Start(context.Background())
+
+	// Periodic health check: re-tests ALL proxies (including failed) every 5 minutes.
+	// This recovers proxies that were temporarily down.
+	go healthChecker.StartPeriodicHealthCheck(context.Background(), 5*time.Minute)
 	cleanupSvc.Start(context.Background())
 
 	s.setupMiddleware()

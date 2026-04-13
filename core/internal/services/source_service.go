@@ -85,12 +85,18 @@ func parseProxyLine(line string) (parsedProxy, bool) {
 	return parsedProxy{}, false
 }
 
+// ProxyTester is the subset of HealthChecker used by SourceService.
+type ProxyTester interface {
+	CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error)
+}
+
 // SourceService fetches proxy lists from remote URLs and imports them into the DB.
 type SourceService struct {
 	sourceRepo *repository.SourceRepository
 	proxyRepo  *repository.ProxyRepository
 	poolRepo   *repository.PoolRepository
 	geoSvc     *GeoIPService
+	tester     ProxyTester // optional: auto health-check after import
 	logger     *logger.Logger
 	client     *http.Client
 
@@ -115,6 +121,11 @@ func NewSourceService(
 		client:     &http.Client{Timeout: 30 * time.Second},
 		stopCh:     make(chan struct{}),
 	}
+}
+
+// SetHealthChecker sets the proxy tester for auto health checks after import.
+func (s *SourceService) SetHealthChecker(t ProxyTester) {
+	s.tester = t
 }
 
 // Start runs a background goroutine that checks for due sources every minute.
@@ -235,6 +246,27 @@ func (s *SourceService) fetchAndImport(ctx context.Context, src *models.ProxySou
 
 	// Enrich geo data in the background
 	go s.enrichGeo(context.Background(), addresses)
+
+	// Auto health-check all idle/new proxies after import
+	if s.tester != nil && created > 0 {
+		go func() {
+			hcCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			results, err := s.tester.CheckAllProxies(hcCtx)
+			if err != nil {
+				s.logger.Error("auto health-check after import failed", "error", err)
+			} else {
+				active := 0
+				for _, r := range results {
+					if r.Status == "active" {
+						active++
+					}
+				}
+				s.logger.Info("auto health-check after import completed",
+					"total", len(results), "active", active)
+			}
+		}()
+	}
 
 	return created, nil
 }

@@ -298,11 +298,11 @@ func (h *UpstreamProxyHandler) sendWithRetry(req *http.Request, ctx context.Cont
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				}
+				// RecordRequest → updateProxyStats handles the 3-consecutive-failures
+				// threshold naturally. Do NOT call UpdateProxyStatus("failed") here —
+				// that bypasses the threshold and kills the proxy on first failure.
 				if recordErr := h.tracker.RecordRequest(recordCtx, record); recordErr != nil {
 					h.logger.Error("failed to record failed request", "error", recordErr)
-				}
-				if markErr := h.tracker.UpdateProxyStatus(recordCtx, selectedProxy.ID, "failed"); markErr != nil {
-					h.logger.Error("failed to mark proxy as failed", "error", markErr)
 				}
 			}()
 
