@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
@@ -275,7 +276,13 @@ func (h *ProxyHandler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deleted, err := h.proxyRepo.BulkDelete(r.Context(), req.IDs)
+	// Use a detached context so client disconnect during a long delete doesn't
+	// cancel the DB operation mid-way. Large bulk deletes can take tens of
+	// seconds against TimescaleDB with CASCADE on proxy_requests.
+	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	deleted, err := h.proxyRepo.BulkDelete(dbCtx, req.IDs)
 	if err != nil {
 		h.logger.Error("failed to bulk delete proxies", "error", err)
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to delete proxies")
@@ -414,7 +421,13 @@ func (h *ProxyHandler) exportCSV(w http.ResponseWriter, proxies []models.ProxyWi
 
 // DeleteAll removes every proxy from the database.
 func (h *ProxyHandler) DeleteAll(w http.ResponseWriter, r *http.Request) {
-	deleted, err := h.proxyRepo.DeleteAll(r.Context())
+	// Use a detached context so client disconnect doesn't cancel the delete.
+	// Deleting all proxies can take minutes when there are many rows in
+	// proxy_requests (CASCADE delete on foreign key).
+	dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	deleted, err := h.proxyRepo.DeleteAll(dbCtx)
 	if err != nil {
 		h.logger.Error("failed to delete all proxies", "error", err)
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to delete all proxies")
