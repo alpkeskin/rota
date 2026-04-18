@@ -482,6 +482,32 @@ var migrations = []Migration{
 			WHERE key = 'healthcheck';
 		`,
 	},
+	{
+		Version:     21,
+		Description: "Source: last_total column + per-source soft cleanup settings + proxies.last_seen_at",
+		Up: `
+			-- proxy_sources: total lines in last fetch + opt-in cleanup config
+			ALTER TABLE proxy_sources
+			  ADD COLUMN IF NOT EXISTS last_total       INTEGER NOT NULL DEFAULT 0,
+			  ADD COLUMN IF NOT EXISTS cleanup_enabled  BOOLEAN NOT NULL DEFAULT false,
+			  ADD COLUMN IF NOT EXISTS cleanup_days     INTEGER NOT NULL DEFAULT 7;
+
+			-- proxies: last time a proxy was seen in its source's fetch response
+			ALTER TABLE proxies
+			  ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP;
+
+			CREATE INDEX IF NOT EXISTS idx_proxies_source_last_seen
+			  ON proxies(source_id, last_seen_at)
+			  WHERE source_id IS NOT NULL;
+		`,
+		Down: `
+			DROP INDEX IF EXISTS idx_proxies_source_last_seen;
+			ALTER TABLE proxies       DROP COLUMN IF EXISTS last_seen_at;
+			ALTER TABLE proxy_sources DROP COLUMN IF EXISTS cleanup_days;
+			ALTER TABLE proxy_sources DROP COLUMN IF EXISTS cleanup_enabled;
+			ALTER TABLE proxy_sources DROP COLUMN IF EXISTS last_total;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

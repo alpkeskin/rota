@@ -57,6 +57,16 @@ func (h *SourceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.IntervalMinutes <= 0 {
 		req.IntervalMinutes = 60
 	}
+	// cleanup_days bounds
+	if req.CleanupDays < 0 {
+		req.CleanupDays = 0
+	}
+	if req.CleanupDays > 365 {
+		req.CleanupDays = 365
+	}
+	if req.CleanupEnabled && req.CleanupDays == 0 {
+		req.CleanupDays = 7 // sensible default
+	}
 
 	src, err := h.sourceRepo.Create(r.Context(), req)
 	if err != nil {
@@ -78,6 +88,13 @@ func (h *SourceHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 		return
+	}
+	// cleanup_days bounds
+	if req.CleanupDays < 0 {
+		req.CleanupDays = 0
+	}
+	if req.CleanupDays > 365 {
+		req.CleanupDays = 365
 	}
 	src, err := h.sourceRepo.Update(r.Context(), id, req)
 	if err != nil || src == nil {

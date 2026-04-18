@@ -152,13 +152,13 @@ func (s *SourceService) FetchNow(ctx context.Context, sourceID int) (*models.Pro
 	if err != nil || src == nil {
 		return nil, 0, fmt.Errorf("source not found: %w", err)
 	}
-	count, fetchErr := s.fetchAndImport(ctx, src)
-	_ = s.sourceRepo.UpdateFetchResult(ctx, src.ID, count, fetchErr)
+	imported, total, fetchErr := s.fetchAndImport(ctx, src)
+	_ = s.sourceRepo.UpdateFetchResult(ctx, src.ID, imported, total, fetchErr)
 	if fetchErr != nil {
 		return src, 0, fetchErr
 	}
 	updated, _ := s.sourceRepo.GetByID(ctx, src.ID)
-	return updated, count, nil
+	return updated, imported, nil
 }
 
 // fetchDueSources finds all sources that are overdue and fetches them.
@@ -173,14 +173,16 @@ func (s *SourceService) fetchDueSources(ctx context.Context) {
 	}
 	for _, src := range sources {
 		srcCopy := src
-		count, fetchErr := s.fetchAndImport(ctx, &srcCopy)
-		if updateErr := s.sourceRepo.UpdateFetchResult(ctx, src.ID, count, fetchErr); updateErr != nil {
+		imported, total, fetchErr := s.fetchAndImport(ctx, &srcCopy)
+		if updateErr := s.sourceRepo.UpdateFetchResult(ctx, src.ID, imported, total, fetchErr); updateErr != nil {
 			s.logger.Error("failed to update source fetch result", "source_id", src.ID, "error", updateErr)
 		}
 		if fetchErr != nil {
 			s.logger.Error("failed to fetch source", "source_id", src.ID, "url", src.URL, "error", fetchErr)
 		} else {
-			s.logger.Info("fetched source", "source_id", src.ID, "name", src.Name, "count", count)
+			s.logger.Info("fetched source",
+				"source_id", src.ID, "name", src.Name,
+				"imported", imported, "total", total)
 		}
 	}
 
@@ -199,34 +201,38 @@ func (s *SourceService) syncAllPools(ctx context.Context) {
 }
 
 // fetchAndImport downloads the list, parses it, and upserts proxies.
-func (s *SourceService) fetchAndImport(ctx context.Context, src *models.ProxySource) (int, error) {
+// Returns (imported, total, err):
+//   - imported = number of NEW proxies created this fetch
+//   - total    = total number of parseable proxy lines returned by the source
+func (s *SourceService) fetchAndImport(ctx context.Context, src *models.ProxySource) (int, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
 	if err != nil {
-		return 0, fmt.Errorf("failed to build request: %w", err)
+		return 0, 0, fmt.Errorf("failed to build request: %w", err)
 	}
 	req.Header.Set("User-Agent", "Rota-SourceFetcher/1.0")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("fetch failed: %w", err)
+		return 0, 0, fmt.Errorf("fetch failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("unexpected HTTP %d from %s", resp.StatusCode, src.URL)
+		return 0, 0, fmt.Errorf("unexpected HTTP %d from %s", resp.StatusCode, src.URL)
 	}
 
 	parsed, err := parseProxyList(resp.Body)
 	if err != nil {
-		return 0, fmt.Errorf("parse failed: %w", err)
+		return 0, 0, fmt.Errorf("parse failed: %w", err)
 	}
-	if len(parsed) == 0 {
-		return 0, nil
+	total := len(parsed)
+	if total == 0 {
+		return 0, 0, nil
 	}
 
 	// Build upsert requests — protocol from line takes priority over source default
-	requests := make([]models.CreateProxyRequest, 0, len(parsed))
-	addresses := make([]string, 0, len(parsed))
+	requests := make([]models.CreateProxyRequest, 0, total)
+	addresses := make([]string, 0, total)
 	for _, p := range parsed {
 		proto := src.Protocol
 		if p.protocol != "" {
@@ -244,31 +250,28 @@ func (s *SourceService) fetchAndImport(ctx context.Context, src *models.ProxySou
 
 	created, _ := s.bulkUpsert(ctx, requests)
 
+	// Stamp every address present in this fetch as "last seen now" so the
+	// soft-cleanup cron knows they're still live.
+	if err := s.sourceRepo.MarkSeen(ctx, src.ID, addresses); err != nil {
+		s.logger.Warn("failed to mark proxies as seen", "source_id", src.ID, "error", err)
+	}
+
+	// Per-source soft cleanup: delete proxies that have been absent from this
+	// source's fetch output for longer than cleanup_days.
+	if src.CleanupEnabled && src.CleanupDays > 0 {
+		deleted, err := s.sourceRepo.DeleteStaleForSource(ctx, src.ID, src.CleanupDays)
+		if err != nil {
+			s.logger.Warn("source cleanup failed", "source_id", src.ID, "error", err)
+		} else if deleted > 0 {
+			s.logger.Info("source cleanup removed stale proxies",
+				"source_id", src.ID, "deleted", deleted, "threshold_days", src.CleanupDays)
+		}
+	}
+
 	// Enrich geo data in the background
 	go s.enrichGeo(context.Background(), addresses)
 
-	// Auto health-check all idle/new proxies after import
-	if s.tester != nil && created > 0 {
-		go func() {
-			hcCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			results, err := s.tester.CheckAllProxies(hcCtx)
-			if err != nil {
-				s.logger.Error("auto health-check after import failed", "error", err)
-			} else {
-				active := 0
-				for _, r := range results {
-					if r.Status == "active" {
-						active++
-					}
-				}
-				s.logger.Info("auto health-check after import completed",
-					"total", len(results), "active", active)
-			}
-		}()
-	}
-
-	return created, nil
+	return created, total, nil
 }
 
 // bulkUpsert upserts proxies. Returns (created, failed).

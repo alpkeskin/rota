@@ -31,6 +31,8 @@ const DEFAULT_FORM: CreateSourceRequest = {
   protocol: "http",
   enabled: true,
   interval_minutes: 60,
+  cleanup_enabled: false,
+  cleanup_days: 7,
 }
 
 export default function SourcesPage() {
@@ -71,6 +73,8 @@ export default function SourcesPage() {
       protocol: s.protocol,
       enabled: s.enabled,
       interval_minutes: s.interval_minutes,
+      cleanup_enabled: s.cleanup_enabled,
+      cleanup_days: s.cleanup_days || 7,
     })
     setDialogOpen(true)
   }
@@ -245,8 +249,10 @@ export default function SourcesPage() {
                   <TableHead>Protocol</TableHead>
                   <TableHead>Interval</TableHead>
                   <TableHead>Last Fetch</TableHead>
-                  <TableHead>Imported</TableHead>
+                  <TableHead title="Total lines returned by the source on last fetch">Total</TableHead>
+                  <TableHead title="Newly created proxies on last fetch">Imported</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead title="Per-source auto-cleanup threshold (days)">Cleanup</TableHead>
                   <TableHead>Enabled</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -273,6 +279,9 @@ export default function SourcesPage() {
                       {formatDate(s.last_fetched_at)}
                     </TableCell>
                     <TableCell>
+                      <span className="font-semibold">{s.last_total.toLocaleString()}</span>
+                    </TableCell>
+                    <TableCell>
                       <span className="font-semibold">{s.last_count.toLocaleString()}</span>
                     </TableCell>
                     <TableCell>
@@ -286,6 +295,15 @@ export default function SourcesPage() {
                           <CheckCircle2 className="h-3 w-3" />
                           OK
                         </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {s.cleanup_enabled ? (
+                        <Badge variant="outline" className="text-xs" title="Delete proxies missing from fetch for this many days">
+                          {s.cleanup_days}d
+                        </Badge>
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
                       )}
@@ -391,6 +409,38 @@ export default function SourcesPage() {
                 onCheckedChange={v => setForm({ ...form, enabled: v })}
               />
               <Label htmlFor="src-enabled">Enabled</Label>
+            </div>
+
+            {/* Soft auto-cleanup — per-source */}
+            <div className="border-t pt-4 flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="src-cleanup"
+                  checked={!!form.cleanup_enabled}
+                  onCheckedChange={v => setForm({ ...form, cleanup_enabled: v })}
+                />
+                <Label htmlFor="src-cleanup">Auto-cleanup stale proxies</Label>
+              </div>
+              <p className="text-xs text-muted-foreground -mt-1">
+                Delete proxies that have been missing from this source's fetch for longer than the threshold below.
+                Proxies still in the fetch response are never deleted.
+              </p>
+              {form.cleanup_enabled && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="src-cleanup-days">Delete after (days)</Label>
+                  <Input
+                    id="src-cleanup-days"
+                    type="number"
+                    min={1}
+                    max={365}
+                    value={form.cleanup_days ?? 7}
+                    onChange={e => setForm({
+                      ...form,
+                      cleanup_days: Math.max(1, Math.min(365, parseInt(e.target.value) || 7)),
+                    })}
+                  />
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>

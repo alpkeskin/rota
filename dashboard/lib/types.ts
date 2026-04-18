@@ -186,8 +186,11 @@ export interface ProxySource {
   enabled: boolean
   interval_minutes: number
   last_fetched_at?: string
-  last_count: number
+  last_count: number        // newly imported on last fetch
+  last_total: number        // total lines returned on last fetch
   last_error?: string
+  cleanup_enabled: boolean
+  cleanup_days: number
   created_at: string
   updated_at: string
 }
@@ -198,6 +201,8 @@ export interface CreateSourceRequest {
   protocol: "http" | "https" | "socks4" | "socks4a" | "socks5"
   enabled: boolean
   interval_minutes: number
+  cleanup_enabled?: boolean
+  cleanup_days?: number
 }
 
 export interface UpdateSourceRequest {
@@ -206,6 +211,8 @@ export interface UpdateSourceRequest {
   protocol?: string
   enabled?: boolean
   interval_minutes?: number
+  cleanup_enabled?: boolean
+  cleanup_days?: number
 }
 
 // ── Proxy Pools ────────────────────────────────────────────────────────────
