@@ -118,15 +118,32 @@ func (ps *PoolService) runAutoSync(ctx context.Context) {
 }
 
 // SyncPool re-builds the membership of a single pool from all its filters (geo+isp+tag).
-// Returns total pool size after sync. New members are NOT auto-health-checked from
-// this path — the public API caller should trigger a pool HC explicitly if desired.
+// Returns total pool size after sync. Newly-added members get an immediate
+// scoped health check in the background so they're not left as `idle` when
+// the user expands the pool (e.g. adds a new country filter).
 func (ps *PoolService) SyncPool(ctx context.Context, poolID int) (int, error) {
 	pool, err := ps.poolRepo.GetByID(ctx, poolID)
 	if err != nil || pool == nil {
 		return 0, fmt.Errorf("pool not found")
 	}
-	total, _, err := ps.poolRepo.SyncPoolByFilters(ctx, *pool)
-	return total, err
+	total, newIDs, err := ps.poolRepo.SyncPoolByFilters(ctx, *pool)
+	if err != nil {
+		return total, err
+	}
+	if len(newIDs) > 0 {
+		ps.logger.Info("manual sync added new proxies to pool",
+			"pool_id", poolID, "added", len(newIDs), "total", total)
+		newCopy := append([]int(nil), newIDs...)
+		go func(p models.ProxyPool, ids []int) {
+			hcCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			if err := ps.checkProxiesByIDs(hcCtx, p.HealthCheckURL, ids, 20); err != nil {
+				ps.logger.Warn("auto-HC on new pool members failed (manual sync)",
+					"pool_id", p.ID, "error", err)
+			}
+		}(*pool, newCopy)
+	}
+	return total, nil
 }
 
 // checkProxiesByIDs runs a health check on the specified proxy IDs only.
