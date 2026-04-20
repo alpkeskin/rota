@@ -443,7 +443,7 @@ func (r *PoolRepository) SyncAllAutoSyncPools(ctx context.Context) (int, error) 
 	synced := 0
 	for _, pool := range pools {
 		if pool.AutoSync && pool.Enabled && pool.SyncMode != "manual" {
-			if _, err := r.SyncPoolByFilters(ctx, pool); err == nil {
+			if _, _, err := r.SyncPoolByFilters(ctx, pool); err == nil {
 				synced++
 			}
 		}
@@ -627,16 +627,18 @@ func (r *PoolRepository) SetTagFilters(ctx context.Context, poolID int, tags []s
 	return nil
 }
 
-// SyncPoolByFilters rebuilds pool membership using geo + ISP + tag filters combined
-func (r *PoolRepository) SyncPoolByFilters(ctx context.Context, pool models.ProxyPool) (int, error) {
+// SyncPoolByFilters rebuilds pool membership using geo + ISP + tag filters combined.
+// Returns (totalCount, newIDs, err) — newIDs are proxies that weren't in the pool
+// before this sync call, so callers can trigger health checks only for those.
+func (r *PoolRepository) SyncPoolByFilters(ctx context.Context, pool models.ProxyPool) (int, []int, error) {
 	// Skip sync if sync_mode is manual
 	if pool.SyncMode == "manual" {
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	geoFilters, err := r.GetGeoFilters(ctx, pool.ID)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	// Fall back to legacy single country/city
 	if len(geoFilters) == 0 && pool.CountryCode != nil && *pool.CountryCode != "" {
@@ -648,16 +650,16 @@ func (r *PoolRepository) SyncPoolByFilters(ctx context.Context, pool models.Prox
 
 	ispFilters, err := r.GetISPFilters(ctx, pool.ID)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	tagFilters, err := r.GetTagFilters(ctx, pool.ID)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	// If no filters at all — nothing to sync
 	if len(geoFilters) == 0 && len(ispFilters) == 0 && len(tagFilters) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	idSet := make(map[int]bool)
@@ -684,11 +686,11 @@ func (r *PoolRepository) SyncPoolByFilters(ctx context.Context, pool models.Prox
 		if f.CityName != "" {
 			if err := addIDs(`SELECT id FROM proxies WHERE country_code=$1 AND city_name ILIKE $2`,
 				f.CountryCode, "%"+f.CityName+"%"); err != nil {
-				return 0, err
+				return 0, nil, err
 			}
 		} else {
 			if err := addIDs(`SELECT id FROM proxies WHERE country_code=$1`, f.CountryCode); err != nil {
-				return 0, err
+				return 0, nil, err
 			}
 		}
 	}
@@ -696,7 +698,7 @@ func (r *PoolRepository) SyncPoolByFilters(ctx context.Context, pool models.Prox
 	// ISP filters (OR between ISPs, ILIKE match)
 	for _, isp := range ispFilters {
 		if err := addIDs(`SELECT id FROM proxies WHERE isp ILIKE $1`, "%"+isp+"%"); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 	}
 
@@ -705,30 +707,52 @@ func (r *PoolRepository) SyncPoolByFilters(ctx context.Context, pool models.Prox
 		rows, err := r.db.Pool.Query(ctx,
 			`SELECT id FROM proxies WHERE tags @> $1::text[]`, tagFilters)
 		if err != nil {
-			return 0, fmt.Errorf("tag filter query failed: %w", err)
+			return 0, nil, fmt.Errorf("tag filter query failed: %w", err)
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var id int
 			if err := rows.Scan(&id); err != nil {
-				return 0, err
+				return 0, nil, err
 			}
 			idSet[id] = true
 		}
 	}
 
+	// Snapshot current pool membership BEFORE clearing so we can diff and
+	// report which proxies are newly added by this sync.
+	currentSet := make(map[int]bool)
+	curRows, err := r.db.Pool.Query(ctx,
+		`SELECT proxy_id FROM pool_proxies WHERE pool_id = $1`, pool.ID)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to snapshot pool membership: %w", err)
+	}
+	for curRows.Next() {
+		var id int
+		if err := curRows.Scan(&id); err != nil {
+			curRows.Close()
+			return 0, nil, err
+		}
+		currentSet[id] = true
+	}
+	curRows.Close()
+
 	ids := make([]int, 0, len(idSet))
+	newIDs := make([]int, 0)
 	for id := range idSet {
 		ids = append(ids, id)
+		if !currentSet[id] {
+			newIDs = append(newIDs, id)
+		}
 	}
 
 	if err := r.ClearProxies(ctx, pool.ID); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	if err := r.AddProxies(ctx, pool.ID, ids); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return len(ids), nil
+	return len(ids), newIDs, nil
 }
 
 // --- Alert Rules ---

@@ -90,20 +90,94 @@ func (ps *PoolService) runAutoSync(ctx context.Context) {
 	}
 	for _, pool := range pools {
 		if pool.AutoSync && pool.Enabled && pool.SyncMode != "manual" {
-			if _, err := ps.poolRepo.SyncPoolByFilters(ctx, pool); err != nil {
-				ps.logger.Warn("auto-sync pool failed", "pool_id", pool.ID, "error", err)
+			poolCopy := pool
+			total, newIDs, err := ps.poolRepo.SyncPoolByFilters(ctx, poolCopy)
+			if err != nil {
+				ps.logger.Warn("auto-sync pool failed", "pool_id", poolCopy.ID, "error", err)
+				continue
+			}
+			// If new proxies joined the pool during this sync, test them
+			// immediately instead of waiting up to ~30min for the next scheduled
+			// pool health check. Without this, a newly-bought proxy that lands
+			// in a pool stays 'idle' for half an hour.
+			if len(newIDs) > 0 {
+				ps.logger.Info("auto-sync added new proxies to pool",
+					"pool_id", poolCopy.ID, "added", len(newIDs), "total", total)
+				newCopy := append([]int(nil), newIDs...)
+				go func(p models.ProxyPool, ids []int) {
+					hcCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+					defer cancel()
+					if err := ps.checkProxiesByIDs(hcCtx, p.HealthCheckURL, ids, 20); err != nil {
+						ps.logger.Warn("auto-HC on new pool members failed",
+							"pool_id", p.ID, "error", err)
+					}
+				}(poolCopy, newCopy)
 			}
 		}
 	}
 }
 
-// SyncPool re-builds the membership of a single pool from all its filters (geo+isp+tag)
+// SyncPool re-builds the membership of a single pool from all its filters (geo+isp+tag).
+// Returns total pool size after sync. New members are NOT auto-health-checked from
+// this path — the public API caller should trigger a pool HC explicitly if desired.
 func (ps *PoolService) SyncPool(ctx context.Context, poolID int) (int, error) {
 	pool, err := ps.poolRepo.GetByID(ctx, poolID)
 	if err != nil || pool == nil {
 		return 0, fmt.Errorf("pool not found")
 	}
-	return ps.poolRepo.SyncPoolByFilters(ctx, *pool)
+	total, _, err := ps.poolRepo.SyncPoolByFilters(ctx, *pool)
+	return total, err
+}
+
+// checkProxiesByIDs runs a health check on the specified proxy IDs only.
+// Used by auto-sync to test newly-added pool members immediately instead of
+// waiting for the next scheduled */30 cron tick.
+func (ps *PoolService) checkProxiesByIDs(ctx context.Context, checkURL string, proxyIDs []int, workers int) error {
+	if len(proxyIDs) == 0 {
+		return nil
+	}
+	if workers <= 0 {
+		workers = 20
+	}
+	if checkURL == "" {
+		checkURL = "https://api.ipify.org"
+	}
+
+	// Load the proxy rows for the given IDs
+	rows, err := ps.proxyRepo.GetDB().Pool.Query(ctx, `
+		SELECT id, address, protocol, username, password, status
+		FROM proxies
+		WHERE id = ANY($1::int[])
+	`, proxyIDs)
+	if err != nil {
+		return fmt.Errorf("failed to load proxies by ids: %w", err)
+	}
+	defer rows.Close()
+
+	var proxies []*models.Proxy
+	for rows.Next() {
+		var p models.Proxy
+		if err := rows.Scan(&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Password, &p.Status); err != nil {
+			return err
+		}
+		proxies = append(proxies, &p)
+	}
+	if len(proxies) == 0 {
+		return nil
+	}
+
+	wp := workerpool.New(workers)
+	for _, p := range proxies {
+		p := p
+		wp.Submit(func() {
+			ps.checkOneProxy(ctx, p, checkURL)
+		})
+	}
+	wp.StopWait()
+
+	ps.logger.Info("auto-HC on new pool members completed",
+		"count", len(proxies), "url", checkURL)
+	return nil
 }
 
 // HealthCheckPool tests all proxies in a pool against the pool's custom URL
