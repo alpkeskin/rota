@@ -90,6 +90,10 @@ export default function PoolsPage() {
   const [form, setForm] = useState<CreatePoolRequest>(DEFAULT_POOL_FORM)
   const [saving, setSaving] = useState(false)
 
+  // Quick-add geo filter inside edit dialog
+  const [newGeoCountry, setNewGeoCountry] = useState("")
+  const [newGeoCity, setNewGeoCity] = useState("")
+
   // Alert rules
   const [alertRules, setAlertRules] = useState<PoolAlertRule[]>([])
   const [alertDialogOpen, setAlertDialogOpen] = useState(false)
@@ -119,7 +123,9 @@ export default function PoolsPage() {
 
   const openCreate = () => {
     setEditPool(null)
-    setForm(DEFAULT_POOL_FORM)
+    setForm({ ...DEFAULT_POOL_FORM, geo_filters: [] })
+    setNewGeoCountry("")
+    setNewGeoCity("")
     setDialogOpen(true)
   }
 
@@ -143,6 +149,8 @@ export default function PoolsPage() {
       isp_filters: p.isp_filters ?? [],
       tag_filters: p.tag_filters ?? [],
     })
+    setNewGeoCountry("")
+    setNewGeoCity("")
     setDialogOpen(true)
   }
 
@@ -695,30 +703,134 @@ export default function PoolsPage() {
                 />
               </div>
 
-              <div className="flex flex-col gap-1.5">
-                <Label>Country code (filter)</Label>
-                <Input
-                  placeholder="US"
-                  maxLength={3}
-                  value={form.country_code ?? ""}
-                  onChange={e => setForm({ ...form, country_code: e.target.value || undefined })}
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label>Region (filter)</Label>
-                <Input
-                  placeholder="California"
-                  value={form.region_name ?? ""}
-                  onChange={e => setForm({ ...form, region_name: e.target.value || undefined })}
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label>City (filter)</Label>
-                <Input
-                  placeholder="Los Angeles"
-                  value={form.city_name ?? ""}
-                  onChange={e => setForm({ ...form, city_name: e.target.value || undefined })}
-                />
+              {/* Multi-country geo filters — lets a pool match proxies from multiple countries */}
+              <div className="col-span-2 flex flex-col gap-2 border rounded-md p-3">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm font-medium">Countries in this pool</Label>
+                  <span className="text-xs text-muted-foreground">
+                    {form.geo_filters?.length ?? 0} filter{(form.geo_filters?.length ?? 0) === 1 ? "" : "s"}
+                  </span>
+                </div>
+
+                {/* Existing filters as removable badges */}
+                <div className="flex flex-wrap gap-1.5 min-h-[28px]">
+                  {(form.geo_filters ?? []).length === 0 && (
+                    <span className="text-xs text-muted-foreground italic">
+                      No country filters yet — this pool will not sync any proxies. Add at least one below.
+                    </span>
+                  )}
+                  {(form.geo_filters ?? []).map((f, idx) => (
+                    <Badge key={`${f.country_code}-${f.city_name ?? ""}-${idx}`} variant="secondary" className="gap-1 pr-1">
+                      <img src={FLAG_CDN(f.country_code)} alt={f.country_code} className="h-3" />
+                      <span className="font-mono text-xs">{f.country_code.toUpperCase()}</span>
+                      {f.city_name && <span className="text-xs text-muted-foreground">/ {f.city_name}</span>}
+                      <button
+                        type="button"
+                        className="ml-0.5 rounded hover:bg-muted-foreground/20 px-1 text-xs leading-none"
+                        onClick={() => setForm({
+                          ...form,
+                          geo_filters: (form.geo_filters ?? []).filter((_, i) => i !== idx),
+                        })}
+                        title="Remove"
+                      >
+                        ×
+                      </button>
+                    </Badge>
+                  ))}
+                </div>
+
+                {/* Quick-add row: country code + optional city + Add button */}
+                <div className="flex gap-2 items-end pt-1">
+                  <div className="flex flex-col gap-1 flex-1">
+                    <Label htmlFor="new-geo-cc" className="text-xs">Country</Label>
+                    <Input
+                      id="new-geo-cc"
+                      placeholder="BR"
+                      maxLength={3}
+                      value={newGeoCountry}
+                      onChange={e => setNewGeoCountry(e.target.value.toUpperCase())}
+                      onKeyDown={e => {
+                        if (e.key === "Enter") {
+                          e.preventDefault()
+                          const cc = newGeoCountry.trim().toUpperCase()
+                          if (!cc) return
+                          const existing = form.geo_filters ?? []
+                          if (existing.some(f => f.country_code === cc && (f.city_name ?? "") === newGeoCity.trim())) {
+                            toast.error("Already added")
+                            return
+                          }
+                          setForm({
+                            ...form,
+                            geo_filters: [...existing, { country_code: cc, ...(newGeoCity.trim() ? { city_name: newGeoCity.trim() } : {}) }],
+                          })
+                          setNewGeoCountry("")
+                          setNewGeoCity("")
+                        }
+                      }}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1 flex-[2]">
+                    <Label htmlFor="new-geo-city" className="text-xs">City (optional)</Label>
+                    <Input
+                      id="new-geo-city"
+                      placeholder="Leave empty for whole country"
+                      value={newGeoCity}
+                      onChange={e => setNewGeoCity(e.target.value)}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      const cc = newGeoCountry.trim().toUpperCase()
+                      if (!cc) { toast.error("Enter a country code"); return }
+                      const existing = form.geo_filters ?? []
+                      if (existing.some(f => f.country_code === cc && (f.city_name ?? "") === newGeoCity.trim())) {
+                        toast.error("Already added")
+                        return
+                      }
+                      setForm({
+                        ...form,
+                        geo_filters: [...existing, { country_code: cc, ...(newGeoCity.trim() ? { city_name: newGeoCity.trim() } : {}) }],
+                      })
+                      setNewGeoCountry("")
+                      setNewGeoCity("")
+                    }}
+                  >
+                    <Plus className="h-4 w-4 mr-1" /> Add
+                  </Button>
+                </div>
+
+                {/* Quick-pick common countries from existing proxy inventory */}
+                {geoCountries.length > 0 && (
+                  <div className="pt-2 border-t mt-1 flex flex-col gap-1.5">
+                    <Label className="text-xs text-muted-foreground">Quick pick from inventory</Label>
+                    <div className="flex flex-wrap gap-1">
+                      {geoCountries.slice(0, 12).map(gc => {
+                        const already = (form.geo_filters ?? []).some(f => f.country_code === gc.country_code && !f.city_name)
+                        return (
+                          <Button
+                            key={gc.country_code}
+                            type="button"
+                            size="sm"
+                            variant={already ? "secondary" : "outline"}
+                            disabled={already}
+                            className="h-6 px-2 text-xs"
+                            onClick={() => setForm({
+                              ...form,
+                              geo_filters: [...(form.geo_filters ?? []), { country_code: gc.country_code }],
+                            })}
+                            title={`${gc.country_name ?? gc.country_code} — ${gc.total} proxies`}
+                          >
+                            <img src={FLAG_CDN(gc.country_code)} alt={gc.country_code} className="h-3 mr-1" />
+                            {gc.country_code}
+                            <span className="ml-1 text-muted-foreground">({gc.total})</span>
+                          </Button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-col gap-1.5">

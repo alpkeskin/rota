@@ -3,19 +3,72 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"net"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
-	"github.com/elazarl/goproxy"
 )
+
+// proxyRouter is the core HTTP handler that dispatches incoming proxy requests.
+// It replaces the goproxy library with a minimal, zero-dependency implementation
+// that supports both HTTP forwarding and HTTPS CONNECT tunneling.
+type proxyRouter struct {
+	upstream    *UpstreamProxyHandler
+	userAuthMw  *UserAuthMiddleware
+	rateLimitMw *RateLimitMiddleware
+	logger      *logger.Logger
+}
+
+// ServeHTTP dispatches incoming requests through the middleware chain
+// and routes them to the appropriate handler based on method.
+func (p *proxyRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 1. User auth middleware (sets PoolChain in context or falls back to legacy)
+	r, reject := p.userAuthMw.HandleRequest(r)
+	if reject != nil {
+		writeHTTPResponse(w, reject)
+		return
+	}
+
+	// 2. Rate limit middleware
+	r, reject = p.rateLimitMw.HandleRequest(r)
+	if reject != nil {
+		writeHTTPResponse(w, reject)
+		return
+	}
+
+	// 3. Dispatch based on method
+	if r.Method == http.MethodConnect {
+		p.upstream.HandleConnectRequest(w, r)
+	} else {
+		p.upstream.HandleHTTPRequest(w, r)
+	}
+}
+
+// writeHTTPResponse translates a middleware-returned *http.Response into
+// http.ResponseWriter calls. This bridges the middleware return convention
+// (returning *http.Response for reject) with the stdlib interface.
+func writeHTTPResponse(w http.ResponseWriter, resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	if resp.Body != nil {
+		io.Copy(w, resp.Body) //nolint:errcheck
+		resp.Body.Close()
+	}
+}
 
 // Server represents the proxy server
 type Server struct {
-	proxy           *goproxy.ProxyHttpServer
+	router          *proxyRouter
 	server          *http.Server
 	logger          *logger.Logger
 	port            int
@@ -75,80 +128,25 @@ func New(
 	// Create user-aware auth middleware (pool-based routing)
 	userAuthMw := NewUserAuthMiddleware(userRepo, poolRepo, db, authMiddleware, &settings.Rotation, log)
 
-	// Create goproxy instance
-	proxyServer := goproxy.NewProxyHttpServer()
-	proxyServer.Verbose = log.Logger.Enabled(context.Background(), -4) // Enable verbose if debug level
-
-	// CRITICAL: Set ConnectDial to route HTTPS through upstream proxy
-	// This is called for ALL CONNECT requests (HTTPS tunneling)
-	// We store the last pool chain seen by the CONNECT handler in a short-lived map.
-	proxyServer.ConnectDial = func(network string, addr string) (net.Conn, error) {
-		log.Info("ConnectDial called",
-			"source", "proxy",
-			"network", network,
-			"addr", addr,
-		)
-		conn, _, err := handler.ConnectThroughProxyForDial(addr)
-		if err != nil {
-			log.Error("ConnectDial failed", "source", "proxy", "addr", addr, "error", err)
-			return nil, err
-		}
-		log.Info("ConnectDial succeeded", "source", "proxy", "addr", addr)
-		return conn, nil
+	// Create the proxy router
+	router := &proxyRouter{
+		upstream:    handler,
+		userAuthMw:  userAuthMw,
+		rateLimitMw: rateLimitMw,
+		logger:      log,
 	}
 
-	// Setup handlers with middleware chain
-	// Order: Auth -> RateLimit -> Handler
-
-	// HTTP requests — userAuthMw handles both legacy and pool-based auth
-	proxyServer.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		// User-aware auth: sets PoolChain in context or falls back to legacy auth
-		newReq, resp := userAuthMw.HandleRequest(req, ctx)
-		if resp != nil {
-			return newReq, resp
-		}
-		req = newReq
-
-		// Rate limiting middleware
-		if req, resp := rateLimitMw.HandleRequest(req, ctx); resp != nil {
-			return req, resp
-		}
-
-		// Main handler (checks for PoolChain in context automatically)
-		return handler.HandleRequest(req, ctx)
-	})
-
-	// HTTPS CONNECT requests
-	proxyServer.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		// User-aware auth
-		newReq, resp := userAuthMw.HandleConnect(ctx.Req, ctx)
-		if resp != nil {
-			ctx.Resp = resp
-			return goproxy.RejectConnect, host
-		}
-		ctx.Req = newReq
-
-		// Rate limiting middleware
-		if _, resp := rateLimitMw.HandleConnect(ctx.Req, ctx); resp != nil {
-			ctx.Resp = resp
-			return goproxy.RejectConnect, host
-		}
-
-		// If a PoolChain is in context, use it for CONNECT too.
-		// ConnectDial below will use the chain for the actual dial.
-		return goproxy.OkConnect, host
-	}))
-
+	// WriteTimeout must be 0 for CONNECT tunnels (they are long-lived).
+	// HTTP path enforces timeouts via context.
 	httpServer := &http.Server{
-		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      proxyServer,
-		ReadTimeout:  time.Duration(settings.Rotation.Timeout) * time.Second,
-		WriteTimeout: time.Duration(settings.Rotation.Timeout) * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:        fmt.Sprintf(":%d", port),
+		Handler:     router,
+		ReadTimeout: time.Duration(settings.Rotation.Timeout) * time.Second,
+		IdleTimeout: 60 * time.Second,
 	}
 
 	s := &Server{
-		proxy:          proxyServer,
+		router:         router,
 		server:         httpServer,
 		logger:         log,
 		port:           port,
@@ -181,7 +179,7 @@ func (s *Server) startBackgroundTasks() {
 				if err := s.selector.Refresh(ctx); err != nil {
 					s.logger.Error("failed to refresh proxy list", "error", err)
 				} else {
-					s.logger.Info("proxy list refreshed")
+					s.logger.Debug("proxy list refreshed")
 				}
 				cancel()
 			case <-s.stopChan:
@@ -197,7 +195,7 @@ func (s *Server) startBackgroundTasks() {
 			select {
 			case <-s.cleanupTicker.C:
 				s.rateLimitMw.CleanupLimiters()
-				s.logger.Info("cleaned up rate limiters")
+				s.logger.Debug("cleaned up rate limiters")
 			case <-s.stopChan:
 				return
 			}
@@ -220,7 +218,6 @@ func (s *Server) Start() error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info("shutting down proxy server")
 
-	// Stop background tasks
 	close(s.stopChan)
 	if s.refreshTicker != nil {
 		s.refreshTicker.Stop()

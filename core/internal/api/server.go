@@ -87,6 +87,11 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// GeoIP + source + pool services
 	geoSvc := services.NewGeoIPService(log)
 	sourceSvc := services.NewSourceService(sourceRepo, proxyRepo, poolRepo, geoSvc, log)
+	// NOTE: Intentionally NOT wiring healthChecker into sourceSvc or starting a
+	// global periodic health check. The global HealthChecker uses a lenient
+	// 60s timeout and was flapping pool-marked 'failed' proxies back to 'active',
+	// putting dead proxies back into rotation. Pool-level health checks (cron-
+	// scheduled per pool in PoolService) are the single source of truth.
 	poolSvc := services.NewPoolService(poolRepo, proxyRepo, log)
 
 	// Initialize handlers
@@ -95,7 +100,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	dashboardHandler := handlers.NewDashboardHandler(dashboardRepo, proxyRepo, log)
 	proxyHandler := handlers.NewProxyHandler(proxyRepo, healthChecker, log)
 	logsHandler := handlers.NewLogsHandler(logRepo, log)
-	settingsHandler := handlers.NewSettingsHandler(settingsRepo, log)
+	settingsHandler := handlers.NewSettingsHandler(settingsRepo, log, nil) // onUpdate set below
 	websocketHandler := handlers.NewWebSocketHandler(dashboardRepo, proxyRepo, logRepo, log)
 	metricsHandler := handlers.NewMetricsHandler(log)
 	documentationHandler := handlers.NewDocumentationHandler()
@@ -134,6 +139,17 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 		userHandler:          userHandler,
 	}
 
+	// Wire settings reload: when settings are updated via API, reload proxy server
+	settingsHandler.SetOnUpdate(func(ctx context.Context) {
+		if s.proxyServer != nil {
+			if err := s.proxyServer.ReloadSettings(ctx); err != nil {
+				log.Error("failed to reload proxy settings after update", "error", err)
+			} else {
+				log.Info("proxy settings reloaded after update")
+			}
+		}
+	})
+
 	// Alert watcher + proxy cleanup services
 	alertWatcher := services.NewAlertWatcher(poolRepo, log)
 	cleanupSvc := services.NewProxyCleanupService(proxyRepo, settingsRepo, log)
@@ -142,6 +158,12 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	sourceSvc.Start(context.Background())
 	poolSvc.Start(context.Background())
 	alertWatcher.Start(context.Background())
+
+	// NOTE: global StartPeriodicHealthCheck is intentionally NOT started.
+	// Its 60s timeout was too lenient and kept flapping pool-marked 'failed'
+	// proxies back to 'active', returning dead proxies to rotation.
+	// Pool-level health checks (PoolService cron) are authoritative.
+
 	cleanupSvc.Start(context.Background())
 
 	s.setupMiddleware()

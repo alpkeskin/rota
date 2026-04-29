@@ -57,8 +57,6 @@ func (s *RandomSelector) Select(ctx context.Context) (*models.Proxy, error) {
 		return nil, fmt.Errorf("failed to generate random number: %w", err)
 	}
 
-	fmt.Printf("[PROXY POOL] Selected proxy: %s\n", s.proxies[n.Int64()].Address)
-
 	return s.proxies[n.Int64()], nil
 }
 

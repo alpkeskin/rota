@@ -4,7 +4,6 @@ go 1.25.3
 
 require (
 	github.com/MarceloPetrucio/go-scalar-api-reference v0.0.0-20240521013641-ce5d2efe0e06
-	github.com/elazarl/goproxy v1.7.2
 	github.com/gammazero/workerpool v1.1.3
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/go-chi/cors v1.2.2
@@ -47,7 +46,7 @@ require (
 	// golang.org/x/crypto promoted to direct above
 	golang.org/x/mod v0.29.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/sys v0.37.0 // indirect
+	golang.org/x/sys v0.43.0
 	golang.org/x/text v0.30.0 // indirect
 	golang.org/x/tools v0.38.0 // indirect
 )
