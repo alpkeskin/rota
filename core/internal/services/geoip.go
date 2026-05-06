@@ -28,18 +28,18 @@ type ipAPIResponse struct {
 }
 
 type cacheEntry struct {
-	geo       models.GeoInfo
-	cachedAt  time.Time
+	geo      models.GeoInfo
+	cachedAt time.Time
 }
 
 // GeoIPService performs IP geolocation lookups via ip-api.com (free, no key needed)
 // It caches results for 24 h and batches requests in groups of 100.
 type GeoIPService struct {
-	client    *http.Client
-	cache     map[string]cacheEntry
-	mu        sync.RWMutex
-	logger    *logger.Logger
-	cacheTTL  time.Duration
+	client   *http.Client
+	cache    map[string]cacheEntry
+	mu       sync.RWMutex
+	logger   *logger.Logger
+	cacheTTL time.Duration
 }
 
 // NewGeoIPService creates a new GeoIPService
@@ -251,47 +251,40 @@ func (g *GeoIPService) EnrichProxies(ctx context.Context, addresses []string) ma
 		return nil
 	}
 
-	// Deduplicate IPs
+	result := make(map[string]models.GeoInfo)
+
+	var nonCachedIps []string
+
+	// Check cache or appened to needed
+	g.mu.RLock()
 	ipToAddr := make(map[string]string)
 	for _, addr := range addresses {
 		ip := extractIP(addr)
-		if ip != "" {
-			ipToAddr[ip] = addr
+
+		if ip == "" {
+			continue
 		}
-	}
 
-	ips := make([]string, 0, len(ipToAddr))
-	for ip := range ipToAddr {
-		ips = append(ips, ip)
-	}
-
-	result := make(map[string]models.GeoInfo)
-
-	// Check cache
-	var needed []string
-	g.mu.RLock()
-	for _, ip := range ips {
 		if entry, ok := g.cache[ip]; ok && time.Since(entry.cachedAt) < g.cacheTTL {
-			if addr, ok2 := ipToAddr[ip]; ok2 {
-				result[addr] = entry.geo
-			}
+			result[addr] = entry.geo
 		} else {
-			needed = append(needed, ip)
+			nonCachedIps = append(nonCachedIps, ip)
 		}
+
 	}
 	g.mu.RUnlock()
 
-	if len(needed) == 0 {
+	if len(nonCachedIps) == 0 {
 		return result
 	}
 
 	const batchSize = 100
-	for i := 0; i < len(needed); i += batchSize {
+	for i := 0; i < len(nonCachedIps); i += batchSize {
 		end := i + batchSize
-		if end > len(needed) {
-			end = len(needed)
+		if end > len(nonCachedIps) {
+			end = len(nonCachedIps)
 		}
-		batch := needed[i:end]
+		batch := nonCachedIps[i:end]
 
 		raw, err := g.lookupBatchRaw(ctx, batch)
 		if err != nil {

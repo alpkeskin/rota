@@ -6,10 +6,10 @@ services:
     container_name: rota-core
     restart: unless-stopped
     ports:
-      - "${PROXY_PORT:-8000}:8000"
+      - "${PROXY_PORT:-8002}:8002"
       - "${API_PORT:-8001}:8001"
     environment:
-      - PROXY_PORT=${PROXY_PORT:-8000}
+      - PROXY_PORT=${PROXY_PORT:-8002}
       - API_PORT=${API_PORT:-8001}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - DB_HOST=${DB_HOST:-timescaledb}
