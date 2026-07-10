@@ -27,8 +27,15 @@ type Proxy struct {
 	GeoUpdatedAt  *time.Time `json:"geo_updated_at,omitempty"`
 	// Tags
 	Tags          []string  `json:"tags"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	// Intelligence fields (lifetime stats)
+	ConsecutiveFails int        `json:"consecutive_fails"`
+	LastSuccessAt    *time.Time `json:"last_success_at,omitempty"`
+	RecoveryAttempt  int        `json:"recovery_attempt"`
+	// Source
+	SourceID       *int      `json:"source_id,omitempty"`
+	SourceLastSeen *time.Time `json:"-"` // internal use, from migration 21
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // ProxyWithStats represents a proxy with calculated statistics
@@ -50,6 +57,12 @@ type ProxyWithStats struct {
 	ISP          *string  `json:"isp,omitempty"`
 	// Tags
 	Tags         []string `json:"tags"`
+	// Intelligence fields
+	ErrorType        string `json:"error_type"`                  // classified from last_error
+	SpeedTier        string `json:"speed_tier"`                  // fast|medium|slow
+	ConsecutiveFails int    `json:"consecutive_fails"`
+	LastSuccessAt    *time.Time `json:"last_success_at,omitempty"`
+	RecoveryAttempt  int    `json:"recovery_attempt"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 }

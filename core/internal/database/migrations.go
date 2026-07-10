@@ -451,6 +451,32 @@ var migrations = []Migration{
 		`,
 	},
 	{
+		Version:     22,
+		Description: "Add lifetime intelligence fields to proxies (consecutive_fails, last_success_at, recovery_attempt)",
+		Up: `
+			ALTER TABLE proxies
+				ADD COLUMN IF NOT EXISTS consecutive_fails INTEGER NOT NULL DEFAULT 0,
+				ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ,
+				ADD COLUMN IF NOT EXISTS recovery_attempt INTEGER NOT NULL DEFAULT 0;
+
+			-- Backfill success/fail counts from proxy_requests hypertable
+			UPDATE proxies p SET
+				successful_requests = COALESCE((SELECT COUNT(*) FROM proxy_requests pr WHERE pr.proxy_id = p.id AND pr.success = true), 0),
+				failed_requests     = COALESCE((SELECT COUNT(*) FROM proxy_requests pr WHERE pr.proxy_id = p.id AND pr.success = false), 0);
+
+			CREATE INDEX IF NOT EXISTS idx_proxies_consecutive_fails ON proxies(consecutive_fails) WHERE status = 'failed';
+			CREATE INDEX IF NOT EXISTS idx_proxies_recovery_attempt ON proxies(recovery_attempt) WHERE recovery_attempt > 0;
+		`,
+		Down: `
+			DROP INDEX IF EXISTS idx_proxies_recovery_attempt;
+			DROP INDEX IF EXISTS idx_proxies_consecutive_fails;
+			ALTER TABLE proxies
+				DROP COLUMN IF EXISTS recovery_attempt,
+				DROP COLUMN IF EXISTS last_success_at,
+				DROP COLUMN IF EXISTS consecutive_fails;
+		`,
+	},
+	{
 		Version:     10,
 		Description: "Update default timeout and retry settings for better proxy compatibility",
 		Up: `

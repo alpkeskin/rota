@@ -65,10 +65,19 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 		"requests":          true,
 		"avg_response_time": true,
 		"created_at":        true,
+		"success_rate":      true,
+		"consecutive_fails": true,
 	}
 
 	if !validSortFields[sortField] {
 		sortField = "created_at"
+	}
+
+	// Map frontend sort fields to DB columns
+	dbSortField := sortField
+	switch sortField {
+	case "success_rate":
+		dbSortField = "successful_requests"
 	}
 
 	if sortOrder != "asc" && sortOrder != "desc" {
@@ -88,15 +97,18 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 		SELECT
 			id, address, protocol, username, status,
 			requests, successful_requests, failed_requests,
-			avg_response_time, last_check,
+			avg_response_time, last_check, last_error,
 			country_code, country_name, region_name, city_name, isp,
 			COALESCE(tags, '{}') AS tags,
+			COALESCE(consecutive_fails, 0) AS consecutive_fails,
+			last_success_at,
+			COALESCE(recovery_attempt, 0) AS recovery_attempt,
 			created_at, updated_at
 		FROM proxies
 		%s
 		ORDER BY %s %s
 		LIMIT $%d OFFSET $%d
-	`, whereClause, sortField, sortOrder, argPos, argPos+1)
+	`, whereClause, dbSortField, sortOrder, argPos, argPos+1)
 
 	args = append(args, limit, offset)
 
@@ -112,9 +124,12 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 		err := rows.Scan(
 			&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Status,
 			&p.Requests, &p.SuccessfulRequests, &p.FailedRequests,
-			&p.AvgResponseTime, &p.LastCheck,
+			&p.AvgResponseTime, &p.LastCheck, &p.LastError,
 			&p.CountryCode, &p.CountryName, &p.RegionName, &p.CityName, &p.ISP,
 			&p.Tags,
+			&p.ConsecutiveFails,
+			&p.LastSuccessAt,
+			&p.RecoveryAttempt,
 			&p.CreatedAt, &p.UpdatedAt,
 		)
 		if err != nil {
@@ -133,23 +148,28 @@ func (r *ProxyRepository) List(ctx context.Context, page, limit int, search, sta
 		}
 
 		proxies = append(proxies, models.ProxyWithStats{
-			ID:              p.ID,
-			Address:         p.Address,
-			Protocol:        p.Protocol,
-			Username:        p.Username,
-			Status:          p.Status,
-			Requests:        p.Requests,
-			SuccessRate:     successRate,
-			AvgResponseTime: p.AvgResponseTime,
-			LastCheck:       p.LastCheck,
-			CountryCode:     p.CountryCode,
-			CountryName:     p.CountryName,
-			RegionName:      p.RegionName,
-			CityName:        p.CityName,
-			ISP:             p.ISP,
-			Tags:            tags,
-			CreatedAt:       p.CreatedAt,
-			UpdatedAt:       p.UpdatedAt,
+			ID:               p.ID,
+			Address:          p.Address,
+			Protocol:         p.Protocol,
+			Username:         p.Username,
+			Status:           p.Status,
+			Requests:         p.Requests,
+			SuccessRate:      successRate,
+			AvgResponseTime:  p.AvgResponseTime,
+			LastCheck:        p.LastCheck,
+			CountryCode:      p.CountryCode,
+			CountryName:      p.CountryName,
+			RegionName:       p.RegionName,
+			CityName:         p.CityName,
+			ISP:              p.ISP,
+			Tags:             tags,
+			ErrorType:        parseErrorType(p.LastError),
+			SpeedTier:        computeSpeedTier(p.AvgResponseTime),
+			ConsecutiveFails: p.ConsecutiveFails,
+			LastSuccessAt:    p.LastSuccessAt,
+			RecoveryAttempt:  p.RecoveryAttempt,
+			CreatedAt:        p.CreatedAt,
+			UpdatedAt:        p.UpdatedAt,
 		})
 	}
 
@@ -452,4 +472,36 @@ func (r *ProxyRepository) GetAllActive(ctx context.Context) ([]models.ProxyStatu
 	}
 
 	return proxies, nil
+}
+
+// ── Computed field helpers ─────────────────────────────────────────────────
+
+// parseErrorType extracts the classified error type from a last_error string
+// stored in "[type] message" format. Returns empty string if last_error is nil
+// or unparsable.
+func parseErrorType(lastError *string) string {
+	if lastError == nil || *lastError == "" {
+		return ""
+	}
+	s := *lastError
+	if len(s) > 2 && s[0] == '[' {
+		if idx := strings.IndexByte(s, ']'); idx > 0 && idx+1 < len(s) && s[idx+1] == ' ' {
+			return s[1:idx]
+		}
+	}
+	return ""
+}
+
+// computeSpeedTier returns the speed category for a given response time in ms.
+func computeSpeedTier(ms int) string {
+	switch {
+	case ms <= 0:
+		return ""
+	case ms < 1000:
+		return "fast"
+	case ms < 3000:
+		return "medium"
+	default:
+		return "slow"
+	}
 }

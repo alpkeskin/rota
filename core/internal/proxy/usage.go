@@ -265,7 +265,7 @@ func (t *UsageTracker) flush(ctx context.Context, batch []RequestRecord) {
 		a := aggs[id]
 		var lastErr *string
 		if !a.lastWasSuccess && a.lastError != "" {
-			lastErr = &a.lastError
+			classified := FormatLastError(fmt.Errorf("%s", a.lastError)); lastErr = &classified
 		}
 		b.Queue(updateStatsBatchSQL, id, a.reqDelta, a.succDelta, a.sumRT,
 			a.lastWasSuccess, a.hadSuccess, a.trailingFails, lastErr, a.lastTS)
@@ -297,7 +297,8 @@ func (t *UsageTracker) insertProxyRequest(ctx context.Context, record RequestRec
 
 	var errorMsg *string
 	if record.ErrorMessage != "" {
-		errorMsg = &record.ErrorMessage
+		classified := FormatLastError(fmt.Errorf("%s", record.ErrorMessage))
+		errorMsg = &classified
 	}
 
 	var statusCode *int
@@ -368,7 +369,8 @@ func (t *UsageTracker) updateProxyStats(ctx context.Context, record RequestRecor
 
 	var errorMsg *string
 	if record.ErrorMessage != "" {
-		errorMsg = &record.ErrorMessage
+		classified := FormatLastError(fmt.Errorf("%s", record.ErrorMessage))
+		errorMsg = &classified
 	}
 
 	_, err := t.repo.GetDB().Pool.Exec(

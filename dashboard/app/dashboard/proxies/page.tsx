@@ -553,6 +553,59 @@ export default function ProxiesPage() {
       },
     },
     {
+      accessorKey: "speed_tier",
+      header: "Speed",
+      cell: ({ row }) => {
+        const tier = row.getValue("speed_tier") as string
+        if (!tier) return <div className="text-muted-foreground">—</div>
+        const colors: Record<string, string> = {
+          fast: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+          medium: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400",
+          slow: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
+        }
+        return <Badge variant="outline" className={colors[tier] || ""}>{tier}</Badge>
+      },
+    },
+    {
+      accessorKey: "error_type",
+      header: "Error Type",
+      cell: ({ row }) => {
+        const errType = row.getValue("error_type") as string
+        if (!errType) return <div className="text-muted-foreground">—</div>
+        const colors: Record<string, string> = {
+          timeout: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400",
+          connection_refused: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
+          dns_error: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400",
+          http_error: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400",
+          unknown: "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400",
+        }
+        return (
+          <Badge variant="outline" className={colors[errType] || ""}>
+            {errType.replace(/_/g, " ")}
+          </Badge>
+        )
+      },
+    },
+    {
+      accessorKey: "consecutive_fails",
+      header: ({ column }) => {
+        return (
+          <Button
+            variant="ghost"
+            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+          >
+            Consec. Fails
+            <ArrowUpDown className="ml-2 h-4 w-4" />
+          </Button>
+        )
+      },
+      cell: ({ row }) => {
+        const value = parseInt(row.getValue("consecutive_fails"), 10)
+        if (value <= 0) return <div className="text-muted-foreground">—</div>
+        return <Badge variant="destructive">{value}</Badge>
+      },
+    },
+    {
       accessorKey: "avg_response_time",
       header: "Avg Response",
       cell: ({ row }) => {

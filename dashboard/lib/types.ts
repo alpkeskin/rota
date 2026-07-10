@@ -10,6 +10,12 @@ export interface Proxy {
   avg_response_time: number
   last_check: string
   username?: string
+  // Intelligence fields (Batch 1)
+  error_type: "" | "timeout" | "connection_refused" | "dns_error" | "http_error" | "unknown"
+  speed_tier: "" | "fast" | "medium" | "slow"
+  consecutive_fails: number
+  last_success_at: string | null
+  recovery_attempt: number
   created_at: string
   updated_at: string
 }
