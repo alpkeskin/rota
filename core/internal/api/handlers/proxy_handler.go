@@ -18,7 +18,7 @@ import (
 
 // HealthChecker interface for testing proxies
 type HealthChecker interface {
-	CheckProxy(ctx context.Context, proxy *models.Proxy) (*models.ProxyTestResult, error)
+	CheckProxy(ctx context.Context, proxy *models.Proxy, immediate bool) (*models.ProxyTestResult, error)
 }
 
 // ProxyHandler handles proxy management endpoints
@@ -55,6 +55,7 @@ func (h *ProxyHandler) onProxyChange() {
 }
 
 // List handles proxy listing with pagination and filters
+//
 //	@Summary		List proxies
 //	@Description	Get paginated list of proxies with optional filters
 //	@Tags			proxies
@@ -112,6 +113,7 @@ func (h *ProxyHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // Create handles proxy creation
+//
 //	@Summary		Create proxy
 //	@Description	Create a new proxy server
 //	@Tags			proxies
@@ -150,6 +152,7 @@ func (h *ProxyHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 // BulkCreate handles bulk proxy creation
+//
 //	@Summary		Bulk create proxies
 //	@Description	Create multiple proxy servers at once
 //	@Tags			proxies
@@ -204,6 +207,7 @@ func (h *ProxyHandler) BulkCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // Update handles proxy update
+//
 //	@Summary		Update proxy
 //	@Description	Update an existing proxy server
 //	@Tags			proxies
@@ -247,6 +251,7 @@ func (h *ProxyHandler) Update(w http.ResponseWriter, r *http.Request) {
 }
 
 // Delete handles proxy deletion
+//
 //	@Summary		Delete proxy
 //	@Description	Delete a proxy server by ID
 //	@Tags			proxies
@@ -274,6 +279,7 @@ func (h *ProxyHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // BulkDelete handles bulk proxy deletion
+//
 //	@Summary		Bulk delete proxies
 //	@Description	Delete multiple proxy servers at once
 //	@Tags			proxies
@@ -320,6 +326,7 @@ func (h *ProxyHandler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // BulkTag handles bulk tag updates on proxies
+//
 //	@Summary		Bulk update proxy tags
 //	@Description	Add and/or remove tags on multiple proxies at once
 //	@Tags			proxies
@@ -371,6 +378,7 @@ func (h *ProxyHandler) BulkTag(w http.ResponseWriter, r *http.Request) {
 }
 
 // Test handles proxy testing
+//
 //	@Summary		Test proxy
 //	@Description	Test a proxy server's connectivity and performance
 //	@Tags			proxies
@@ -402,9 +410,10 @@ func (h *ProxyHandler) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Perform actual proxy test
+	// Perform actual proxy test. Manual test: apply the result to the proxy
+	// status immediately (immediate=true).
 	h.logger.Info("testing proxy", "proxy_id", id, "address", proxy.Address)
-	result, err := h.healthChecker.CheckProxy(r.Context(), proxy)
+	result, err := h.healthChecker.CheckProxy(r.Context(), proxy, true)
 	if err != nil {
 		h.logger.Error("failed to test proxy", "error", err, "proxy_id", id)
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to test proxy")
@@ -421,6 +430,7 @@ func (h *ProxyHandler) Test(w http.ResponseWriter, r *http.Request) {
 }
 
 // Export handles proxy export
+//
 //	@Summary		Export proxies
 //	@Description	Export proxy list in various formats (txt, json, csv)
 //	@Tags			proxies

@@ -133,7 +133,7 @@ func TestHealthCheckStrictTLS(t *testing.T) {
 				ID:       1,
 				Address:  proxyAddr,
 				Protocol: "http",
-			})
+			}, false)
 			if err != nil {
 				t.Fatalf("CheckProxy: %v", err)
 			}
@@ -151,4 +151,147 @@ func TestHealthCheckStrictTLS(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newTestHealthChecker builds a HealthChecker wired to the test DB (env-gated)
+// with settings pre-cached, so CheckProxy never touches the settings repo.
+func newTestHealthChecker(t *testing.T, db *testDB) *HealthChecker {
+	t.Helper()
+	return &HealthChecker{
+		proxyRepo: db.Repo,
+		tracker:   db.Tracker,
+		logger:    logger.New("error"),
+	}
+}
+
+// newLiveProxyTarget starts a TLS target reachable through a CONNECT tunnel
+// proxy and returns the proxy address and the target URL.
+func newLiveProxyTarget(t *testing.T) (proxyAddr, targetURL string) {
+	t.Helper()
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+	return newTunnelProxy(t), ts.URL
+}
+
+// deadProxyAddress returns a 127.0.0.1 address whose port is closed.
+func deadProxyAddress(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for dead port: %v", err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	return addr
+}
+
+// TestCheckProxyManualImmediate is the regression test for the original bug:
+// a user-initiated test must apply its result to the DB status right away —
+// dead proxy -> 'failed' (with last_error), live proxy -> 'active'.
+func TestCheckProxyManualImmediate(t *testing.T) {
+	db := openTestDB(t)
+	h := newTestHealthChecker(t, db)
+
+	// Live: healthy target behind the tunnel -> immediate 'active' even from
+	// a previously 'failed' status.
+	liveAddr, targetURL := newLiveProxyTarget(t)
+	liveID := insertTestProxy(t, db.Pool, "10.0.0.10:8080", "failed")
+	h.setSettings(&models.HealthCheckSettings{
+		Timeout: 5, Workers: 1, URL: targetURL, Status: http.StatusOK,
+	})
+
+	res, err := h.CheckProxy(context.Background(), &models.Proxy{
+		ID: liveID, Address: liveAddr, Protocol: "http",
+	}, true)
+	if err != nil {
+		t.Fatalf("CheckProxy(live, immediate): %v", err)
+	}
+	if res.Status != "active" {
+		t.Fatalf("live check status = %q, want active (error: %v)", res.Status, res.Error)
+	}
+	row := pollProxyRow(t, db.Pool, liveID, func(r proxyRow) bool {
+		return r.Status == "active" && r.FailedRequests == 0
+	})
+	if row.LastError != nil {
+		t.Errorf("live: last_error = %q, want nil", *row.LastError)
+	}
+
+	// Dead: closed port -> immediate 'failed' with a last_error, even from a
+	// previously 'active' status.
+	deadID := insertTestProxy(t, db.Pool, "10.0.0.11:8080", "active")
+	res, err = h.CheckProxy(context.Background(), &models.Proxy{
+		ID: deadID, Address: deadProxyAddress(t), Protocol: "http",
+	}, true)
+	if err != nil {
+		t.Fatalf("CheckProxy(dead, immediate): %v", err)
+	}
+	if res.Status != "failed" {
+		t.Fatalf("dead check status = %q, want failed", res.Status)
+	}
+	row = pollProxyRow(t, db.Pool, deadID, func(r proxyRow) bool {
+		return r.Status == "failed" && r.LastError != nil && *r.LastError != ""
+	})
+	if row.FailedRequests != 1 {
+		t.Errorf("dead: failed_requests = %d, want 1", row.FailedRequests)
+	}
+}
+
+// TestCheckProxyPeriodicConsecutive verifies the periodic path (immediate=false)
+// keeps the consecutive-failure accounting: 1 failure leaves the status
+// unchanged, 3 consecutive failures flip it, a success resets and reactivates.
+func TestCheckProxyPeriodicConsecutive(t *testing.T) {
+	db := openTestDB(t)
+	h := newTestHealthChecker(t, db)
+
+	deadAddr := deadProxyAddress(t)
+	id := insertTestProxy(t, db.Pool, "10.0.0.12:8080", "active")
+	dead := &models.Proxy{ID: id, Address: deadAddr, Protocol: "http"}
+	h.setSettings(&models.HealthCheckSettings{
+		Timeout: 5, Workers: 1, URL: "http://127.0.0.1:9", Status: http.StatusOK,
+	})
+
+	fail := func() {
+		t.Helper()
+		res, err := h.CheckProxy(context.Background(), dead, false)
+		if err != nil {
+			t.Fatalf("CheckProxy(dead, periodic): %v", err)
+		}
+		if res.Status != "failed" {
+			t.Fatalf("check status = %q, want failed", res.Status)
+		}
+	}
+
+	fail()
+	pollProxyRow(t, db.Pool, id, func(r proxyRow) bool { return r.FailedRequests == 1 })
+	row := readProxyRow(t, db.Pool, id)
+	if row.Status != "active" {
+		t.Fatalf("after 1 periodic failure: status = %q, want active", row.Status)
+	}
+
+	fail()
+	fail()
+	// Poll the combined end state: the last write to land flips the status.
+	pollProxyRow(t, db.Pool, id, func(r proxyRow) bool {
+		return r.Status == "failed" && r.FailedRequests == 3
+	})
+
+	// Success through a live target: reactivates and resets the counter.
+	liveAddr, targetURL := newLiveProxyTarget(t)
+	h.setSettings(&models.HealthCheckSettings{
+		Timeout: 5, Workers: 1, URL: targetURL, Status: http.StatusOK,
+	})
+	res, err := h.CheckProxy(context.Background(), &models.Proxy{
+		ID: id, Address: liveAddr, Protocol: "http",
+	}, false)
+	if err != nil {
+		t.Fatalf("CheckProxy(live, periodic): %v", err)
+	}
+	if res.Status != "active" {
+		t.Fatalf("live check status = %q, want active (error: %v)", res.Status, res.Error)
+	}
+	pollProxyRow(t, db.Pool, id, func(r proxyRow) bool {
+		return r.Status == "active" && r.FailedRequests == 0
+	})
 }
