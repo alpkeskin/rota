@@ -16,6 +16,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/alpkeskin/rota/core/pkg/safeworker"
 )
 
 // parsedProxy holds the extracted fields from a single proxy list line.
@@ -200,7 +201,9 @@ func (s *SourceService) Start(ctx context.Context) {
 		for {
 			select {
 			case <-ticker.C:
-				s.fetchDueSources(ctx)
+				safeworker.Call(s.logger, "source_fetch", func() {
+					s.fetchDueSources(ctx)
+				})
 			case <-ctx.Done():
 				s.logger.Info("source service stopped")
 				return
