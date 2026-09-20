@@ -34,11 +34,22 @@ func NewPoolHandler(
 	}
 }
 
-// List returns all pools with proxy counts
+// List returns all pools with proxy counts and filters
 func (h *PoolHandler) List(w http.ResponseWriter, r *http.Request) {
 	pools, err := h.poolRepo.List(r.Context())
 	if err != nil {
 		h.logger.Error("failed to list pools", "error", err)
+		http.Error(w, `{"error":"failed to list pools"}`, http.StatusInternalServerError)
+		return
+	}
+	// Filters live in side tables; without them the dashboard never sees them
+	// and a round-tripped edit wipes them. Loaded in one batch (3 queries).
+	refs := make([]*models.ProxyPool, len(pools))
+	for i := range pools {
+		refs[i] = &pools[i]
+	}
+	if err := h.poolRepo.LoadFilters(r.Context(), refs); err != nil {
+		h.logger.Error("failed to load pool filters", "error", err)
 		http.Error(w, `{"error":"failed to list pools"}`, http.StatusInternalServerError)
 		return
 	}
@@ -55,6 +66,11 @@ func (h *PoolHandler) Get(w http.ResponseWriter, r *http.Request) {
 	pool, err := h.poolRepo.GetByID(r.Context(), id)
 	if err != nil || pool == nil {
 		http.Error(w, `{"error":"pool not found"}`, http.StatusNotFound)
+		return
+	}
+	if err := h.poolRepo.LoadFilters(r.Context(), []*models.ProxyPool{pool}); err != nil {
+		h.logger.Error("failed to load pool filters", "pool_id", id, "error", err)
+		http.Error(w, `{"error":"failed to get pool"}`, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, pool)
