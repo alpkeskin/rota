@@ -8,6 +8,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/version"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 )
 
@@ -30,6 +31,7 @@ func NewHealthHandler(db *database.DB, proxyRepo *repository.ProxyRepository, lo
 }
 
 // Health handles basic health check
+//
 //	@Summary		Health check
 //	@Description	Check if the API server is running and healthy
 //	@Tags			health
@@ -39,7 +41,7 @@ func NewHealthHandler(db *database.DB, proxyRepo *repository.ProxyRepository, lo
 func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"status":  "healthy",
-		"version": "1.0.0",
+		"version": version.Version,
 		"uptime":  int(time.Since(startTime).Seconds()),
 	}
 
@@ -47,6 +49,7 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 // Status handles detailed status check
+//
 //	@Summary		System status
 //	@Description	Get detailed system status including proxy and request statistics
 //	@Tags			health
@@ -79,7 +82,7 @@ func (h *HealthHandler) Status(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"version": "1.0.0",
+		"version": version.Version,
 		"uptime":  int(time.Since(startTime).Seconds()),
 		"proxies": map[string]interface{}{
 			"total":  proxyStats["total"],
@@ -95,6 +98,7 @@ func (h *HealthHandler) Status(w http.ResponseWriter, r *http.Request) {
 }
 
 // DatabaseHealth handles database health check
+//
 //	@Summary		Database health
 //	@Description	Check database connection health
 //	@Tags			health
@@ -114,6 +118,7 @@ func (h *HealthHandler) DatabaseHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // DatabaseStats handles database statistics
+//
 //	@Summary		Database statistics
 //	@Description	Get database connection pool statistics
 //	@Tags			health

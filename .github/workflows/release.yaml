@@ -75,6 +75,8 @@ jobs:
           file: ./core/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -162,10 +164,75 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
+  build-binaries:
+    # Standalone core binaries (proxy + API, no dashboard) for running without
+    # Docker — see issue #53. They still need a TimescaleDB to connect to.
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }} binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: windows
+            goarch: amd64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: Build
+        working-directory: core
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          NAME="rota_${TAG}_${GOOS}_${GOARCH}"
+          EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
+          mkdir -p ../dist/"$NAME"
+          go build -trimpath \
+            -ldflags="-s -w -X github.com/alpkeskin/rota/core/internal/version.Version=${TAG}" \
+            -o ../dist/"$NAME"/rota${EXT} ./cmd/server
+          cp ../LICENSE ../.env.example ../dist/"$NAME"/
+          cd ../dist
+          if [ "$GOOS" = "windows" ]; then
+            zip -qr "$NAME.zip" "$NAME"
+          else
+            tar -czf "$NAME.tar.gz" "$NAME"
+          fi
+          rm -r "$NAME"
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-and-push, build-and-push-dashboard]
+    needs: [build-and-push, build-and-push-dashboard, build-binaries]
     permissions:
       contents: write
 
@@ -174,6 +241,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum * > checksums.txt
+          cat checksums.txt
 
       - name: Generate changelog
         id: changelog
@@ -202,6 +282,8 @@ jobs:
           tag_name: ${{ steps.changelog.outputs.current_tag }}
           name: Release ${{ steps.changelog.outputs.current_tag }}
           body_path: changelog.txt
+          files: |
+            dist/*
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
           generate_release_notes: true
@@ -222,3 +304,6 @@ jobs:
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dashboard:${{ steps.changelog.outputs.current_tag }}" >> $GITHUB_STEP_SUMMARY
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dashboard:latest" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Standalone binaries" >> $GITHUB_STEP_SUMMARY
+          echo "Attached to the release: linux (amd64, arm64), macOS (arm64, amd64), windows (amd64) + checksums.txt" >> $GITHUB_STEP_SUMMARY

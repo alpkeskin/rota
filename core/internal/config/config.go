@@ -68,8 +68,12 @@ func (d *DatabaseConfig) DSN() string {
 	)
 }
 
-// Load reads configuration from environment variables
+// Load reads configuration from environment variables. A `.env` file in the
+// working directory is read first for standalone (non-Docker) runs; real
+// environment variables always win over it.
 func Load() (*Config, error) {
+	loadDotEnv(".env")
+
 	// When no admin password is supplied, generate a strong random one instead
 	// of falling back to a well-known default. It's logged once on first boot.
 	adminPass := os.Getenv("ROTA_ADMIN_PASSWORD")
@@ -216,4 +220,33 @@ func generateRandomSecret(nBytes int) string {
 		return "change-me-please"
 	}
 	return hex.EncodeToString(b)
+}
+
+// loadDotEnv sets KEY=VALUE pairs from path into the process environment for
+// keys that are not already set. Missing file, comments and blank lines are
+// ignored; surrounding single or double quotes on the value are stripped.
+func loadDotEnv(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export "))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+			value = value[1 : len(value)-1]
+		}
+		if key == "" || os.Getenv(key) != "" {
+			continue
+		}
+		os.Setenv(key, value)
+	}
 }

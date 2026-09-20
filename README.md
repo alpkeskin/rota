@@ -202,6 +202,32 @@ docker run -d \
   ghcr.io/alpkeskin/rota:latest
 ```
 
+### Standalone binary (no Docker)
+
+Every release ships the core as a single static binary for Linux (amd64, arm64),
+macOS (arm64, amd64) and Windows (amd64) — see the
+[releases page](https://github.com/alpkeskin/rota/releases). It runs the proxy
+(`:8000`) and the REST API (`:8001`, Swagger UI at `/docs`); the web dashboard
+is not included, so you manage proxies, pools and users through the API.
+
+It still needs a **TimescaleDB** to connect to — install it natively
+([Timescale ships packages and a Windows installer](https://docs.timescale.com/self-hosted/latest/install/))
+or point it at any existing instance.
+
+```bash
+# 1. Unpack the archive for your platform, then put the DB connection next to it
+cp .env.example .env        # set DB_HOST / DB_USER / DB_PASSWORD / DB_NAME (+ ROTA_ADMIN_PASSWORD)
+
+# 2. Run — .env is read from the working directory; real env vars take precedence
+./rota                      # Windows: rota.exe
+
+# 3. Use it
+curl -x http://localhost:8000 https://api.ipify.org
+open http://localhost:8001/docs
+```
+
+`checksums.txt` on the release lists the SHA-256 of every archive.
+
 ### From Source
 
 ```bash
