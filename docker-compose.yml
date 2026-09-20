@@ -47,6 +47,8 @@ services:
       # Leave empty to auto-generate a strong password on first boot (printed in
       # the core logs). Set it in .env to choose your own.
       - ROTA_ADMIN_PASSWORD=${ROTA_ADMIN_PASSWORD:-}
+      # Optional; unset = generated once and persisted in the DB.
+      - JWT_SECRET=${JWT_SECRET:-}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-*}
       # The core sits behind Caddy, so trust its X-Forwarded-For for the login
       # rate limiter's per-IP tracking. Set to false only if you expose the API

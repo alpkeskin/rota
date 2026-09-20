@@ -546,6 +546,18 @@ var migrations = []Migration{
 			WHERE key = 'healthcheck';
 		`,
 	},
+	{
+		Version:     25,
+		Description: "Create system_secrets table so the JWT signing key survives restarts",
+		Up: `
+			CREATE TABLE IF NOT EXISTS system_secrets (
+				key        VARCHAR(64) PRIMARY KEY,
+				value      TEXT NOT NULL,
+				created_at TIMESTAMP NOT NULL DEFAULT NOW()
+			);
+		`,
+		Down: `DROP TABLE IF EXISTS system_secrets;`,
+	},
 }
 
 // Migrate runs all pending migrations
