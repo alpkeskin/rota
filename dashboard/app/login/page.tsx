@@ -3,9 +3,10 @@
 import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Image from "next/image";
+import { AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
 
 function LoginForm() {
@@ -39,90 +40,64 @@ function LoginForm() {
       router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Invalid credentials. Please try again.");
-      console.error("Login failed:", err);
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center bg-background px-4">
-      <div className="w-full max-w-[400px]">
-        {/* Login card */}
-        <Card className="border-[#333333] bg-transparent">
-          <CardContent className="space-y-12 px-8 pb-8 pt-10">
-            {/* Logo and Title */}
-            <div className="flex flex-col items-center gap-6 text-center">
-              <Image
-                src="/logo.png"
-                alt="Rota Logo"
-                width={80}
-                height={80}
-                className="object-contain"
-              />
-              <h1 className="text-[40px] font-semibold leading-none tracking-tight">Login to Rota</h1>
-            </div>
+    <div className="grid min-h-svh place-items-center px-6 py-16">
+      <div className="flex w-full max-w-[19rem] flex-col items-center text-center">
+        <Image src="/logo.png" alt="" width={44} height={44} className="size-11 object-contain" priority />
+        <h1 className="mt-5 text-[1.0625rem] leading-tight font-semibold tracking-tight">Sign in to Rota</h1>
+        <p className="text-muted-foreground mt-1">Admin credentials for this instance.</p>
 
-            {/* Login form */}
-            <form onSubmit={handleSubmit} className="space-y-4">
-              {sessionExpired && !error && (
-                <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 p-3 text-sm text-yellow-500">
-                  Your session has expired. Please log in again.
-                </div>
-              )}
-              {error && (
-                <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-3 text-sm text-red-500">
-                  {error}
-                </div>
-              )}
-              <Input
-                id="username"
-                type="text"
-                placeholder="Username"
-                required
-                autoComplete="username"
-                disabled={isLoading}
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="h-14 rounded-lg !text-[17px] placeholder:text-[17px]"
-                style={{ fontSize: '17px' }}
-              />
-              <Input
-                id="password"
-                type="password"
-                placeholder="Password"
-                required
-                autoComplete="current-password"
-                disabled={isLoading}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="h-14 rounded-lg !text-[17px] placeholder:text-[17px]"
-                style={{ fontSize: '17px' }}
-              />
-              <Button
-                type="submit"
-                className="h-14 w-full rounded-lg text-[17px] font-medium"
-                disabled={isLoading}
-              >
-                {isLoading ? (
-                  <div className="flex items-center gap-2">
-                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                    Logging in...
-                  </div>
-                ) : (
-                  "Login"
-                )}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-      </div>
+        <form onSubmit={handleSubmit} className="mt-8 w-full space-y-3 text-left">
+          <div className="space-y-1.5">
+            <Label htmlFor="username">Username</Label>
+            <Input
+              id="username"
+              type="text"
+              required
+              autoComplete="username"
+              autoFocus
+              disabled={isLoading}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              className="h-9 px-3"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="password">Password</Label>
+            <Input
+              id="password"
+              type="password"
+              required
+              autoComplete="current-password"
+              disabled={isLoading}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="h-9 px-3"
+            />
+          </div>
 
-      {/* Version info */}
-      <div className="absolute bottom-8 text-center">
-        <p className="text-sm text-muted-foreground">
-          Version 1.0.0
-        </p>
+          {sessionExpired && !error && (
+            <p className="text-muted-foreground flex items-start gap-1.5 pt-0.5">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+              Your session expired. Sign in again to continue.
+            </p>
+          )}
+          {error && (
+            <p role="alert" className="text-critical flex items-start gap-1.5 pt-0.5">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+              {error}
+            </p>
+          )}
+
+          <Button type="submit" size="lg" className="mt-5 w-full" disabled={isLoading}>
+            {isLoading ? "Signing in…" : "Sign in"}
+          </Button>
+        </form>
       </div>
     </div>
   );
@@ -130,8 +105,10 @@ function LoginForm() {
 
 export default function LoginPage() {
   return (
-    <Suspense>
-      <LoginForm />
-    </Suspense>
+    <div className="dark min-h-svh" style={{ background: "#0E0E0E", color: "oklch(0.985 0 0)" }}>
+      <Suspense>
+        <LoginForm />
+      </Suspense>
+    </div>
   );
 }

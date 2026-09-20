@@ -1,62 +1,21 @@
 "use client"
 
 import * as React from "react"
-import {
-  ColumnDef,
-  ColumnFiltersState,
-  SortingState,
-  VisibilityState,
-  flexRender,
-  getCoreRowModel,
-  useReactTable,
-} from "@tanstack/react-table"
-import {
-  ArrowUpDown,
-  ChevronDown,
-  MoreHorizontal,
-  Plus,
-  Download,
-  Trash2,
-  Loader2,
-  Upload,
-  FileText,
-  CheckCircle2,
-  XCircle,
-  AlertCircle,
-  Filter,
-  Tag,
-} from "lucide-react"
+import { Suspense } from "react"
+import { ChevronDown, FileText } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import { Badge } from "@/components/ui/badge"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -69,53 +28,99 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { PageHeader, Content, EmptyLine, LoadingLine } from "@/components/page-header"
+import { SearchInput, NativeSelect } from "@/components/controls"
+import { SortHeader } from "@/components/sort-header"
+import { Pagination } from "@/components/pagination"
+import { ProxyStatus, Tag } from "@/components/status"
+import { UsageBar } from "@/components/usage-bar"
+import { TagInput } from "@/components/tag-input"
+import { useUrlState } from "@/hooks/use-url-state"
 import { api } from "@/lib/api"
 import { Proxy } from "@/lib/types"
 import { toast } from "@/lib/toast"
-import { TagInput } from "@/components/tag-input"
+import { count, ms, percent, relative, formatDateTime } from "@/lib/format"
+import { cn } from "@/lib/utils"
 
-export default function ProxiesPage() {
+type Protocol = Proxy["protocol"]
+const PROTOCOLS: Protocol[] = ["http", "https", "socks4", "socks4a", "socks5"]
+const PAGE_SIZE = 50
+
+// Sort options are named by what they show, not by asc/desc.
+const SORTS: { value: string; label: string; sort: string; order: "asc" | "desc" }[] = [
+  { value: "newest", label: "Newest first", sort: "created_at", order: "desc" },
+  { value: "oldest", label: "Oldest first", sort: "created_at", order: "asc" },
+  { value: "most-requests", label: "Most requests", sort: "requests", order: "desc" },
+  { value: "slowest", label: "Slowest first", sort: "avg_response_time", order: "desc" },
+  { value: "fastest", label: "Fastest first", sort: "avg_response_time", order: "asc" },
+  { value: "address", label: "Address A→Z", sort: "address", order: "asc" },
+  { value: "status", label: "By status", sort: "status", order: "asc" },
+]
+
+const URL_DEFAULTS = { page: "1", q: "", status: "", protocol: "", sort: "created_at", order: "desc" }
+
+function ProtocolSelect({
+  value,
+  onChange,
+  id,
+  disabled,
+}: {
+  value: Protocol
+  onChange: (v: Protocol) => void
+  id?: string
+  disabled?: boolean
+}) {
+  return (
+    <Select value={value} onValueChange={(v) => onChange(v as Protocol)} disabled={disabled}>
+      <SelectTrigger id={id} className="w-full">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {PROTOCOLS.map((p) => (
+          <SelectItem key={p} value={p}>
+            {p.toUpperCase()}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
+function ProxiesPage() {
+  const [url, setUrl] = useUrlState(URL_DEFAULTS)
+  const page = Math.max(1, parseInt(url.page) || 1)
+  const order: "asc" | "desc" = url.order === "asc" ? "asc" : "desc"
+
   const [data, setData] = React.useState<Proxy[]>([])
+  const [total, setTotal] = React.useState(0)
   const [isLoading, setIsLoading] = React.useState(true)
-  const [isAddDialogOpen, setIsAddDialogOpen] = React.useState(false)
-  const [isEditDialogOpen, setIsEditDialogOpen] = React.useState(false)
-  const [isImportDialogOpen, setIsImportDialogOpen] = React.useState(false)
-  const [editingProxy, setEditingProxy] = React.useState<Proxy | null>(null)
-  const [sorting, setSorting] = React.useState<SortingState>([])
-  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
-  const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
-  const [rowSelection, setRowSelection] = React.useState({})
-  const [pagination, setPagination] = React.useState({
-    page: 1,
-    limit: 10,
-    total: 0,
-    total_pages: 0,
-  })
-  const [searchQuery, setSearchQuery] = React.useState("")
-  const [debouncedSearchQuery, setDebouncedSearchQuery] = React.useState("")
-  const [statusFilter, setStatusFilter] = React.useState<string>("all")
-  const [protocolFilter, setProtocolFilter] = React.useState<string>("all")
+  const [selected, setSelected] = React.useState<Set<number>>(new Set())
+  const [allTags, setAllTags] = React.useState<string[]>([])
+
+  // Dialogs
+  const [addOpen, setAddOpen] = React.useState(false)
+  const [editing, setEditing] = React.useState<Proxy | null>(null)
+  const [tagOpen, setTagOpen] = React.useState(false)
+  const [importOpen, setImportOpen] = React.useState(false)
+  const [deleteId, setDeleteId] = React.useState<number | null>(null)
+  const [bulkDeleteOpen, setBulkDeleteOpen] = React.useState(false)
+  const [deleteAllOpen, setDeleteAllOpen] = React.useState(false)
 
   const [newProxy, setNewProxy] = React.useState({
     address: "",
-    protocol: "http" as "http" | "https" | "socks4" | "socks4a" | "socks5",
+    protocol: "http" as Protocol,
     username: "",
     password: "",
     tags: [] as string[],
   })
-
-  // Known tags across all proxies, used as one-click suggestions
-  const [allTags, setAllTags] = React.useState<string[]>([])
-
-  // Bulk tag dialog
-  const [isTagDialogOpen, setIsTagDialogOpen] = React.useState(false)
   const [bulkAddTags, setBulkAddTags] = React.useState<string[]>([])
   const [bulkRemoveTags, setBulkRemoveTags] = React.useState<string[]>([])
   const [isTagging, setIsTagging] = React.useState(false)
+  const [isReloading, setIsReloading] = React.useState(false)
 
-  // Import modal states
+  // Import
   const [importFile, setImportFile] = React.useState<File | null>(null)
-  const [importProtocol, setImportProtocol] = React.useState<"http" | "https" | "socks4" | "socks4a" | "socks5">("http")
+  const [importProtocol, setImportProtocol] = React.useState<Protocol>("http")
   const [importUsername, setImportUsername] = React.useState("")
   const [importPassword, setImportPassword] = React.useState("")
   const [parsedProxies, setParsedProxies] = React.useState<string[]>([])
@@ -123,56 +128,39 @@ export default function ProxiesPage() {
   const [importProgress, setImportProgress] = React.useState({ current: 0, total: 0, success: 0, failed: 0, skipped: 0 })
   const [importResults, setImportResults] = React.useState<Array<{ address: string; status: string; error?: string }>>([])
   const [isDragging, setIsDragging] = React.useState(false)
-  const [isReloading, setIsReloading] = React.useState(false)
-  const [deleteConfirm, setDeleteConfirm] = React.useState<{ open: boolean; proxyId: number | null }>({ open: false, proxyId: null })
-   const [bulkDeleteConfirm, setBulkDeleteConfirm] = React.useState(false)
-   const [deleteAllConfirm, setDeleteAllConfirm] = React.useState(false)
 
-  // Debounce search query
-  React.useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearchQuery(searchQuery)
-      setPagination(prev => ({ ...prev, page: 1 }))
-    }, 500)
-
-    return () => clearTimeout(timer)
-  }, [searchQuery])
-
-  // Monotonic request counter. When pages are clicked faster than the
-  // server answers, responses arrive out of order; only the latest
-  // request's result is applied, so a stale response can no longer push
-  // the page back (which re-triggered the fetch and made the page
-  // indicator oscillate between two pages forever).
+  // Monotonic request counter: only the latest request's result is applied,
+  // so a stale response can't push the page indicator back.
   const fetchSeq = React.useRef(0)
 
   const fetchProxies = React.useCallback(async () => {
     const seq = ++fetchSeq.current
     try {
       setIsLoading(true)
-
-      // Build sort parameters from sorting state
-      const sortField = sorting.length > 0 ? sorting[0].id : undefined
-      const sortOrder = sorting.length > 0 ? (sorting[0].desc ? "desc" : "asc") : undefined
-
       const response = await api.getProxies({
-        page: pagination.page,
-        limit: pagination.limit,
-        search: debouncedSearchQuery || undefined,
-        status: statusFilter === "all" ? undefined : statusFilter,
-        protocol: protocolFilter === "all" ? undefined : protocolFilter,
-        sort: sortField,
-        order: sortOrder as "asc" | "desc" | undefined,
+        page,
+        limit: PAGE_SIZE,
+        search: url.q || undefined,
+        status: url.status || undefined,
+        protocol: url.protocol || undefined,
+        sort: url.sort,
+        order,
       })
       if (seq !== fetchSeq.current) return
+      const lastPage = Math.max(1, response.pagination.total_pages)
+      if (response.proxies.length === 0 && page > lastPage) {
+        setUrl({ page: String(lastPage) }, { replace: true })
+        return
+      }
       setData(response.proxies)
-      setPagination(response.pagination)
+      setTotal(response.pagination.total)
     } catch (error) {
       if (seq !== fetchSeq.current) return
       console.error("Failed to fetch proxies:", error)
     } finally {
       if (seq === fetchSeq.current) setIsLoading(false)
     }
-  }, [pagination.page, pagination.limit, debouncedSearchQuery, statusFilter, protocolFilter, sorting])
+  }, [page, url.q, url.status, url.protocol, url.sort, order, setUrl])
 
   React.useEffect(() => {
     fetchProxies()
@@ -190,86 +178,127 @@ export default function ProxiesPage() {
     fetchTagList()
   }, [fetchTagList])
 
-  const handleAddProxy = async () => {
+  // Selection is per page; clear it when the page's rows change.
+  React.useEffect(() => {
+    setSelected(new Set())
+  }, [page, url.q, url.status, url.protocol, url.sort, order])
+
+  const refresh = () => {
+    fetchProxies()
+    fetchTagList()
+  }
+
+  const setFilter = (patch: Partial<typeof URL_DEFAULTS>) => setUrl({ ...patch, page: "1" }, { replace: true })
+  const onSort = (sort: string, ord: "asc" | "desc") => setUrl({ sort, order: ord, page: "1" }, { replace: true })
+
+  // Column headers can produce sort/order pairs the dropdown has no name for;
+  // show them as a disabled "Custom" entry so the list stays selectable.
+  const sortValue = SORTS.find((s) => s.sort === url.sort && s.order === order)?.value ?? "custom"
+
+  const selectedIds = Array.from(selected)
+  const allOnPage = data.length > 0 && data.every((p) => selected.has(p.id))
+  const someOnPage = data.some((p) => selected.has(p.id))
+
+  const toggleAll = (on: boolean) => setSelected(on ? new Set(data.map((p) => p.id)) : new Set())
+  const toggleOne = (id: number, on: boolean) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
+
+  // ── Actions ──────────────────────────────────────────────────────────────
+
+  const handleAddProxy = async (e: React.FormEvent) => {
+    e.preventDefault()
     try {
       await api.addProxy(newProxy)
-      setIsAddDialogOpen(false)
+      setAddOpen(false)
       setNewProxy({ address: "", protocol: "http", username: "", password: "", tags: [] })
-      toast.success("Proxy added successfully")
-      fetchProxies()
-      fetchTagList()
+      toast.success("Proxy added")
+      refresh()
     } catch (error) {
-      console.error("Failed to add proxy:", error)
       toast.error("Failed to add proxy", error instanceof Error ? error.message : "Unknown error")
     }
   }
 
-  const handleEditProxy = async () => {
-    if (!editingProxy) return
-
+  const handleEditProxy = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!editing) return
     try {
-      await api.updateProxy(editingProxy.id, {
-        address: editingProxy.address,
-        protocol: editingProxy.protocol,
-        username: editingProxy.username,
-        tags: editingProxy.tags ?? [],
+      await api.updateProxy(editing.id, {
+        address: editing.address,
+        protocol: editing.protocol,
+        username: editing.username,
+        tags: editing.tags ?? [],
       })
-      setIsEditDialogOpen(false)
-      setEditingProxy(null)
-      toast.success("Proxy updated successfully")
-      fetchProxies()
-      fetchTagList()
+      setEditing(null)
+      toast.success("Proxy updated")
+      refresh()
     } catch (error) {
-      console.error("Failed to update proxy:", error)
       toast.error("Failed to update proxy", error instanceof Error ? error.message : "Unknown error")
     }
   }
 
-  const handleBulkTag = async () => {
-    const selectedIds = getSelectedProxyIds()
+  const handleBulkTag = async (e: React.FormEvent) => {
+    e.preventDefault()
     if (selectedIds.length === 0) return
     if (bulkAddTags.length === 0 && bulkRemoveTags.length === 0) {
       toast.error("Nothing to do", "Add or remove at least one tag")
       return
     }
-
     setIsTagging(true)
     try {
-      const res = await api.bulkTagProxies({
-        ids: selectedIds,
-        add: bulkAddTags,
-        remove: bulkRemoveTags,
-      })
+      const res = await api.bulkTagProxies({ ids: selectedIds, add: bulkAddTags, remove: bulkRemoveTags })
       toast.success(`Tags updated on ${res.updated} proxies`)
-      setIsTagDialogOpen(false)
+      setTagOpen(false)
       setBulkAddTags([])
       setBulkRemoveTags([])
-      fetchProxies()
-      fetchTagList()
+      refresh()
     } catch (error) {
-      console.error("Failed to update tags:", error)
       toast.error("Failed to update tags", error instanceof Error ? error.message : "Unknown error")
     } finally {
       setIsTagging(false)
     }
   }
 
-  const handleDeleteProxy = async (id: number) => {
-    setDeleteConfirm({ open: true, proxyId: id })
-  }
-
   const confirmDelete = async () => {
-    if (!deleteConfirm.proxyId) return
-
+    if (deleteId === null) return
     try {
-      await api.deleteProxy(deleteConfirm.proxyId)
-      toast.success("Proxy deleted successfully")
+      await api.deleteProxy(deleteId)
+      toast.success("Proxy deleted")
       fetchProxies()
     } catch (error) {
-      console.error("Failed to delete proxy:", error)
       toast.error("Failed to delete proxy", error instanceof Error ? error.message : "Unknown error")
     } finally {
-      setDeleteConfirm({ open: false, proxyId: null })
+      setDeleteId(null)
+    }
+  }
+
+  const confirmBulkDelete = async () => {
+    try {
+      await api.bulkDeleteProxies({ ids: selectedIds })
+      setSelected(new Set())
+      toast.success(`${selectedIds.length} proxies deleted`)
+      fetchProxies()
+    } catch (error) {
+      toast.error("Failed to delete proxies", error instanceof Error ? error.message : "Unknown error")
+    } finally {
+      setBulkDeleteOpen(false)
+    }
+  }
+
+  const confirmDeleteAll = async () => {
+    try {
+      const res = await api.deleteAllProxies()
+      setSelected(new Set())
+      toast.success(`${res.deleted} proxies deleted`)
+      fetchProxies()
+    } catch {
+      toast.error("Failed to delete all proxies")
+    } finally {
+      setDeleteAllOpen(false)
     }
   }
 
@@ -278,138 +307,77 @@ export default function ProxiesPage() {
       const result = await api.testProxy(id)
       if (result.status === "active") {
         const responseTime = result.response_time || result.duration || 0
-        toast.success(
-          "Proxy test successful",
-          `${result.address} - Response time: ${responseTime}ms`
-        )
+        toast.success("Proxy is reachable", `${result.address} answered in ${responseTime} ms`)
       } else {
-        toast.error(
-          "Proxy test failed",
-          `${result.address} - ${result.error || "Unknown error"}`
-        )
+        toast.error("Proxy test failed", `${result.address} — ${result.error || "Unknown error"}`)
       }
       fetchProxies()
     } catch (error) {
-      console.error("Failed to test proxy:", error)
       toast.error("Failed to test proxy", error instanceof Error ? error.message : "Unknown error")
-    }
-  }
-
-  // Map selected row indices to proxy ids, skipping rows that no longer exist
-  // (the table data may have shrunk between selection and confirm).
-  const getSelectedProxyIds = () =>
-    Object.keys(rowSelection)
-      .map(key => data[Number(key)])
-      .filter((proxy): proxy is Proxy => proxy != null)
-      .map(proxy => proxy.id)
-
-  const handleBulkDelete = async () => {
-    const selectedIds = getSelectedProxyIds()
-    if (selectedIds.length === 0) return
-    setBulkDeleteConfirm(true)
-  }
-
-  const confirmBulkDelete = async () => {
-    const selectedIds = getSelectedProxyIds()
-
-    try {
-      await api.bulkDeleteProxies({ ids: selectedIds })
-      setRowSelection({})
-      toast.success(`${selectedIds.length} proxies deleted successfully`)
-      fetchProxies()
-    } catch (error) {
-      console.error("Failed to delete proxies:", error)
-      toast.error("Failed to delete proxies", error instanceof Error ? error.message : "Unknown error")
-    } finally {
-      setBulkDeleteConfirm(false)
-    }
-  }
-
-  const confirmDeleteAll = async () => {
-    try {
-      const res = await api.deleteAllProxies()
-      setRowSelection({})
-      toast.success(`${res.deleted} proxies deleted`)
-      fetchProxies()
-    } catch {
-      toast.error("Failed to delete all proxies")
-    } finally {
-      setDeleteAllConfirm(false)
     }
   }
 
   const handleExport = async (format: "txt" | "json" | "csv") => {
     try {
       const blob = await api.exportProxies(format)
-      const url = URL.createObjectURL(blob)
+      const href = URL.createObjectURL(blob)
       const a = document.createElement("a")
-      a.href = url
+      a.href = href
       a.download = `proxies.${format}`
       a.click()
-      URL.revokeObjectURL(url)
-      toast.success(`Proxies exported as ${format.toUpperCase()}`)
+      URL.revokeObjectURL(href)
     } catch (error) {
-      console.error("Failed to export proxies:", error)
       toast.error("Failed to export proxies", error instanceof Error ? error.message : "Unknown error")
     }
   }
 
+  const handleReloadProxies = async () => {
+    try {
+      setIsReloading(true)
+      await api.reloadProxies()
+      toast.success("Rotation pool reloaded", "Every proxy in the database is available for rotation again")
+    } catch (error) {
+      toast.error("Failed to reload pool", error instanceof Error ? error.message : "Unknown error")
+    } finally {
+      setIsReloading(false)
+    }
+  }
+
+  // ── Import ───────────────────────────────────────────────────────────────
+
   const handleFileUpload = (file: File) => {
-    if (!file.name.endsWith('.txt')) {
-      toast.error('Invalid file type', 'Please upload a .txt file')
+    if (!file.name.endsWith(".txt")) {
+      toast.error("Invalid file type", "Upload a .txt file")
       return
     }
-
     const reader = new FileReader()
     reader.onload = (e) => {
       const text = e.target?.result as string
-      const lines = text.split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0)
-        .filter(line => {
-          // Basic validation: IP:PORT format
-          const parts = line.split(':')
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .filter((line) => {
+          const parts = line.split(":")
           return parts.length >= 2 && parts[1].match(/^\d+$/)
         })
-
       setParsedProxies(lines)
       setImportFile(file)
     }
-    reader.onerror = () => {
-      toast.error('Failed to read file', 'The selected file could not be read. Please try again.')
-    }
+    reader.onerror = () => toast.error("Failed to read file")
     reader.readAsText(file)
-  }
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(true)
-  }
-
-  const handleDragLeave = () => {
-    setIsDragging(false)
   }
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragging(false)
-
-    const files = Array.from(e.dataTransfer.files)
-    const txtFile = files.find(f => f.name.endsWith('.txt'))
-
-    if (txtFile) {
-      handleFileUpload(txtFile)
-    } else {
-      toast.error('Invalid file type', 'Please upload a .txt file')
-    }
+    const txtFile = Array.from(e.dataTransfer.files).find((f) => f.name.endsWith(".txt"))
+    if (txtFile) handleFileUpload(txtFile)
+    else toast.error("Invalid file type", "Upload a .txt file")
   }
 
   const handleImport = async () => {
-    if (parsedProxies.length === 0) {
-      toast.error('No proxies to import', 'No valid proxies found in the file')
-      return
-    }
-
+    if (parsedProxies.length === 0) return
     setIsImporting(true)
     setImportProgress({ current: 0, total: parsedProxies.length, success: 0, failed: 0, skipped: 0 })
     setImportResults([])
@@ -421,7 +389,6 @@ export default function ProxiesPage() {
 
     for (let i = 0; i < parsedProxies.length; i++) {
       const address = parsedProxies[i]
-
       try {
         await api.addProxy({
           address,
@@ -429,48 +396,27 @@ export default function ProxiesPage() {
           username: importUsername || undefined,
           password: importPassword || undefined,
         })
-
         success++
-        results.push({ address, status: 'success' })
+        results.push({ address, status: "success" })
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-
-        // Check if it's a duplicate error
-        if (errorMessage.includes('already exists')) {
+        const message = error instanceof Error ? error.message : "Unknown error"
+        if (message.includes("already exists")) {
           skipped++
-          results.push({
-            address,
-            status: 'skipped',
-            error: 'Already exists (skipped)'
-          })
+          results.push({ address, status: "skipped", error: "Already exists" })
         } else {
           failed++
-          results.push({
-            address,
-            status: 'failed',
-            error: errorMessage
-          })
+          results.push({ address, status: "failed", error: message })
         }
       }
-
-      setImportProgress({
-        current: i + 1,
-        total: parsedProxies.length,
-        success,
-        failed,
-        skipped,
-      })
+      setImportProgress({ current: i + 1, total: parsedProxies.length, success, failed, skipped })
       setImportResults([...results])
     }
 
     setIsImporting(false)
-    // Refresh the proxy list
-    setTimeout(() => {
-      fetchProxies()
-    }, 1000)
+    setTimeout(refresh, 500)
   }
 
-  const resetImportDialog = () => {
+  const resetImport = () => {
     setImportFile(null)
     setParsedProxies([])
     setImportProtocol("http")
@@ -480,1030 +426,472 @@ export default function ProxiesPage() {
     setImportProgress({ current: 0, total: 0, success: 0, failed: 0, skipped: 0 })
     setImportResults([])
   }
+  const importDone = importProgress.total > 0 && importProgress.current === importProgress.total
 
-  const handleReloadProxies = async () => {
-    try {
-      setIsReloading(true)
-      await api.reloadProxies()
-      toast.success('Proxy pool reloaded', 'All proxies from database are now available for rotation')
-    } catch (error) {
-      console.error('Failed to reload proxies:', error)
-      toast.error('Failed to reload proxy pool', error instanceof Error ? error.message : "Unknown error")
-    } finally {
-      setIsReloading(false)
-    }
-  }
+  const hasFilters = !!(url.q || url.status || url.protocol)
 
-  const columns: ColumnDef<Proxy>[] = [
-    {
-      id: "select",
-      header: ({ table }) => (
-        <Checkbox
-          checked={
-            table.getIsAllPageRowsSelected() ||
-            (table.getIsSomePageRowsSelected() && "indeterminate")
-          }
-          onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
-          aria-label="Select all"
-        />
-      ),
-      cell: ({ row }) => (
-        <Checkbox
-          checked={row.getIsSelected()}
-          onCheckedChange={(value) => row.toggleSelected(!!value)}
-          aria-label="Select row"
-        />
-      ),
-      enableSorting: false,
-      enableHiding: false,
-    },
-    {
-      accessorKey: "address",
-      header: ({ column }) => {
-        return (
-          <Button
-            variant="ghost"
-            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-          >
-            Address
-            <ArrowUpDown className="ml-2 h-4 w-4" />
-          </Button>
-        )
-      },
-      cell: ({ row }) => <div className="font-mono">{row.getValue("address")}</div>,
-    },
-    {
-      accessorKey: "protocol",
-      header: "Protocol",
-      cell: ({ row }) => (
-        <Badge variant="outline" className="uppercase">
-          {row.getValue("protocol")}
-        </Badge>
-      ),
-    },
-    {
-      accessorKey: "tags",
-      header: "Tags",
-      enableSorting: false,
-      cell: ({ row }) => {
-        const tags = (row.getValue("tags") as string[] | undefined) ?? []
-        if (tags.length === 0) {
-          return <span className="text-muted-foreground">—</span>
-        }
-        return (
-          <div className="flex flex-wrap gap-1 max-w-[200px]">
-            {tags.slice(0, 3).map(tag => (
-              <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>
-            ))}
-            {tags.length > 3 && (
-              <Badge variant="outline" className="text-xs" title={tags.slice(3).join(", ")}>
-                +{tags.length - 3}
-              </Badge>
-            )}
-          </div>
-        )
-      },
-    },
-    {
-      accessorKey: "status",
-      header: ({ column }) => {
-        return (
-          <Button
-            variant="ghost"
-            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-          >
-            Status
-            <ArrowUpDown className="ml-2 h-4 w-4" />
-          </Button>
-        )
-      },
-      cell: ({ row }) => {
-        const status = row.getValue("status") as string
-        const statusColors = {
-          active: "text-green-600",
-          failed: "text-red-600",
-          idle: "text-yellow-600",
-        }
-        return (
-          <div className={`flex items-center gap-2 ${statusColors[status as keyof typeof statusColors]}`}>
-            <div className={`h-2 w-2 rounded-full ${
-              status === 'active' ? 'bg-green-600' :
-              status === 'failed' ? 'bg-red-600' :
-              'bg-yellow-600'
-            }`} />
-            <span className="capitalize font-medium">{status}</span>
-          </div>
-        )
-      },
-    },
-    {
-      accessorKey: "requests",
-      header: ({ column }) => {
-        return (
-          <Button
-            variant="ghost"
-            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-          >
-            Requests
-            <ArrowUpDown className="ml-2 h-4 w-4" />
-          </Button>
-        )
-      },
-      cell: ({ row }) => {
-        const value = parseFloat(row.getValue("requests"))
-        return <div suppressHydrationWarning>{value.toLocaleString('en-US')}</div>
-      },
-    },
-    {
-      accessorKey: "success_rate",
-      header: ({ column }) => {
-        return (
-          <Button
-            variant="ghost"
-            onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-          >
-            Success Rate
-            <ArrowUpDown className="ml-2 h-4 w-4" />
-          </Button>
-        )
-      },
-      cell: ({ row }) => {
-        const value = parseFloat(row.getValue("success_rate"))
-        return <div>{value.toFixed(1)}%</div>
-      },
-    },
-    {
-      accessorKey: "avg_response_time",
-      header: "Avg Response",
-      cell: ({ row }) => {
-        const value = parseFloat(row.getValue("avg_response_time"))
-        return <div>{value}ms</div>
-      },
-    },
-    {
-      accessorKey: "last_check",
-      header: "Last Check",
-      cell: ({ row }) => {
-        const raw = row.getValue("last_check") as string | null | undefined
-        if (!raw || raw === "idle") {
-          return <div className="text-muted-foreground">—</div>
-        }
-        const date = new Date(raw)
-        if (isNaN(date.getTime())) {
-          return <div className="text-muted-foreground">{raw}</div>
-        }
-        return <div suppressHydrationWarning>{date.toLocaleString()}</div>
-      },
-    },
-    {
-      id: "actions",
-      enableHiding: false,
-      cell: ({ row }) => {
-        const proxy = row.original
-
-        return (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="h-8 w-8 p-0">
-                <span className="sr-only">Open menu</span>
-                <MoreHorizontal className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuLabel>Actions</DropdownMenuLabel>
-              <DropdownMenuItem
-                onClick={() => navigator.clipboard.writeText(proxy.address)}
-              >
-                Copy address
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => handleTestProxy(proxy.id)}>
-                Test proxy
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => {
-                setEditingProxy(proxy)
-                setIsEditDialogOpen(true)
-              }}>
-                Edit
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                className="text-red-600"
-                onClick={() => handleDeleteProxy(proxy.id)}
-              >
-                Delete
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )
-      },
-    },
-  ]
-
-  const table = useReactTable({
-    data,
-    columns,
-    onSortingChange: setSorting,
-    onColumnFiltersChange: setColumnFilters,
-    getCoreRowModel: getCoreRowModel(),
-    onColumnVisibilityChange: setColumnVisibility,
-    onRowSelectionChange: setRowSelection,
-    manualPagination: true,
-    manualSorting: true,
-    manualFiltering: true,
-    pageCount: pagination.total_pages,
-    state: {
-      sorting,
-      columnFilters,
-      columnVisibility,
-      rowSelection,
-    },
-  })
-
-  if (isLoading && data.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <Loader2 className="h-8 w-8 animate-spin" />
-      </div>
-    )
-  }
+  // ── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Proxy Management</h1>
-          <p className="text-muted-foreground">
-            Manage and monitor your proxy infrastructure
-          </p>
-        </div>
+    <>
+      <PageHeader
+        title="Proxies"
+        description="Every proxy in the inventory with its last measured health. Filters and sorting are part of the link."
+      >
+        <Button variant="outline" onClick={handleReloadProxies} disabled={isReloading}>
+          {isReloading ? "Reloading…" : "Reload rotation pool"}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline">
+              More <ChevronDown aria-hidden />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => setImportOpen(true)}>Import from .txt</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => handleExport("txt")}>Export as TXT</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => handleExport("json")}>Export as JSON</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => handleExport("csv")}>Export as CSV</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onClick={() => setDeleteAllOpen(true)}>
+              Delete all proxies
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <Button onClick={() => setAddOpen(true)}>Add proxy</Button>
+      </PageHeader>
+
+      <div className="border-border flex flex-wrap items-center gap-2 border-b px-4 py-3 md:px-6">
+        <SearchInput value={url.q} onChange={(q) => setFilter({ q })} placeholder="Search by address" aria-label="Search proxies" />
+        <NativeSelect
+          aria-label="Status"
+          value={url.status}
+          onChange={(status) => setFilter({ status })}
+          options={[
+            { value: "", label: "All statuses" },
+            { value: "active", label: "Active" },
+            { value: "failed", label: "Failed" },
+            { value: "idle", label: "Idle" },
+          ]}
+        />
+        <NativeSelect
+          aria-label="Protocol"
+          value={url.protocol}
+          onChange={(protocol) => setFilter({ protocol })}
+          options={[{ value: "", label: "All protocols" }, ...PROTOCOLS.map((p) => ({ value: p, label: p.toUpperCase() }))]}
+        />
+        <NativeSelect
+          aria-label="Sort"
+          value={sortValue}
+          onChange={(v) => {
+            const s = SORTS.find((x) => x.value === v)
+            if (s) onSort(s.sort, s.order)
+          }}
+          options={[...(sortValue === "custom" ? [{ value: "custom", label: `Custom (${url.sort} ${order})`, disabled: true }] : []), ...SORTS.map((s) => ({ value: s.value, label: s.label }))]}
+        />
+        {hasFilters && (
+          <button
+            type="button"
+            className="text-muted-foreground hover:text-foreground ml-1 font-medium"
+            onClick={() => setFilter({ q: "", status: "", protocol: "" })}
+          >
+            Clear
+          </button>
+        )}
+
+        {selectedIds.length > 0 && (
+          <div className="ml-auto flex items-center gap-2">
+            <span className="num text-muted-foreground">{selectedIds.length} selected</span>
+            <Button variant="outline" size="sm" onClick={() => setTagOpen(true)}>
+              Edit tags
+            </Button>
+            <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>
+              Delete
+            </Button>
+          </div>
+        )}
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle>Proxies</CardTitle>
-              <CardDescription>
-                {pagination.total} total proxies
-              </CardDescription>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button onClick={() => setIsAddDialogOpen(true)}>
-                <Plus className="mr-2 h-4 w-4" />
-                Add Proxy
-              </Button>
-              <Button
-                variant="outline"
-                onClick={handleReloadProxies}
-                disabled={isReloading}
-              >
-                <Loader2 className={`mr-2 h-4 w-4 ${isReloading ? 'animate-spin' : ''}`} />
-                Reload Pool
-              </Button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline">
-                    Bulk Actions
-                    <ChevronDown className="ml-2 h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => setIsImportDialogOpen(true)}>
-                    <Upload className="mr-2 h-4 w-4" />
-                    Import from TXT
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    onClick={() => setIsTagDialogOpen(true)}
-                    disabled={Object.keys(rowSelection).length === 0}
-                  >
-                    <Tag className="mr-2 h-4 w-4" />
-                    Edit tags of selected ({Object.keys(rowSelection).length})
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => handleExport("txt")}>
-                    <Download className="mr-2 h-4 w-4" />
-                    Export as TXT
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => handleExport("json")}>
-                    <Download className="mr-2 h-4 w-4" />
-                    Export as JSON
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => handleExport("csv")}>
-                    <Download className="mr-2 h-4 w-4" />
-                    Export as CSV
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    className="text-red-600"
-                    onClick={handleBulkDelete}
-                    disabled={Object.keys(rowSelection).length === 0}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete selected ({Object.keys(rowSelection).length})
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    className="text-red-600 font-semibold"
-                    onClick={() => setDeleteAllConfirm(true)}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete ALL proxies
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <Input
-                placeholder="Search by address..."
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                className="max-w-sm"
-              />
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="icon" className="relative">
-                    <Filter className="h-4 w-4" />
-                    {(statusFilter !== "all" || protocolFilter !== "all") && (
-                      <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-primary" />
-                    )}
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-56">
-                  <DropdownMenuLabel>Filters</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  <div className="px-2 py-2">
-                    <Label className="text-xs text-muted-foreground mb-2 block">Status</Label>
-                    <Select
-                      value={statusFilter}
-                      onValueChange={(value) => {
-                        setStatusFilter(value)
-                        setPagination(prev => ({ ...prev, page: 1 }))
-                      }}
-                    >
-                      <SelectTrigger className="w-full">
-                        <SelectValue placeholder="All statuses" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">All statuses</SelectItem>
-                        <SelectItem value="active">Active</SelectItem>
-                        <SelectItem value="failed">Failed</SelectItem>
-                        <SelectItem value="idle">Idle</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <DropdownMenuSeparator />
-                  <div className="px-2 py-2">
-                    <Label className="text-xs text-muted-foreground mb-2 block">Protocol</Label>
-                    <Select
-                      value={protocolFilter}
-                      onValueChange={(value) => {
-                        setProtocolFilter(value)
-                        setPagination(prev => ({ ...prev, page: 1 }))
-                      }}
-                    >
-                      <SelectTrigger className="w-full">
-                        <SelectValue placeholder="All protocols" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">All protocols</SelectItem>
-                        <SelectItem value="http">HTTP</SelectItem>
-                        <SelectItem value="https">HTTPS</SelectItem>
-                        <SelectItem value="socks4">SOCKS4</SelectItem>
-                        <SelectItem value="socks4a">SOCKS4A</SelectItem>
-                        <SelectItem value="socks5">SOCKS5</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline">
-                    Columns <ChevronDown className="ml-2 h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  {table
-                    .getAllColumns()
-                    .filter((column) => column.getCanHide())
-                    .map((column) => {
-                      return (
-                        <DropdownMenuCheckboxItem
-                          key={column.id}
-                          className="capitalize"
-                          checked={column.getIsVisible()}
-                          onCheckedChange={(value) =>
-                            column.toggleVisibility(!!value)
-                          }
-                        >
-                          {column.id}
-                        </DropdownMenuCheckboxItem>
-                      )
-                    })}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-            <div className="rounded-md border">
-              <Table>
-                <TableHeader>
-                  {table.getHeaderGroups().map((headerGroup) => (
-                    <TableRow key={headerGroup.id}>
-                      {headerGroup.headers.map((header) => {
-                        return (
-                          <TableHead key={header.id}>
-                            {header.isPlaceholder
-                              ? null
-                              : flexRender(
-                                  header.column.columnDef.header,
-                                  header.getContext()
-                                )}
-                          </TableHead>
-                        )
-                      })}
-                    </TableRow>
-                  ))}
-                </TableHeader>
-                <TableBody>
-                  {table.getRowModel().rows?.length ? (
-                    table.getRowModel().rows.map((row) => (
-                      <TableRow
-                        key={row.id}
-                        data-state={row.getIsSelected() && "selected"}
-                      >
-                        {row.getVisibleCells().map((cell) => (
-                          <TableCell key={cell.id}>
-                            {flexRender(
-                              cell.column.columnDef.cell,
-                              cell.getContext()
-                            )}
-                          </TableCell>
-                        ))}
-                      </TableRow>
-                    ))
-                  ) : (
-                    <TableRow>
-                      <TableCell
-                        colSpan={columns.length}
-                        className="h-24 text-center"
-                      >
-                        No results.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-            <div className="flex items-center justify-between space-x-2">
-              <div className="flex-1 text-sm text-muted-foreground">
-                {table.getFilteredSelectedRowModel().rows.length} of{" "}
-                {table.getFilteredRowModel().rows.length} row(s) selected.
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="text-sm text-muted-foreground">
-                  Page {pagination.page} of {pagination.total_pages} ({pagination.total} total proxies)
-                </div>
-                <div className="flex items-center space-x-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setPagination(prev => ({ ...prev, page: prev.page - 1 }))}
-                    disabled={pagination.page <= 1}
-                  >
-                    Previous
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setPagination(prev => ({ ...prev, page: prev.page + 1 }))}
-                    disabled={pagination.page >= pagination.total_pages}
-                  >
-                    Next
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      <Content>
+        {isLoading && data.length === 0 ? (
+          <LoadingLine />
+        ) : data.length === 0 ? (
+          <EmptyLine>{hasFilters ? "No proxy matches these filters." : "No proxies yet — add one or import a list."}</EmptyLine>
+        ) : (
+          <Table className={cn(isLoading && "opacity-60")}>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-8">
+                  <Checkbox
+                    checked={allOnPage ? true : someOnPage ? "indeterminate" : false}
+                    onCheckedChange={(v) => toggleAll(!!v)}
+                    aria-label="Select all on this page"
+                  />
+                </TableHead>
+                <SortHeader field="address" sort={url.sort} order={order} onSort={onSort}>Address</SortHeader>
+                <TableHead>Protocol</TableHead>
+                <TableHead>Tags</TableHead>
+                <SortHeader field="status" sort={url.sort} order={order} onSort={onSort}>Status</SortHeader>
+                <SortHeader field="requests" sort={url.sort} order={order} onSort={onSort} align="right">Requests</SortHeader>
+                <TableHead className="text-right">Success</TableHead>
+                <SortHeader field="avg_response_time" sort={url.sort} order={order} onSort={onSort} align="right">Avg response</SortHeader>
+                <TableHead>Last check</TableHead>
+                <TableHead className="w-8" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.map((proxy) => {
+                const lastCheck = proxy.last_check && proxy.last_check !== "idle" ? proxy.last_check : null
+                const tags = proxy.tags ?? []
+                return (
+                  <TableRow key={proxy.id} data-state={selected.has(proxy.id) ? "selected" : undefined}>
+                    <TableCell>
+                      <Checkbox checked={selected.has(proxy.id)} onCheckedChange={(v) => toggleOne(proxy.id, !!v)} aria-label={`Select ${proxy.address}`} />
+                    </TableCell>
+                    <TableCell className="font-mono">
+                      {proxy.address}
+                      {proxy.username && <span className="text-muted-foreground ml-2 text-[0.6875rem]">auth</span>}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground font-mono">{proxy.protocol}</TableCell>
+                    <TableCell>
+                      {tags.length === 0 ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        <span className="flex max-w-[16rem] flex-wrap gap-1">
+                          {tags.slice(0, 3).map((t) => (
+                            <Tag key={t}>{t}</Tag>
+                          ))}
+                          {tags.length > 3 && <Tag title={tags.slice(3).join(", ")}>+{tags.length - 3}</Tag>}
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <ProxyStatus status={proxy.status} />
+                    </TableCell>
+                    <TableCell className="num text-right">{count(proxy.requests)}</TableCell>
+                    <TableCell className="num text-right">
+                      <span className="inline-flex items-center gap-2">
+                        <UsageBar value={proxy.success_rate} className="w-12" />
+                        {percent(proxy.success_rate)}
+                      </span>
+                    </TableCell>
+                    <TableCell className="num text-right">{proxy.avg_response_time ? ms(proxy.avg_response_time) : "—"}</TableCell>
+                    <TableCell className="text-muted-foreground" title={lastCheck ? formatDateTime(lastCheck) : undefined}>
+                      {lastCheck ? relative(lastCheck) : "—"}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${proxy.address}`}>
+                            <ChevronDown aria-hidden />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => navigator.clipboard.writeText(proxy.address)}>Copy address</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleTestProxy(proxy.id)}>Test now</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setEditing(proxy)}>Edit</DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem variant="destructive" onClick={() => setDeleteId(proxy.id)}>
+                            Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        )}
+        {total > 0 && <Pagination page={page} limit={PAGE_SIZE} total={total} onPage={(p) => setUrl({ page: String(p) })} />}
+      </Content>
 
-      {/* Add Proxy Dialog */}
-      <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
+      {/* Add */}
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
         <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Add New Proxy</DialogTitle>
-            <DialogDescription>
-              Add a new proxy to your pool
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="grid gap-2">
+          <form onSubmit={handleAddProxy} className="space-y-4">
+            <DialogHeader>
+              <DialogTitle>Add proxy</DialogTitle>
+              <DialogDescription>The proxy joins the inventory as idle and is picked up by the next health check.</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-1.5">
               <Label htmlFor="address">Address</Label>
-              <Input
-                id="address"
-                placeholder="192.168.1.100:8001"
-                className="font-mono"
-                value={newProxy.address}
-                onChange={(e) => setNewProxy({ ...newProxy, address: e.target.value })}
-              />
+              <Input id="address" placeholder="192.168.1.100:8001" className="font-mono" required value={newProxy.address} onChange={(e) => setNewProxy({ ...newProxy, address: e.target.value })} />
             </div>
-            <div className="grid gap-2">
+            <div className="space-y-1.5">
               <Label htmlFor="protocol">Protocol</Label>
-              <Select
-                value={newProxy.protocol}
-                onValueChange={(value: string) => setNewProxy({ ...newProxy, protocol: value as typeof newProxy.protocol })}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="http">HTTP</SelectItem>
-                  <SelectItem value="https">HTTPS</SelectItem>
-                  <SelectItem value="socks4">SOCKS4</SelectItem>
-                  <SelectItem value="socks4a">SOCKS4A</SelectItem>
-                  <SelectItem value="socks5">SOCKS5</SelectItem>
-                </SelectContent>
-              </Select>
+              <ProtocolSelect id="protocol" value={newProxy.protocol} onChange={(protocol) => setNewProxy({ ...newProxy, protocol })} />
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="username">Username (optional)</Label>
-              <Input
-                id="username"
-                value={newProxy.username}
-                onChange={(e) => setNewProxy({ ...newProxy, username: e.target.value })}
-              />
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="username">Username (optional)</Label>
+                <Input id="username" value={newProxy.username} onChange={(e) => setNewProxy({ ...newProxy, username: e.target.value })} />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="password">Password (optional)</Label>
+                <Input id="password" type="password" value={newProxy.password} onChange={(e) => setNewProxy({ ...newProxy, password: e.target.value })} />
+              </div>
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="password">Password (optional)</Label>
-              <Input
-                id="password"
-                type="password"
-                value={newProxy.password}
-                onChange={(e) => setNewProxy({ ...newProxy, password: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-2">
+            <div className="space-y-1.5">
               <Label htmlFor="tags">Tags (optional)</Label>
-              <TagInput
-                id="tags"
-                value={newProxy.tags}
-                onChange={(tags) => setNewProxy({ ...newProxy, tags })}
-                suggestions={allTags}
-              />
-              <p className="text-xs text-muted-foreground">
-                Tags let pools match proxies without GeoIP data (e.g. local/VPN proxies)
-              </p>
+              <TagInput id="tags" value={newProxy.tags} onChange={(tags) => setNewProxy({ ...newProxy, tags })} suggestions={allTags} />
+              <p className="text-muted-foreground text-[0.6875rem] leading-4">Tags let pools match proxies that have no GeoIP data, such as local or VPN proxies.</p>
             </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsAddDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleAddProxy}>
-              Add Proxy
-            </Button>
-          </DialogFooter>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setAddOpen(false)}>Cancel</Button>
+              <Button type="submit">Add proxy</Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 
-      {/* Edit Proxy Dialog */}
-      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+      {/* Edit */}
+      <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
         <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit Proxy</DialogTitle>
-            <DialogDescription>
-              Update proxy configuration
-            </DialogDescription>
-          </DialogHeader>
-          {editingProxy && (
-            <div className="grid gap-4 py-4">
-              <div className="grid gap-2">
+          {editing && (
+            <form onSubmit={handleEditProxy} className="space-y-4">
+              <DialogHeader>
+                <DialogTitle>Edit proxy</DialogTitle>
+                <DialogDescription>Changing the address resets nothing else; stats stay attached to this record.</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-1.5">
                 <Label htmlFor="edit-address">Address</Label>
-                <Input
-                  id="edit-address"
-                  placeholder="192.168.1.100:8001"
-                  className="font-mono"
-                  value={editingProxy.address}
-                  onChange={(e) => setEditingProxy({ ...editingProxy, address: e.target.value })}
-                />
+                <Input id="edit-address" className="font-mono" required value={editing.address} onChange={(e) => setEditing({ ...editing, address: e.target.value })} />
               </div>
-              <div className="grid gap-2">
+              <div className="space-y-1.5">
                 <Label htmlFor="edit-protocol">Protocol</Label>
-                <Select
-                  value={editingProxy.protocol}
-                  onValueChange={(value: string) => setEditingProxy({ ...editingProxy, protocol: value as Proxy["protocol"] })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="http">HTTP</SelectItem>
-                    <SelectItem value="https">HTTPS</SelectItem>
-                    <SelectItem value="socks4">SOCKS4</SelectItem>
-                    <SelectItem value="socks4a">SOCKS4A</SelectItem>
-                    <SelectItem value="socks5">SOCKS5</SelectItem>
-                  </SelectContent>
-                </Select>
+                <ProtocolSelect id="edit-protocol" value={editing.protocol} onChange={(protocol) => setEditing({ ...editing, protocol })} />
               </div>
-              <div className="grid gap-2">
+              <div className="space-y-1.5">
                 <Label htmlFor="edit-username">Username (optional)</Label>
-                <Input
-                  id="edit-username"
-                  value={editingProxy.username || ""}
-                  onChange={(e) => setEditingProxy({ ...editingProxy, username: e.target.value })}
-                />
+                <Input id="edit-username" value={editing.username || ""} onChange={(e) => setEditing({ ...editing, username: e.target.value })} />
               </div>
-              <div className="grid gap-2">
+              <div className="space-y-1.5">
                 <Label htmlFor="edit-tags">Tags</Label>
-                <TagInput
-                  id="edit-tags"
-                  value={editingProxy.tags ?? []}
-                  onChange={(tags) => setEditingProxy({ ...editingProxy, tags })}
-                  suggestions={allTags}
-                />
+                <TagInput id="edit-tags" value={editing.tags ?? []} onChange={(tags) => setEditing({ ...editing, tags })} suggestions={allTags} />
               </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setEditing(null)}>Cancel</Button>
+                <Button type="submit">Save changes</Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk tags */}
+      <Dialog
+        open={tagOpen}
+        onOpenChange={(open) => {
+          setTagOpen(open)
+          if (!open) {
+            setBulkAddTags([])
+            setBulkRemoveTags([])
+          }
+        }}
+      >
+        <DialogContent>
+          <form onSubmit={handleBulkTag} className="space-y-4">
+            <DialogHeader>
+              <DialogTitle>Edit tags on {selectedIds.length} proxies</DialogTitle>
+              <DialogDescription>Added tags are appended to each proxy&apos;s existing tags; removed tags are stripped where present.</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-1.5">
+              <Label htmlFor="bulk-add-tags">Add tags</Label>
+              <TagInput id="bulk-add-tags" value={bulkAddTags} onChange={setBulkAddTags} suggestions={allTags} disabled={isTagging} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="bulk-remove-tags">Remove tags</Label>
+              <TagInput id="bulk-remove-tags" value={bulkRemoveTags} onChange={setBulkRemoveTags} suggestions={allTags} disabled={isTagging} />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setTagOpen(false)} disabled={isTagging}>Cancel</Button>
+              <Button type="submit" disabled={isTagging}>{isTagging ? "Applying…" : "Apply"}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Import */}
+      <Dialog
+        open={importOpen}
+        onOpenChange={(open) => {
+          setImportOpen(open)
+          if (!open) resetImport()
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[32rem]">
+          <DialogHeader>
+            <DialogTitle>Import proxies from .txt</DialogTitle>
+            <DialogDescription>One proxy per line as ip:port. Lines that do not parse are skipped before anything is sent.</DialogDescription>
+          </DialogHeader>
+
+          {!importFile ? (
+            <div
+              className={cn(
+                "border-border grid cursor-pointer place-items-center rounded-md border border-dashed px-6 py-10 text-center transition-colors",
+                isDragging ? "bg-accent" : "hover:bg-accent/50"
+              )}
+              onDragOver={(e) => {
+                e.preventDefault()
+                setIsDragging(true)
+              }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={handleDrop}
+              onClick={() => {
+                const input = document.createElement("input")
+                input.type = "file"
+                input.accept = ".txt"
+                input.onchange = (e) => {
+                  const file = (e.target as HTMLInputElement).files?.[0]
+                  if (file) handleFileUpload(file)
+                }
+                input.click()
+              }}
+              role="button"
+              tabIndex={0}
+            >
+              <FileText className="text-muted-foreground size-5" aria-hidden />
+              <p className="mt-3 font-medium">Drop a .txt file here, or click to choose</p>
+              <p className="text-muted-foreground mt-1">ip:port, one per line</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex items-baseline justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="truncate font-medium">{importFile.name}</p>
+                  <p className="text-muted-foreground">
+                    <span className="num text-foreground font-medium">{count(parsedProxies.length)}</span> valid lines
+                  </p>
+                </div>
+                {!isImporting && !importDone && (
+                  <button type="button" className="text-muted-foreground hover:text-foreground font-medium" onClick={() => { setImportFile(null); setParsedProxies([]) }}>
+                    Change file
+                  </button>
+                )}
+              </div>
+
+              {parsedProxies.length > 0 && (
+                <>
+                  <div>
+                    <p className="label mb-1.5">Preview</p>
+                    <div className="border-border max-h-28 overflow-y-auto rounded-md border px-2.5 py-2 font-mono text-[0.75rem] leading-5">
+                      {parsedProxies.slice(0, 10).map((p, i) => (
+                        <div key={i} className="text-muted-foreground">{p}</div>
+                      ))}
+                      {parsedProxies.length > 10 && <div className="text-muted-foreground">… and {count(parsedProxies.length - 10)} more</div>}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label htmlFor="import-protocol">Protocol for every line</Label>
+                    <ProtocolSelect id="import-protocol" value={importProtocol} onChange={setImportProtocol} disabled={isImporting} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="import-username">Username (optional)</Label>
+                      <Input id="import-username" value={importUsername} onChange={(e) => setImportUsername(e.target.value)} disabled={isImporting} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="import-password">Password (optional)</Label>
+                      <Input id="import-password" type="password" value={importPassword} onChange={(e) => setImportPassword(e.target.value)} disabled={isImporting} />
+                    </div>
+                  </div>
+
+                  {(isImporting || importDone) && (
+                    <div className="space-y-2">
+                      <div className="flex items-baseline justify-between">
+                        <span className="num">
+                          {importProgress.current} / {importProgress.total}
+                        </span>
+                        <span className="text-muted-foreground num">
+                          {importProgress.success} added
+                          {importProgress.skipped > 0 && ` · ${importProgress.skipped} skipped`}
+                          {importProgress.failed > 0 && ` · ${importProgress.failed} failed`}
+                        </span>
+                      </div>
+                      <UsageBar value={(importProgress.current / Math.max(1, importProgress.total)) * 100} />
+                      {importDone && importResults.some((r) => r.status !== "success") && (
+                        <div className="border-border max-h-40 overflow-y-auto rounded-md border px-2.5 py-2 font-mono text-[0.75rem] leading-5">
+                          {importResults
+                            .filter((r) => r.status !== "success")
+                            .map((r, i) => (
+                              <div key={i} className="text-muted-foreground">
+                                {r.address} <span className="ml-2">{r.error}</span>
+                              </div>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleEditProxy}>
-              Save Changes
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Bulk Tag Dialog */}
-      <Dialog open={isTagDialogOpen} onOpenChange={(open) => {
-        setIsTagDialogOpen(open)
-        if (!open) {
-          setBulkAddTags([])
-          setBulkRemoveTags([])
-        }
-      }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit tags of {Object.keys(rowSelection).length} proxies</DialogTitle>
-            <DialogDescription>
-              Added tags are appended to each proxy&apos;s existing tags; removed tags are stripped.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="grid gap-2">
-              <Label htmlFor="bulk-add-tags">Add tags</Label>
-              <TagInput
-                id="bulk-add-tags"
-                value={bulkAddTags}
-                onChange={setBulkAddTags}
-                suggestions={allTags}
-                disabled={isTagging}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="bulk-remove-tags">Remove tags</Label>
-              <TagInput
-                id="bulk-remove-tags"
-                value={bulkRemoveTags}
-                onChange={setBulkRemoveTags}
-                suggestions={allTags}
-                disabled={isTagging}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsTagDialogOpen(false)} disabled={isTagging}>
-              Cancel
-            </Button>
-            <Button onClick={handleBulkTag} disabled={isTagging}>
-              {isTagging && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Apply Tags
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Import Proxies Dialog */}
-      <Dialog open={isImportDialogOpen} onOpenChange={(open) => {
-        setIsImportDialogOpen(open)
-        if (!open) resetImportDialog()
-      }}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Import Proxies from TXT</DialogTitle>
-            <DialogDescription>
-              Upload a .txt file with proxies in IP:PORT format (one per line)
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="grid gap-4 py-4">
-            {!importFile ? (
-              // File Upload Area
-              <div
-                className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
-                  isDragging
-                    ? 'border-primary bg-primary/5'
-                    : 'border-muted-foreground/25 hover:border-primary/50'
-                }`}
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                onClick={() => {
-                  const input = document.createElement('input')
-                  input.type = 'file'
-                  input.accept = '.txt'
-                  input.onchange = (e) => {
-                    const file = (e.target as HTMLInputElement).files?.[0]
-                    if (file) handleFileUpload(file)
-                  }
-                  input.click()
-                }}
-              >
-                <FileText className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
-                <p className="text-lg font-medium mb-2">
-                  Drop your .txt file here or click to browse
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  File format: One proxy per line (IP:PORT)
-                </p>
-              </div>
-            ) : (
-              // Preview and Configuration
-              <>
-                <div className="flex items-center justify-between p-4 bg-muted rounded-lg">
-                  <div className="flex items-center gap-3">
-                    <FileText className="h-5 w-5 text-primary" />
-                    <div>
-                      <p className="font-medium">{importFile.name}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {parsedProxies.length} valid proxies found
-                      </p>
-                    </div>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setImportFile(null)
-                      setParsedProxies([])
-                    }}
-                    disabled={isImporting}
-                  >
-                    Change File
-                  </Button>
-                </div>
-
-                {parsedProxies.length > 0 && (
-                  <>
-                    <div className="grid gap-2">
-                      <Label>Preview (first 10 proxies)</Label>
-                      <div className="border rounded-md p-3 bg-muted/30 max-h-32 overflow-y-auto">
-                        <div className="font-mono text-sm space-y-1">
-                          {parsedProxies.slice(0, 10).map((proxy, idx) => (
-                            <div key={idx} className="text-muted-foreground">
-                              {proxy}
-                            </div>
-                          ))}
-                          {parsedProxies.length > 10 && (
-                            <div className="text-xs text-muted-foreground pt-1">
-                              ... and {parsedProxies.length - 10} more
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid gap-2">
-                      <Label htmlFor="import-protocol">Protocol</Label>
-                      <Select
-                        value={importProtocol}
-                        onValueChange={(value: string) => setImportProtocol(value as typeof importProtocol)}
-                        disabled={isImporting}
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="http">HTTP</SelectItem>
-                          <SelectItem value="https">HTTPS</SelectItem>
-                          <SelectItem value="socks4">SOCKS4</SelectItem>
-                          <SelectItem value="socks4a">SOCKS4A</SelectItem>
-                          <SelectItem value="socks5">SOCKS5</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <div className="grid gap-2">
-                      <Label htmlFor="import-username">Username (optional)</Label>
-                      <Input
-                        id="import-username"
-                        value={importUsername}
-                        onChange={(e) => setImportUsername(e.target.value)}
-                        disabled={isImporting}
-                        placeholder="Leave empty if not required"
-                      />
-                    </div>
-
-                    <div className="grid gap-2">
-                      <Label htmlFor="import-password">Password (optional)</Label>
-                      <Input
-                        id="import-password"
-                        type="password"
-                        value={importPassword}
-                        onChange={(e) => setImportPassword(e.target.value)}
-                        disabled={isImporting}
-                        placeholder="Leave empty if not required"
-                      />
-                    </div>
-
-                    {isImporting && (
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-muted-foreground">
-                            Progress: {importProgress.current} / {importProgress.total}
-                          </span>
-                          <div className="flex gap-3 text-muted-foreground">
-                            <span>
-                              <span className="text-green-600 font-medium">{importProgress.success}</span> success
-                            </span>
-                            {importProgress.skipped > 0 && (
-                              <span>
-                                <span className="text-yellow-600 font-medium">{importProgress.skipped}</span> skipped
-                              </span>
-                            )}
-                            {importProgress.failed > 0 && (
-                              <span>
-                                <span className="text-red-600 font-medium">{importProgress.failed}</span> failed
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="w-full bg-secondary rounded-full h-2.5">
-                          <div
-                            className="bg-primary h-2.5 rounded-full transition-all duration-300"
-                            style={{
-                              width: `${(importProgress.current / importProgress.total) * 100}%`
-                            }}
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {importProgress.current === importProgress.total && importProgress.total > 0 && (
-                      <div className="border rounded-lg p-4 space-y-3 bg-muted/30">
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-medium">Import Complete</h4>
-                          <div className="flex gap-4 text-sm">
-                            <span className="flex items-center gap-1 text-green-600">
-                              <CheckCircle2 className="h-4 w-4" />
-                              {importProgress.success} successful
-                            </span>
-                            {importProgress.skipped > 0 && (
-                              <span className="flex items-center gap-1 text-yellow-600">
-                                <AlertCircle className="h-4 w-4" />
-                                {importProgress.skipped} skipped
-                              </span>
-                            )}
-                            {importProgress.failed > 0 && (
-                              <span className="flex items-center gap-1 text-red-600">
-                                <XCircle className="h-4 w-4" />
-                                {importProgress.failed} failed
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        {(importResults.filter(r => r.status === 'skipped').length > 0 ||
-                          importResults.filter(r => r.status === 'failed').length > 0) && (
-                          <div className="max-h-48 overflow-y-auto text-sm space-y-2">
-                            {importResults.filter(r => r.status === 'skipped').length > 0 && (
-                              <div>
-                                <p className="font-medium text-yellow-600 mb-1">Skipped proxies (duplicates):</p>
-                                <div className="space-y-0.5">
-                                  {importResults
-                                    .filter(r => r.status === 'skipped')
-                                    .map((result, idx) => (
-                                      <div key={idx} className="font-mono text-xs text-yellow-600/80">
-                                        {result.address}
-                                      </div>
-                                    ))}
-                                </div>
-                              </div>
-                            )}
-                            {importResults.filter(r => r.status === 'failed').length > 0 && (
-                              <div>
-                                <p className="font-medium text-red-600 mb-1">Failed proxies:</p>
-                                <div className="space-y-0.5">
-                                  {importResults
-                                    .filter(r => r.status === 'failed')
-                                    .map((result, idx) => (
-                                      <div key={idx} className="font-mono text-xs text-red-600">
-                                        {result.address}: {result.error}
-                                      </div>
-                                    ))}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </>
-                )}
-              </>
-            )}
-          </div>
 
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setIsImportDialogOpen(false)
-                resetImportDialog()
-              }}
-              disabled={isImporting}
-            >
-              {importProgress.current === importProgress.total && importProgress.total > 0 ? 'Close' : 'Cancel'}
+            <Button type="button" variant="outline" onClick={() => { setImportOpen(false); resetImport() }} disabled={isImporting}>
+              {importDone ? "Close" : "Cancel"}
             </Button>
-            {importFile && parsedProxies.length > 0 && (
-              <Button
-                onClick={handleImport}
-                disabled={isImporting || (importProgress.current === importProgress.total && importProgress.total > 0)}
-              >
-                {isImporting ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Importing...
-                  </>
-                ) : importProgress.current === importProgress.total && importProgress.total > 0 ? (
-                  'Import Complete'
-                ) : (
-                  `Import ${parsedProxies.length} Proxies`
-                )}
+            {importFile && parsedProxies.length > 0 && !importDone && (
+              <Button onClick={handleImport} disabled={isImporting}>
+                {isImporting ? "Importing…" : `Import ${count(parsedProxies.length)} proxies`}
               </Button>
             )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Delete Confirmation Dialog */}
-      <AlertDialog open={deleteConfirm.open} onOpenChange={(open) => setDeleteConfirm({ open, proxyId: null })}>
+      {/* Delete confirmations */}
+      <AlertDialog open={deleteId !== null} onOpenChange={(open) => !open && setDeleteId(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Are you sure?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This action cannot be undone. This will permanently delete the proxy.
-            </AlertDialogDescription>
+            <AlertDialogTitle>Delete this proxy?</AlertDialogTitle>
+            <AlertDialogDescription>It leaves every pool it belongs to and its request history is dropped. This cannot be undone.</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={confirmDelete} className="bg-red-600 hover:bg-red-700">
-              Delete
-            </AlertDialogAction>
+            <AlertDialogAction onClick={confirmDelete}>Delete</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Bulk Delete Confirmation Dialog */}
-       <AlertDialog open={bulkDeleteConfirm} onOpenChange={setBulkDeleteConfirm}>
-         <AlertDialogContent>
-           <AlertDialogHeader>
-             <AlertDialogTitle>Delete {Object.keys(rowSelection).length} proxies?</AlertDialogTitle>
-             <AlertDialogDescription>
-               This action cannot be undone. This will permanently delete the selected proxies.
-             </AlertDialogDescription>
-           </AlertDialogHeader>
-           <AlertDialogFooter>
-             <AlertDialogCancel>Cancel</AlertDialogCancel>
-             <AlertDialogAction onClick={confirmBulkDelete} className="bg-red-600 hover:bg-red-700">
-               Delete
-             </AlertDialogAction>
-           </AlertDialogFooter>
-         </AlertDialogContent>
-       </AlertDialog>
+      <AlertDialog open={bulkDeleteOpen} onOpenChange={setBulkDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {selectedIds.length} proxies?</AlertDialogTitle>
+            <AlertDialogDescription>They leave their pools and their request history is dropped. This cannot be undone.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmBulkDelete}>Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
-       <AlertDialog open={deleteAllConfirm} onOpenChange={setDeleteAllConfirm}>
-         <AlertDialogContent>
-           <AlertDialogHeader>
-             <AlertDialogTitle>Delete ALL proxies?</AlertDialogTitle>
-             <AlertDialogDescription>
-               This will permanently delete <strong>every proxy</strong> in the database,
-               including those in pools. This action cannot be undone.
-             </AlertDialogDescription>
-           </AlertDialogHeader>
-           <AlertDialogFooter>
-             <AlertDialogCancel>Cancel</AlertDialogCancel>
-             <AlertDialogAction onClick={confirmDeleteAll} className="bg-red-600 hover:bg-red-700">
-               Delete All
-             </AlertDialogAction>
-           </AlertDialogFooter>
-         </AlertDialogContent>
-       </AlertDialog>
-    </div>
+      <AlertDialog open={deleteAllOpen} onOpenChange={setDeleteAllOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete every proxy?</AlertDialogTitle>
+            <AlertDialogDescription>
+              All {count(total)} proxies in the database are removed, including pool members. Sources will re-import on their next fetch. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDeleteAll}>Delete all</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  )
+}
+
+export default function Page() {
+  return (
+    <Suspense fallback={<LoadingLine />}>
+      <ProxiesPage />
+    </Suspense>
   )
 }

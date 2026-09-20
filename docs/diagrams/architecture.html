@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rota · Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --color-paper: #ffffff; --color-ink: #111111; --color-muted: #5c5c5c; --color-accent: #0b2555;
+      --font-sans: 'Geist', system-ui, sans-serif; --font-serif: 'Instrument Serif', serif; --font-mono: 'Geist Mono', ui-monospace, monospace; }
+    body { font-family: var(--font-sans); background: var(--color-paper); color: var(--color-ink); min-height: 100vh;
+      display: flex; align-items: center; justify-content: center; padding: 3rem 2rem; }
+    .frame { max-width: 1200px; width: 100%; }
+    .eyebrow { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted); margin-bottom: 0.5rem; }
+    h1 { font-family: var(--font-serif); font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem); font-weight: 400; letter-spacing: -0.02em; line-height: 1.15; color: var(--color-ink); margin-bottom: 1.5rem; }
+    svg { width: 100%; min-width: 760px; display: block; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Architecture · Rota</p>
+    <h1>Rota in production</h1>
+    <svg viewBox="0 0 1000 540" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-title architecture-desc">
+      <title id="architecture-title">Rota in production</title>
+      <desc id="architecture-desc">Architecture diagram: an admin browser reaches Caddy, which serves the dashboard and forwards API and WebSocket calls to the Go core; the core stores state in TimescaleDB, and the same core accepts client traffic on port 8000 and rotates it through the upstream proxy pool.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#5c5c5c"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0b2555"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2a78d6"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#ffffff"/>
+
+        <!-- Zone: docker compose -->
+        <rect x="216" y="72" width="696" height="256" rx="8" fill="rgba(17,17,17,0.02)" stroke="rgba(17,17,17,0.10)" stroke-width="0.8"/>
+        <rect x="232" y="76" width="112" height="12" rx="2" fill="#ffffff"/>
+        <text x="288" y="85" fill="rgba(17,17,17,0.40)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">DOCKER COMPOSE</text>
+
+        <!-- Arrows (behind nodes) -->
+        <line x1="168" y1="264" x2="240" y2="264" stroke="#2a78d6" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <path d="M 384,252 H 412 Q 420,252 420,244 V 152 Q 420,144 428,144 H 456" fill="none" stroke="#5c5c5c" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="384" y1="276" x2="456" y2="276" stroke="#5c5c5c" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="632" y1="268" x2="728" y2="268" stroke="#5c5c5c" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M 168,424 H 504 Q 512,424 512,416 V 304" fill="none" stroke="#5c5c5c" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M 568,304 V 416 Q 568,424 576,424 H 728" fill="none" stroke="#0b2555" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+
+        <!-- Arrow labels -->
+        <rect x="184" y="244" width="40" height="12" rx="2" fill="#ffffff"/>
+        <text x="204" y="253" fill="#2a78d6" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">HTTPS</text>
+        <rect x="364" y="190" width="48" height="12" rx="2" fill="#ffffff"/>
+        <text x="388" y="199" fill="#5c5c5c" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">PAGES</text>
+        <rect x="392" y="256" width="56" height="12" rx="2" fill="#ffffff"/>
+        <text x="420" y="265" fill="#5c5c5c" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">/API · /WS</text>
+        <rect x="664" y="248" width="32" height="12" rx="2" fill="#ffffff"/>
+        <text x="680" y="257" fill="#5c5c5c" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SQL</text>
+        <rect x="300" y="404" width="112" height="12" rx="2" fill="#ffffff"/>
+        <text x="356" y="413" fill="#5c5c5c" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">:8000 · USER:PASS</text>
+        <rect x="624" y="404" width="48" height="12" rx="2" fill="#ffffff"/>
+        <text x="648" y="413" fill="#0b2555" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ROTATE</text>
+
+        <!-- Nodes -->
+        <rect x="40" y="232" width="128" height="64" rx="6" fill="#ffffff"/>
+        <rect x="40" y="232" width="128" height="64" rx="6" fill="rgba(92,92,92,0.10)" stroke="#8a8a8a" stroke-width="1"/>
+        <rect x="48" y="240" width="26" height="12" rx="2" fill="transparent" stroke="rgba(17,17,17,0.22)" stroke-width="0.8"/>
+        <text x="61" y="249" fill="#8a8a8a" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+        <text x="104" y="268" fill="#111111" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Admin browser</text>
+        <text x="104" y="284" fill="#5c5c5c" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">dashboard · :80 / :443</text>
+        <rect x="240" y="232" width="144" height="64" rx="6" fill="#ffffff"/>
+        <rect x="240" y="232" width="144" height="64" rx="6" fill="rgba(17,17,17,0.03)" stroke="rgba(17,17,17,0.30)" stroke-width="1"/>
+        <rect x="248" y="240" width="32" height="12" rx="2" fill="transparent" stroke="rgba(17,17,17,0.22)" stroke-width="0.8"/>
+        <text x="264" y="249" fill="#8a8a8a" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EDGE</text>
+        <text x="312" y="268" fill="#111111" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Caddy</text>
+        <text x="312" y="284" fill="#5c5c5c" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">one origin · auto-HTTPS</text>
+        <rect x="456" y="112" width="176" height="64" rx="6" fill="#ffffff"/>
+        <rect x="456" y="112" width="176" height="64" rx="6" fill="#ffffff" stroke="#111111" stroke-width="1"/>
+        <rect x="464" y="120" width="20" height="12" rx="2" fill="transparent" stroke="rgba(17,17,17,0.40)" stroke-width="0.8"/>
+        <text x="474" y="129" fill="#111111" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">UI</text>
+        <text x="544" y="148" fill="#111111" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Dashboard</text>
+        <text x="544" y="164" fill="#5c5c5c" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Next.js · same-origin</text>
+        <rect x="456" y="232" width="176" height="72" rx="6" fill="#ffffff"/>
+        <rect x="456" y="232" width="176" height="72" rx="6" fill="rgba(11,37,85,0.08)" stroke="#0b2555" stroke-width="1"/>
+        <rect x="464" y="240" width="20" height="12" rx="2" fill="transparent" stroke="rgba(11,37,85,0.50)" stroke-width="0.8"/>
+        <text x="474" y="249" fill="#0b2555" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">GO</text>
+        <text x="544" y="272" fill="#111111" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Rota core</text>
+        <text x="544" y="288" fill="#5c5c5c" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">API :8001 · proxy :8000</text>
+        <rect x="728" y="232" width="160" height="72" rx="6" fill="#ffffff"/>
+        <rect x="728" y="232" width="160" height="72" rx="6" fill="rgba(17,17,17,0.05)" stroke="#5c5c5c" stroke-width="1"/>
+        <rect x="736" y="240" width="20" height="12" rx="2" fill="transparent" stroke="rgba(17,17,17,0.40)" stroke-width="0.8"/>
+        <text x="746" y="249" fill="#5c5c5c" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DB</text>
+        <text x="808" y="272" fill="#111111" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">TimescaleDB</text>
+        <text x="808" y="288" fill="#5c5c5c" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">proxies · pools · requests</text>
+        <rect x="40" y="392" width="128" height="64" rx="6" fill="#ffffff"/>
+        <rect x="40" y="392" width="128" height="64" rx="6" fill="rgba(92,92,92,0.10)" stroke="#8a8a8a" stroke-width="1"/>
+        <rect x="48" y="400" width="26" height="12" rx="2" fill="transparent" stroke="rgba(17,17,17,0.22)" stroke-width="0.8"/>
+        <text x="61" y="409" fill="#8a8a8a" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+        <text x="104" y="428" fill="#111111" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Your clients</text>
+        <text x="104" y="444" fill="#5c5c5c" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">curl · scrapers · bots</text>
+        <rect x="728" y="392" width="160" height="64" rx="6" fill="#ffffff"/>
+        <rect x="728" y="392" width="160" height="64" rx="6" fill="rgba(17,17,17,0.03)" stroke="rgba(17,17,17,0.30)" stroke-width="1"/>
+        <rect x="736" y="400" width="32" height="12" rx="2" fill="transparent" stroke="rgba(17,17,17,0.22)" stroke-width="0.8"/>
+        <text x="752" y="409" fill="#8a8a8a" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">POOL</text>
+        <text x="808" y="428" fill="#111111" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Upstream proxies</text>
+        <text x="808" y="444" fill="#5c5c5c" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">HTTP · SOCKS4 · SOCKS5</text>
+
+        <!-- Legend -->
+        <line x1="40" y1="468" x2="960" y2="468" stroke="rgba(17,17,17,0.12)" stroke-width="0.8"/>
+        <rect x="40" y="484" width="14" height="10" rx="2" fill="rgba(11,37,85,0.08)" stroke="#0b2555" stroke-width="1"/>
+        <text x="60" y="492" fill="#5c5c5c" font-size="8.5" font-family="'Geist', sans-serif">Rota (one Go process)</text>
+        <rect x="208" y="484" width="14" height="10" rx="2" fill="#ffffff" stroke="#111111" stroke-width="1"/>
+        <text x="228" y="492" fill="#5c5c5c" font-size="8.5" font-family="'Geist', sans-serif">Service</text>
+        <rect x="304" y="484" width="14" height="10" rx="2" fill="rgba(17,17,17,0.05)" stroke="#5c5c5c" stroke-width="1"/>
+        <text x="324" y="492" fill="#5c5c5c" font-size="8.5" font-family="'Geist', sans-serif">Store</text>
+        <rect x="392" y="484" width="14" height="10" rx="2" fill="rgba(17,17,17,0.03)" stroke="rgba(17,17,17,0.30)" stroke-width="1"/>
+        <text x="412" y="492" fill="#5c5c5c" font-size="8.5" font-family="'Geist', sans-serif">Edge / external</text>
+        <rect x="528" y="484" width="14" height="10" rx="2" fill="rgba(92,92,92,0.10)" stroke="#8a8a8a" stroke-width="1"/>
+        <text x="548" y="492" fill="#5c5c5c" font-size="8.5" font-family="'Geist', sans-serif">Users of the system</text>
+        <line x1="688" y1="489" x2="716" y2="489" stroke="#2a78d6" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <text x="724" y="492" fill="#5c5c5c" font-size="8.5" font-family="'Geist', sans-serif">HTTPS</text>
+        <line x1="780" y1="489" x2="808" y2="489" stroke="#0b2555" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <text x="816" y="492" fill="#5c5c5c" font-size="8.5" font-family="'Geist', sans-serif">Proxied traffic</text>
+      </svg>
+  </div>
+</body>
+</html>

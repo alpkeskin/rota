@@ -21,6 +21,10 @@ type Config struct {
 	// random password was generated. The server logs it once on first-boot seed.
 	AdminPassGenerated bool
 
+	// JWTSecret, when set, signs dashboard tokens instead of the key persisted
+	// in the database — for operators who want to control rotation themselves.
+	JWTSecret string
+
 	// CORSAllowedOrigins controls the Access-Control-Allow-Origin values.
 	// Defaults to ["*"]. Behind the bundled reverse proxy the dashboard is
 	// same-origin, so CORS is irrelevant; set this to lock down direct API access.
@@ -90,6 +94,7 @@ func Load() (*Config, error) {
 		AdminUser:          getEnv("ROTA_ADMIN_USER", "admin"),
 		AdminPass:          adminPass,
 		AdminPassGenerated: adminPassGenerated,
+		JWTSecret:          os.Getenv("JWT_SECRET"),
 		CORSAllowedOrigins: splitAndTrim(getEnv("CORS_ALLOWED_ORIGINS", "*")),
 
 		TrustProxyHeaders: getEnvAsBool("TRUST_PROXY_HEADERS", false),

@@ -6,107 +6,98 @@
 </div>
 
 <p align="center">
-<a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
-<a href="https://golang.org"><img src="https://img.shields.io/badge/Go-1.25.3-00ADD8?logo=go"></a>
-<a href="https://nextjs.org"><img src="https://img.shields.io/badge/Next.js-16-000000?logo=next.js"></a>
-<a href="https://www.timescale.com/"><img src="https://img.shields.io/badge/TimescaleDB-2.22-FDB515?logo=timescale"></a>
-<a href="https://github.com/alpkeskin/rota/releases"><img src="https://img.shields.io/github/release/alpkeskin/rota"></a>
-<a href="https://github.com/alpkeskin/rota/actions"><img src="https://img.shields.io/github/actions/workflow/status/alpkeskin/rota/release.yaml"></a>
+  <a href="https://github.com/alpkeskin/rota/releases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://www.shieldcn.dev/github/release/alpkeskin/rota.svg?size=sm&mode=dark"><img alt="Release" src="https://www.shieldcn.dev/github/release/alpkeskin/rota.svg?size=sm&mode=light"></picture></a>
+  <a href="https://github.com/alpkeskin/rota/actions"><picture><source media="(prefers-color-scheme: dark)" srcset="https://www.shieldcn.dev/github/ci/alpkeskin/rota.svg?variant=secondary&size=sm&mode=dark"><img alt="CI" src="https://www.shieldcn.dev/github/ci/alpkeskin/rota.svg?variant=secondary&size=sm&mode=light"></picture></a>
+  <a href="https://opensource.org/licenses/Apache-2.0"><picture><source media="(prefers-color-scheme: dark)" srcset="https://www.shieldcn.dev/github/license/alpkeskin/rota.svg?variant=ghost&size=sm&mode=dark"><img alt="License" src="https://www.shieldcn.dev/github/license/alpkeskin/rota.svg?variant=ghost&size=sm&mode=light"></picture></a>
+  <a href="https://github.com/alpkeskin/rota/stargazers"><picture><source media="(prefers-color-scheme: dark)" srcset="https://www.shieldcn.dev/github/stars/alpkeskin/rota.svg?variant=secondary&size=sm&mode=dark"><img alt="GitHub stars" src="https://www.shieldcn.dev/github/stars/alpkeskin/rota.svg?variant=secondary&size=sm&mode=light"></picture></a>
+  <a href="https://github.com/alpkeskin/rota/commits/main"><picture><source media="(prefers-color-scheme: dark)" srcset="https://www.shieldcn.dev/github/last-commit/alpkeskin/rota.svg?variant=secondary&size=sm&mode=dark"><img alt="Last commit" src="https://www.shieldcn.dev/github/last-commit/alpkeskin/rota.svg?variant=secondary&size=sm&mode=light"></picture></a>
+</p>
+<p align="center">
+  <a href="https://golang.org"><picture><source media="(prefers-color-scheme: dark)" srcset="https://www.shieldcn.dev/badge/Go-1.25-00ADD8.svg?logo=go&variant=branded&size=sm&mode=dark"><img alt="Go 1.25" src="https://www.shieldcn.dev/badge/Go-1.25-00ADD8.svg?logo=go&variant=branded&size=sm&mode=light"></picture></a>
+  <a href="https://nextjs.org"><picture><source media="(prefers-color-scheme: dark)" srcset="https://www.shieldcn.dev/badge/Next.js-16-000000.svg?logo=nextdotjs&variant=branded&size=sm&mode=dark"><img alt="Next.js 16" src="https://www.shieldcn.dev/badge/Next.js-16-000000.svg?logo=nextdotjs&variant=branded&size=sm&mode=light"></picture></a>
+  <a href="https://www.timescale.com/"><picture><source media="(prefers-color-scheme: dark)" srcset="https://www.shieldcn.dev/badge/TimescaleDB-2.22-FDB515.svg?logo=timescale&variant=branded&size=sm&mode=dark"><img alt="TimescaleDB 2.22" src="https://www.shieldcn.dev/badge/TimescaleDB-2.22-FDB515.svg?logo=timescale&variant=branded&size=sm&mode=light"></picture></a>
+  <a href="https://ghcr.io/alpkeskin/rota"><picture><source media="(prefers-color-scheme: dark)" srcset="https://www.shieldcn.dev/badge/Container-Docker-2496ED.svg?logo=docker&variant=branded&size=sm&mode=dark"><img alt="Docker" src="https://www.shieldcn.dev/badge/Container-Docker-2496ED.svg?logo=docker&variant=branded&size=sm&mode=light"></picture></a>
 </p>
 
 
-![Khipu Screenshot](static/dashboard.png)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="static/dashboard-light.png">
+  <img src="static/dashboard.png" alt="Rota dashboard — overview page">
+</picture>
 
 
 ## 🎯 Overview
 
-**Rota** is a modern, full-stack proxy rotation platform that combines enterprise-grade proxy management with a beautiful, real-time web dashboard. Built with performance and scalability in mind, Rota handles thousands of requests per second while providing comprehensive monitoring, analytics, and control through an intuitive interface.
-
-Whether you're conducting web scraping operations, performing security research, load testing, or need reliable proxy management at scale, Rota delivers a complete solution with:
-
-- **High-Performance Core**: Lightning-fast Go-based proxy server with intelligent rotation strategies
-- **Real-Time Dashboard**: Modern Next.js web interface with live metrics and monitoring
-- **Time-Series Analytics**: TimescaleDB-powered storage for historical analysis and insights
-- **Production-Ready**: Docker-based deployment with health checks, graceful shutdown, and monitoring
+**Rota** is a self-hosted proxy rotation platform: a Go proxy server that rotates thousands of upstream proxies with health checks, pools and per-user routing, plus a real-time dashboard on TimescaleDB. One `docker compose up` gives you the proxy on `:8000` and everything else behind a single origin.
 
 ---
 
-## ✨ Key Features
+## ✨ What it does
 
-### Core Proxy Server
-- 🚀 **High Performance**: Handle thousands of concurrent requests with minimal latency — pooled upstream transports (keep-alive reuse), zero-copy `splice(2)` tunneling on Linux, and batched request telemetry that coalesces per-request DB writes
-- 🔄 **Smart Rotation**: Multiple rotation strategies (random, round-robin, least connections, time-based)
-- 🤖 **Automatic Management**: Real-time proxy pool monitoring with automatic unhealthy proxy removal
-- 🌍 **Multi-Protocol**: Full support for HTTP, HTTPS, SOCKS4, SOCKS4A, and SOCKS5
-- ✅ **Health Checking**: Built-in proxy validation to maintain a healthy pool
-- 🔒 **Authentication**: Basic auth support for proxy server
-- ⚡ **Rate Limiting**: Configurable rate limiting to prevent abuse
-- 🔗 **Proxy Chaining**: Compatible with upstream proxies (Burp Suite, OWASP ZAP, etc.)
-- ⏱️ **Configurable Timeouts**: Fine-grained control over request timeouts and retries
-- 🔁 **Redirect Support**: Optional HTTP redirect following
+<table>
+<tr>
+<td width="50%" valign="top">
 
-### Proxy Sources & Auto-Import
-- 📥 **Remote TXT Lists**: Add URLs pointing to `ip:port` proxy lists — fetched automatically on schedule
-- 🕐 **Per-Source Interval**: Each source has its own refresh interval (in minutes)
-- 🔁 **Background Scheduler**: Overdue sources are fetched automatically every minute
-- 🌍 **Protocol per Source**: Assign HTTP, HTTPS, SOCKS4, SOCKS4a, or SOCKS5 to each list
+**🔄 Proxy engine**
+- Random, round-robin, least-connections or time-based rotation
+- HTTP, HTTPS, SOCKS4, SOCKS4A, SOCKS5 upstreams
+- Pooled keep-alive transports, `splice(2)` tunneling on Linux, batched telemetry
+- Health checks, unhealthy-proxy removal, dead-proxy cleanup
+- Timeouts, retries, redirects, rate limiting, upstream chaining (Burp, ZAP)
 
-### GeoIP & Geo Distribution
-- 🗺️ **Automatic GeoIP**: Proxies are geolocated via [ip-api.com](http://ip-api.com) (free, no API key required)
-- 🏙️ **City-Level Data**: Country, region, city, ISP, latitude, longitude per proxy
-- 🔍 **Geo Explorer**: Expandable country tree with city drill-down in the dashboard
-- ♻️ **Auto-Enrich**: Geo data updated automatically after every source fetch
+</td>
+<td width="50%" valign="top">
 
-### Proxy Pools
-- 🗂️ **Named Pools**: Group proxies by any combination of countries, cities, ISPs, or custom tags
-- ☑️ **Multi-Filter Builder**: Pick geo locations, ISP substrings, or proxy tags — mix freely in one pool
-- 🔄 **Auto / Manual Sync**: `sync_mode: auto` rebuilds membership on every import; `manual` keeps it frozen until you trigger sync explicitly
-- 🔁 **Rotation Strategies**: Per-pool `roundrobin`, `random`, or `sticky` (hold N requests per IP)
-- ⚡ **Async Health Checks**: Run health checks against any URL; progress shown in real time
-- ⏱️ **Scheduled Checks**: Cron-style schedule per pool (`*/30 * * * *`)
-- 📤 **Export**: Download pool proxy list as `.txt` or `.csv` (`GET /api/v1/pools/{id}/export?format=txt|csv`)
-- 🔔 **Webhook Alerts**: Per-pool alert rules — fire a POST/GET webhook when active proxy count drops below threshold, with configurable cooldown
+**📥 Sources & GeoIP**
+- Remote `ip:port` lists fetched on a per-source schedule
+- Per-source protocol and stale-proxy cleanup
+- Country / region / city / ISP via ip-api.com or a local MaxMind DB
+- Geo explorer: countries → cities, with proxy counts
 
-### Per-User Pool Authentication
-- 👤 **Proxy Users**: Create users with bcrypt passwords, each assigned a main pool + ordered fallbacks
-- 🔗 **Usage**: `http://user:pass@host:8000` — the proxy routes through the user's pool chain
-- 🔄 **Automatic Failover**: If a pool has no live IPs, requests cascade to fallback pools
-- 🔁 **Retry Logic**: Each retry picks a fresh proxy; failed IPs are excluded for that request
-- 📊 **Full Tracking**: All requests, success rates, and response times tracked per proxy
-- ⚡ **Per-User Rate Limit**: Optional `requests_per_minute` cap per user (0 = unlimited)
+</td>
+</tr>
+<tr>
+<td valign="top">
 
-### Security
-- 🔐 **JWT Authentication**: All API endpoints require a valid JWT token; the browser auto-redirects to login on expiry with "Session expired" message
-- 🔑 **Bcrypt Admin Credentials**: Dashboard password stored as bcrypt hash in database
-- 🔄 **Change Password**: Update username/password via the Settings UI (requires current password)
-- 🌐 **Public endpoints only**: `GET /health` and `POST /auth/login`
-- 🛡️ **Auth Brute-Force Protection**: Per-IP block after N failed attempts + global lockout when request rate exceeds threshold (all configurable via `.env`)
-- 🧱 **Spoof-Resistant Rate Limiting**: Client IP is only derived from forwarded headers when `TRUST_PROXY_HEADERS` is enabled, so per-IP limits can't be bypassed with a forged `X-Forwarded-For`
-- 🔌 **WebSocket Origin Validation**: Live dashboard/log streams reject cross-origin connections (CSWSH protection), honoring the configured CORS allowlist
-- 🏷️ **Proxy Tags**: Label proxies with custom tags for fine-grained pool filtering
-- 🧹 **Dead Proxy Cleanup**: Configurable automatic removal of long-failed or low-quality proxies
+**🗂️ Pools**
+- Group proxies by geo, ISP substring or custom tags — mixed freely
+- Per-pool rotation: round-robin, random or sticky (N requests per IP)
+- Auto or manual membership sync; cron health checks with live progress
+- TXT / CSV export and webhook alerts (Slack, Telegram topics, anything)
 
-### Web Dashboard
-- 📊 **Real-Time Metrics**: Live statistics, charts, and system monitoring
-- 🔄 **Proxy Management**: Add, edit, delete, and test proxies through the UI
-- 📝 **Live Logs**: WebSocket-based real-time log streaming
-- 💻 **System Monitoring**: CPU, memory, disk, and runtime metrics
-- ⚙️ **Configuration**: Manage settings through the web interface
-- 🎨 **Modern UI**: Beautiful, responsive design with dark mode support
-- 📱 **Mobile-Friendly**: Fully responsive across all devices
+</td>
+<td valign="top">
 
-### Data & Analytics
-- 📈 **Time-Series Storage**: TimescaleDB for efficient historical data storage
-- 🔍 **Request History**: Track all proxy requests with detailed metadata
-- 📉 **Performance Analytics**: Analyze proxy performance over time
-- 🎯 **Usage Insights**: Understand traffic patterns and proxy utilization
+**👤 Users & routing**
+- `http://user:pass@host:8000` — each user gets a main pool + ordered fallbacks
+- Automatic failover across the chain, fresh proxy on every retry
+- Per-user `requests_per_minute` cap and working-proxy export API
+- All requests, success rates and response times tracked per proxy
 
-### DevOps & Deployment
-- 🐳 **Docker-Native**: Production-ready containerized deployment
-- 🔧 **Easy Configuration**: All config via `.env` — see `.env.example` for all options
-- 🏥 **Health Checks**: Built-in health endpoints for monitoring
-- 🛑 **Graceful Shutdown**: Clean shutdown with connection draining
-- 📊 **Observability**: Structured JSON logging and metrics endpoints
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**🔐 Security**
+- JWT-protected API; signing key persisted so sessions survive restarts
+- Bcrypt admin credentials, changeable from the dashboard
+- Login brute-force protection (per-IP + global), spoof-safe behind a proxy
+- WebSocket origin validation
+
+</td>
+<td valign="top">
+
+**📊 Dashboard**
+- Live overview over WebSocket, response-time and outcome charts
+- Every filter, sort, page and tab is in the URL — a screen is a link
+- Proxies: tag, test, import `.txt`, export `txt` / `json` / `csv`, bulk edit
+- Live log stream, system metrics, settings editable without a restart
+- Dense hairline design, light / dark / system, works at 375px
+
+</td>
+</tr>
+</table>
 
 ---
 
@@ -138,7 +129,10 @@ server's IP.
 
 > First-boot credentials are seeded once. Leave `ROTA_ADMIN_PASSWORD` unset to
 > get a strong random password (shown in the logs), or set it in `.env` to pick
-> your own. Change it anytime via **Settings → Admin Account**.
+> your own. Change it anytime via **Settings → Admin account**.
+
+`make help` lists the shortcuts: `up`, `build`, `down`, `restart`, `logs`, `ps`,
+`password`, `dev-core`, `dev-dashboard`.
 
 ### Configuration
 
@@ -150,6 +144,7 @@ only to change something. The common knobs:
 | `SITE_ADDRESS` | `:80` | Web entry address. Set a domain for automatic HTTPS |
 | `ROTA_ADMIN_PASSWORD` | _(random)_ | Initial admin password; blank → generated & logged |
 | `ROTA_ADMIN_USER` | `admin` | Initial dashboard username (seeded once) |
+| `JWT_SECRET` | _(generated, stored in DB)_ | Dashboard session signing key. Leave unset; set only to manage rotation yourself (changing it logs everyone out) |
 | `PROXY_PORT` | `8000` | Host port for the proxy your clients connect to |
 | `HTTP_PORT` / `HTTPS_PORT` | `80` / `443` | Web entry ports (Caddy) |
 | `DB_PASSWORD` | `rota_password` | TimescaleDB password |
@@ -160,7 +155,7 @@ only to change something. The common knobs:
 See `.env.example` for the full list including auth brute-force protection.
 
 > **Note**: `ROTA_ADMIN_USER` / `ROTA_ADMIN_PASSWORD` are only used when the
-> database is empty (first start). Afterwards, use **Settings → Admin Account**.
+> database is empty (first start). Afterwards, use **Settings → Admin account**.
 
 ### Production Deployment (HTTPS)
 
@@ -183,7 +178,14 @@ API host, no dashboard rebuild when the domain changes.
 
 ### Using Docker
 
-Pull and run the core service:
+Both services are published to GitHub Container Registry on every release:
+
+| Image | What it is |
+|---|---|
+| `ghcr.io/alpkeskin/rota` | Core — proxy server (`:8000`) + REST API (`:8001`) |
+| `ghcr.io/alpkeskin/rota-dashboard` | Next.js dashboard (`:3000`), meant to sit behind a reverse proxy that forwards `/api`, `/ws` and `/docs` to the core (see `Caddyfile`) |
+
+Run the core on its own:
 
 ```bash
 # Pull from GitHub Container Registry
@@ -267,37 +269,12 @@ Rota is a monorepo. A single reverse proxy (Caddy) is the only web entry point,
 so the browser talks to one origin; the dashboard, API and WebSockets are all
 same-origin behind it. Only the proxy port is exposed separately.
 
-```
-                         Browser
-                            │  http(s)://localhost  (one origin)
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│                        Rota Platform                        │
-├─────────────────────────────────────────────────────────────┤
-│                    ┌──────────────┐                         │
-│                    │    Caddy     │  :80 / :443 (auto-HTTPS)│
-│                    │ reverse proxy│                         │
-│                    └──────┬───────┘                         │
-│           /  , /_next     │      /api/* , /ws/* , /docs     │
-│        ┌──────────────────┴───────────────┐                 │
-│        ▼                                   ▼                 │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐   │
-│  │   Dashboard  │    │  Core (API)  │───▶│ TimescaleDB  │   │
-│  │   Next.js    │    │     Go       │    │  PostgreSQL  │   │
-│  │  (internal)  │    │  (internal)  │    │  (internal)  │   │
-│  └──────────────┘    └──────┬───────┘    └──────────────┘   │
-│                             ▼                               │
-│                      ┌──────────────┐                       │
-│                      │ Proxy Server │  :8000 (exposed)      │
-│                      │      Go      │                       │
-│                      └──────┬───────┘                       │
-└─────────────────────────────┼───────────────────────────────┘
-                              ▼
-                     ┌──────────────────┐
-                     │   Proxy Pool     │
-                     │  (External IPs)  │
-                     └──────────────────┘
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="static/architecture-dark.png">
+  <img src="static/architecture.png" alt="Architecture: admin browser → Caddy → dashboard and Go core; core ↔ TimescaleDB; clients → core :8000 → upstream proxies">
+</picture>
+
+<sub>Diagram sources live in <code>docs/diagrams/</code> (self-contained HTML/SVG, generated with <a href="https://github.com/cathrynlavery/diagram-design">diagram-design</a>).</sub>
 
 ---
 
@@ -330,10 +307,10 @@ docker compose up -d --restart=unless-stopped
 
 ### How Proxy Sources work
 
-1. Go to **Proxy Sources** in the dashboard
+1. Go to **Sources** in the dashboard
 2. Add a URL pointing to a plain-text proxy list (one `ip:port` per line)
 3. Choose the protocol and refresh interval
-4. Click **Fetch Now** or wait for the scheduler
+4. Pick **Fetch now** from the row menu or wait for the scheduler
 
 The system will:
 - Download and parse the list
@@ -343,7 +320,7 @@ The system will:
 
 ### Geo Distribution & Pools
 
-After proxies are geolocated, open the **Proxy Pools → Geo Distribution** tab:
+After proxies are geolocated, open the **Pools → Geo distribution** tab:
 
 - Browse all proxy-holding countries; click a country to expand cities
 - Check individual countries or cities; mix them freely
@@ -433,7 +410,7 @@ Threshold: 9
 ### Per-User Routing
 
 1. Create pools for each location/use-case
-2. Go to **Proxy Users**, click **Add User**
+2. Go to **Users**, click **Add user**
 3. Set a main pool and optional fallback pools (in priority order)
 4. Configure max retries across the chain and an optional `requests_per_minute` cap
 
@@ -442,7 +419,26 @@ Users connect as:
 http://username:password@your-proxy-host:8000
 ```
 
-If the main pool has no live IPs the request automatically cascades to the next fallback pool.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="static/routing-dark.png">
+  <img src="static/routing.png" alt="Flowchart: request on :8000 → with credentials use the user's main pool, fall back to the next pool when none is alive, forward via a proxy, retry with a fresh proxy until it answers; without credentials use global rotation" width="640">
+</picture>
+
+If the main pool has no live IPs the request automatically cascades to the next fallback pool; each retry picks a fresh proxy and skips the ones that already failed.
+
+#### Exporting a user's working proxies
+
+Turn on **Export API** for the user, then fetch the alive proxies of their main pool (or any pool) with the user's own credentials — handy for tools that want a raw list instead of routing through Rota:
+
+```bash
+# One proxy per line; default = the user's main pool, raw address[:user:pass]
+curl "http://localhost/api/v1/proxy-users/export-working-proxies?username=myuser&password=mypassword"
+
+# A specific pool, capped, as protocol://[user:pass@]address
+curl "http://localhost/api/v1/proxy-users/export-working-proxies?username=myuser&password=mypassword&pool=US%20Residential&count=50&format=url"
+```
+
+The dashboard builds this link for you from the row menu (**Users → ⌄ → Export link**). The password travels in the query string, so keep such links private.
 
 ---
 

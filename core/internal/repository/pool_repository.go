@@ -661,6 +661,76 @@ func (r *PoolRepository) GetTagFilters(ctx context.Context, poolID int) ([]strin
 	return tags, nil
 }
 
+// LoadFilters fills GeoFilters/ISPFilters/TagFilters on every pool in one
+// pass (three queries total, not three per pool). Pools with no filters keep
+// nil slices so the JSON omits them.
+func (r *PoolRepository) LoadFilters(ctx context.Context, pools []*models.ProxyPool) error {
+	if len(pools) == 0 {
+		return nil
+	}
+	byID := make(map[int]*models.ProxyPool, len(pools))
+	ids := make([]int, 0, len(pools))
+	for _, p := range pools {
+		p.GeoFilters, p.ISPFilters, p.TagFilters = nil, nil, nil
+		byID[p.ID] = p
+		ids = append(ids, p.ID)
+	}
+
+	rows, err := r.db.Pool.Query(ctx,
+		`SELECT pool_id, country_code, COALESCE(city_name,'') FROM pool_geo_filters WHERE pool_id = ANY($1) ORDER BY pool_id, country_code, city_name`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int
+		var f models.GeoFilter
+		if err := rows.Scan(&id, &f.CountryCode, &f.CityName); err != nil {
+			rows.Close()
+			return err
+		}
+		if p := byID[id]; p != nil {
+			p.GeoFilters = append(p.GeoFilters, f)
+		}
+	}
+	rows.Close()
+
+	rows, err = r.db.Pool.Query(ctx,
+		`SELECT pool_id, isp FROM pool_isp_filters WHERE pool_id = ANY($1) ORDER BY pool_id, isp`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int
+		var isp string
+		if err := rows.Scan(&id, &isp); err != nil {
+			rows.Close()
+			return err
+		}
+		if p := byID[id]; p != nil {
+			p.ISPFilters = append(p.ISPFilters, isp)
+		}
+	}
+	rows.Close()
+
+	rows, err = r.db.Pool.Query(ctx,
+		`SELECT pool_id, tag FROM pool_tag_filters WHERE pool_id = ANY($1) ORDER BY pool_id, tag`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		var tag string
+		if err := rows.Scan(&id, &tag); err != nil {
+			return err
+		}
+		if p := byID[id]; p != nil {
+			p.TagFilters = append(p.TagFilters, tag)
+		}
+	}
+	return rows.Err()
+}
+
 // SetTagFilters replaces all tag filters for a pool atomically.
 // The delete + inserts run in one transaction so a mid-loop failure never
 // leaves the pool with partial/empty filters.

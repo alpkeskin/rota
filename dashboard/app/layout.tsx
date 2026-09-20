@@ -1,18 +1,22 @@
 import type { Metadata } from "next";
-import { Fira_Code } from "next/font/google";
+import { Manrope, Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import "./globals.css";
 
-const firaCode = Fira_Code({
+const manrope = Manrope({
   subsets: ["latin"],
-  variable: "--font-fira-code",
-  weight: ["300", "400", "500", "600", "700"],
+  variable: "--font-manrope",
+});
+
+const geistMono = Geist_Mono({
+  subsets: ["latin"],
+  variable: "--font-geist-mono",
 });
 
 export const metadata: Metadata = {
-  title: "Rota - Proxy Rotation Dashboard",
-  description: "Intelligent proxy rotation and management system",
+  title: "Rota",
+  description: "Proxy rotation platform",
 };
 
 export default function RootLayout({
@@ -22,15 +26,15 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${firaCode.variable} font-mono antialiased`}>
+      <body className={`${manrope.variable} ${geistMono.variable} font-sans antialiased`}>
         <ThemeProvider
           attribute="class"
-          defaultTheme="dark"
+          defaultTheme="system"
           enableSystem
           disableTransitionOnChange
         >
           {children}
-          <Toaster />
+          <Toaster position="bottom-right" />
         </ThemeProvider>
       </body>
     </html>

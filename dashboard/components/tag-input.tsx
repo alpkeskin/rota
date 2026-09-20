@@ -1,9 +1,9 @@
 "use client"
 
 import * as React from "react"
-import { Badge } from "@/components/ui/badge"
+import { X } from "lucide-react"
 import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 
 interface TagInputProps {
   value: string[]
@@ -14,6 +14,9 @@ interface TagInputProps {
   disabled?: boolean
   id?: string
 }
+
+const chip =
+  "border-border inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[0.6875rem] leading-4 font-medium"
 
 // Chips-style tag editor: Enter/comma adds, × or Backspace on empty removes.
 export function TagInput({
@@ -32,7 +35,7 @@ export function TagInput({
     onChange([...value, tag])
   }
 
-  const removeTag = (tag: string) => onChange(value.filter(t => t !== tag))
+  const removeTag = (tag: string) => onChange(value.filter((t) => t !== tag))
 
   const commitDraft = () => {
     if (draft.trim()) {
@@ -41,36 +44,35 @@ export function TagInput({
     }
   }
 
-  const available = suggestions.filter(s => !value.includes(s))
+  const available = suggestions.filter((s) => !value.includes(s))
 
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="flex flex-wrap gap-1.5 min-h-[28px]">
-        {value.length === 0 && (
-          <span className="text-xs text-muted-foreground italic">No tags</span>
-        )}
-        {value.map(tag => (
-          <Badge key={tag} variant="secondary" className="gap-1 pr-1">
-            <span className="text-xs">{tag}</span>
-            <button
-              type="button"
-              className="ml-0.5 rounded hover:bg-muted-foreground/20 px-1 text-xs leading-none"
-              onClick={() => removeTag(tag)}
-              disabled={disabled}
-              title="Remove"
-            >
-              ×
-            </button>
-          </Badge>
-        ))}
-      </div>
+      {value.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {value.map((tag) => (
+            <span key={tag} className={cn(chip, "pr-0.5")}>
+              {tag}
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground rounded-sm p-0.5 focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none"
+                onClick={() => removeTag(tag)}
+                disabled={disabled}
+                aria-label={`Remove ${tag}`}
+              >
+                <X className="size-3" aria-hidden />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <Input
         id={id}
         value={draft}
         placeholder={placeholder}
         disabled={disabled}
-        onChange={e => setDraft(e.target.value)}
-        onKeyDown={e => {
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === ",") {
             e.preventDefault()
             commitDraft()
@@ -82,18 +84,16 @@ export function TagInput({
       />
       {available.length > 0 && (
         <div className="flex flex-wrap gap-1">
-          {available.slice(0, 12).map(s => (
-            <Button
+          {available.slice(0, 12).map((s) => (
+            <button
               key={s}
               type="button"
-              size="sm"
-              variant="outline"
               disabled={disabled}
-              className="h-6 px-2 text-xs"
+              className={cn(chip, "text-muted-foreground hover:bg-accent hover:text-foreground transition-colors focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none")}
               onClick={() => addTag(s)}
             >
               {s}
-            </Button>
+            </button>
           ))}
         </div>
       )}

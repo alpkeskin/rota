@@ -89,10 +89,20 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 		log.Warn("======================================================")
 	}
 
-	// Generate random JWT secret on startup
-	// This ensures all previous tokens become invalid on restart
-	jwtSecret := generateJWTSecret()
-	log.Info("generated new JWT secret for this session", "length", len(jwtSecret))
+	// The JWT signing key is persisted in the database so a restart (deploy,
+	// crash, `docker restart`) does not log every dashboard session out.
+	// JWT_SECRET overrides it for operators who manage the key themselves.
+	jwtSecret := cfg.JWTSecret
+	if jwtSecret == "" {
+		secret, created, err := repository.NewSecretRepository(db).EnsureJWTSecret(context.Background())
+		if err != nil {
+			log.Warn("failed to load persisted JWT secret; sessions will not survive this restart", "error", err)
+			secret = generateJWTSecret()
+		} else if created {
+			log.Info("generated and stored a new JWT secret")
+		}
+		jwtSecret = secret
+	}
 
 	// Create usage tracker for health checks
 	tracker := proxy.NewUsageTracker(proxyRepo)
