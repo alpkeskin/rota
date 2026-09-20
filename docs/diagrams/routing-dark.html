@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rota · Request routing</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --color-paper: #0d1117; --color-ink: #f0f0f0; --color-muted: #b3b3b3; --color-accent: #c7dff7;
+      --font-sans: 'Geist', system-ui, sans-serif; --font-serif: 'Instrument Serif', serif; --font-mono: 'Geist Mono', ui-monospace, monospace; }
+    body { font-family: var(--font-sans); background: var(--color-paper); color: var(--color-ink); min-height: 100vh;
+      display: flex; align-items: center; justify-content: center; padding: 3rem 2rem; }
+    .frame { max-width: 1200px; width: 100%; }
+    .eyebrow { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted); margin-bottom: 0.5rem; }
+    h1 { font-family: var(--font-serif); font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem); font-weight: 400; letter-spacing: -0.02em; line-height: 1.15; color: var(--color-ink); margin-bottom: 1.5rem; }
+    svg { width: 100%; min-width: 760px; display: block; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Flowchart · Rota</p>
+    <h1>How a request is routed</h1>
+    <svg viewBox="0 0 800 780" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="routing-dark-title routing-dark-desc">
+      <title id="routing-dark-title">How a request is routed</title>
+      <desc id="routing-dark-desc">Flowchart: a request on port 8000 without proxy credentials uses global rotation; with credentials it goes to the user's main pool, falls back to the next pool when no proxy is alive, is forwarded through a pool proxy, and is retried with a fresh proxy until it succeeds or max retries is reached.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#b3b3b3"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c7dff7"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3987e5"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#0d1117"/>
+
+        <!-- Arrows (behind nodes) -->
+        <line x1="300" y1="88" x2="300" y2="120" stroke="#b3b3b3" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="400" y1="168" x2="480" y2="168" stroke="#b3b3b3" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="300" y1="216" x2="300" y2="248" stroke="#b3b3b3" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="300" y1="296" x2="300" y2="328" stroke="#b3b3b3" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="400" y1="376" x2="480" y2="376" stroke="#b3b3b3" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- fallback loops back into the selected pool -->
+        <path d="M 560,352 V 280 Q 560,272 552,272 H 380" fill="none" stroke="#b3b3b3" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+        <line x1="300" y1="424" x2="300" y2="456" stroke="#b3b3b3" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- global rotation joins the forward step from the right -->
+        <path d="M 640,168 H 712 Q 720,168 720,176 V 464 Q 720,472 712,472 H 380" fill="none" stroke="#b3b3b3" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="300" y1="504" x2="300" y2="536" stroke="#b3b3b3" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="400" y1="584" x2="480" y2="584" stroke="#b3b3b3" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- retry loops back into forward -->
+        <path d="M 560,560 V 496 Q 560,488 552,488 H 380" fill="none" stroke="#b3b3b3" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+        <line x1="300" y1="632" x2="300" y2="664" stroke="#c7dff7" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+
+        <!-- Arrow labels -->
+        <rect x="420" y="148" width="40" height="12" rx="2" fill="#0d1117"/>
+        <text x="440" y="157" fill="#b3b3b3" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">NONE</text>
+        <rect x="284" y="224" width="32" height="12" rx="2" fill="#0d1117"/>
+        <text x="300" y="233" fill="#b3b3b3" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">USER</text>
+        <rect x="424" y="356" width="32" height="12" rx="2" fill="#0d1117"/>
+        <text x="440" y="365" fill="#b3b3b3" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">NO</text>
+        <rect x="284" y="432" width="32" height="12" rx="2" fill="#0d1117"/>
+        <text x="300" y="441" fill="#b3b3b3" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">YES</text>
+        <rect x="572" y="306" width="64" height="12" rx="2" fill="#0d1117"/>
+        <text x="604" y="315" fill="#b3b3b3" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">RECHECK</text>
+        <rect x="656" y="148" width="56" height="12" rx="2" fill="#0d1117"/>
+        <text x="684" y="157" fill="#b3b3b3" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ANY PROXY</text>
+        <rect x="424" y="564" width="32" height="12" rx="2" fill="#0d1117"/>
+        <text x="440" y="573" fill="#b3b3b3" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">NO</text>
+        <rect x="284" y="640" width="32" height="12" rx="2" fill="#0d1117"/>
+        <text x="300" y="649" fill="#c7dff7" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">YES</text>
+        <rect x="572" y="518" width="96" height="12" rx="2" fill="#0d1117"/>
+        <text x="620" y="527" fill="#b3b3b3" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">≤ MAX RETRIES</text>
+
+        <!-- Nodes -->
+        <rect x="220" y="40" width="160" height="48" rx="24" fill="#0d1117"/>
+        <rect x="220" y="40" width="160" height="48" rx="24" fill="rgba(240,240,240,0.03)" stroke="rgba(240,240,240,0.30)" stroke-width="1"/>
+        <text x="300" y="68" fill="#f0f0f0" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Request on :8000</text>
+        <polygon points="300,120 400,168 300,216 200,168" fill="#0d1117"/>
+        <polygon points="300,120 400,168 300,216 200,168" fill="#1c2129" stroke="#f0f0f0" stroke-width="1"/>
+        <text x="300" y="166" fill="#f0f0f0" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Proxy-Authorization</text>
+        <text x="300" y="180" fill="#f0f0f0" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">header?</text>
+        <rect x="480" y="144" width="160" height="48" rx="6" fill="#0d1117"/>
+        <rect x="480" y="144" width="160" height="48" rx="6" fill="#1c2129" stroke="#f0f0f0" stroke-width="1"/>
+        <text x="560" y="168" fill="#f0f0f0" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Global rotation</text>
+        <text x="560" y="182" fill="#b3b3b3" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">every active proxy</text>
+        <rect x="220" y="248" width="160" height="48" rx="6" fill="#0d1117"/>
+        <rect x="220" y="248" width="160" height="48" rx="6" fill="#1c2129" stroke="#f0f0f0" stroke-width="1"/>
+        <text x="300" y="272" fill="#f0f0f0" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Selected pool</text>
+        <text x="300" y="286" fill="#b3b3b3" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">main pool first</text>
+        <polygon points="300,328 400,376 300,424 200,376" fill="#0d1117"/>
+        <polygon points="300,328 400,376 300,424 200,376" fill="#1c2129" stroke="#f0f0f0" stroke-width="1"/>
+        <text x="300" y="374" fill="#f0f0f0" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Alive proxy</text>
+        <text x="300" y="388" fill="#f0f0f0" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">in this pool?</text>
+        <rect x="480" y="352" width="160" height="48" rx="6" fill="#0d1117"/>
+        <rect x="480" y="352" width="160" height="48" rx="6" fill="#1c2129" stroke="#f0f0f0" stroke-width="1"/>
+        <text x="560" y="376" fill="#f0f0f0" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Next fallback pool</text>
+        <text x="560" y="390" fill="#b3b3b3" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">in priority order</text>
+        <rect x="220" y="456" width="160" height="48" rx="6" fill="#0d1117"/>
+        <rect x="220" y="456" width="160" height="48" rx="6" fill="#1c2129" stroke="#f0f0f0" stroke-width="1"/>
+        <text x="300" y="480" fill="#f0f0f0" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Forward via a proxy</text>
+        <text x="300" y="494" fill="#b3b3b3" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">by the pool's rotation rule</text>
+        <polygon points="300,536 400,584 300,632 200,584" fill="#0d1117"/>
+        <polygon points="300,536 400,584 300,632 200,584" fill="#1c2129" stroke="#f0f0f0" stroke-width="1"/>
+        <text x="300" y="582" fill="#f0f0f0" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Upstream</text>
+        <text x="300" y="596" fill="#f0f0f0" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">answered?</text>
+        <rect x="480" y="560" width="160" height="48" rx="6" fill="#0d1117"/>
+        <rect x="480" y="560" width="160" height="48" rx="6" fill="#1c2129" stroke="#f0f0f0" stroke-width="1"/>
+        <text x="560" y="584" fill="#f0f0f0" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Fresh proxy</text>
+        <text x="560" y="598" fill="#b3b3b3" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">failed one is skipped</text>
+        <rect x="220" y="664" width="160" height="48" rx="24" fill="#0d1117"/>
+        <rect x="220" y="664" width="160" height="48" rx="24" fill="rgba(199,223,247,0.10)" stroke="#c7dff7" stroke-width="1"/>
+        <text x="300" y="692" fill="#f0f0f0" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Response to client</text>
+
+        <!-- Legend -->
+        <line x1="40" y1="724" x2="760" y2="724" stroke="rgba(240,240,240,0.12)" stroke-width="0.8"/>
+        <rect x="40" y="740" width="24" height="12" rx="6" fill="rgba(240,240,240,0.03)" stroke="rgba(240,240,240,0.30)" stroke-width="1"/>
+        <text x="72" y="750" fill="#b3b3b3" font-size="8.5" font-family="'Geist', sans-serif">Start / end</text>
+        <rect x="168" y="740" width="24" height="12" rx="2" fill="#1c2129" stroke="#f0f0f0" stroke-width="1"/>
+        <text x="200" y="750" fill="#b3b3b3" font-size="8.5" font-family="'Geist', sans-serif">Step</text>
+        <polygon points="268,740 280,746 268,752 256,746" fill="#1c2129" stroke="#f0f0f0" stroke-width="1"/>
+        <text x="288" y="750" fill="#b3b3b3" font-size="8.5" font-family="'Geist', sans-serif">Decision</text>
+        <line x1="360" y1="746" x2="388" y2="746" stroke="#b3b3b3" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+        <text x="396" y="750" fill="#b3b3b3" font-size="8.5" font-family="'Geist', sans-serif">Loop</text>
+        <line x1="456" y1="746" x2="484" y2="746" stroke="#c7dff7" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <text x="492" y="750" fill="#b3b3b3" font-size="8.5" font-family="'Geist', sans-serif">Happy path</text>
+      </svg>
+  </div>
+</body>
+</html>
