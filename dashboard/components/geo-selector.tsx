@@ -1,31 +1,27 @@
 "use client"
 
 import { useState, useCallback } from "react"
-import {
-  ChevronRight, ChevronDown, Plus, Loader2, Layers,
-  Globe, MapPin, CheckSquare,
-} from "lucide-react"
+import { ChevronRight, ChevronDown, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/lib/api"
 import { GeoSummaryItem, GeoCityItem, GeoFilter, ProxyPool, CreatePoolRequest } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Badge } from "@/components/ui/badge"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
-} from "@/components/ui/dialog"
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
-
-// ─────────────────────────────────────────────────────────────────────────────
+import { SearchInput } from "@/components/controls"
+import { StatStrip } from "@/components/stat-strip"
+import { Tag } from "@/components/status"
+import { UsageBar } from "@/components/usage-bar"
+import { EmptyLine, Section } from "@/components/page-header"
+import { count } from "@/lib/format"
+import { cn } from "@/lib/utils"
 
 interface SelectedFilter {
-  key: string          // "CC" or "CC::city"
+  key: string // "CC" or "CC::city"
   label: string
   filter: GeoFilter
 }
@@ -36,18 +32,13 @@ interface Props {
   onCreated: () => void
 }
 
-const FLAG = (cc: string) =>
-  `https://flagcdn.com/20x15/${cc.toLowerCase()}.png`
-
-// ─────────────────────────────────────────────────────────────────────────────
+const FLAG = (cc: string) => `https://flagcdn.com/16x12/${cc.toLowerCase()}.png`
 
 export function GeoSelector({ countries, existingPools, onCreated }: Props) {
   const [search, setSearch] = useState("")
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [cities, setCities] = useState<Record<string, GeoCityItem[]>>({})
   const [loadingCities, setLoadingCities] = useState<Set<string>>(new Set())
-
-  // Multi-select
   const [selected, setSelected] = useState<Map<string, SelectedFilter>>(new Map())
 
   // Create pool dialog
@@ -60,15 +51,11 @@ export function GeoSelector({ countries, existingPools, onCreated }: Props) {
   const [autoSync, setAutoSync] = useState(true)
   const [saving, setSaving] = useState(false)
 
-  // ── helpers ────────────────────────────────────────────────────────────────
-
-  const countryKey = (cc: string) => cc
   const cityKey = (cc: string, city: string) => `${cc}::${city}`
-
   const isSelected = (key: string) => selected.has(key)
 
   const toggle = (key: string, label: string, filter: GeoFilter) => {
-    setSelected(prev => {
+    setSelected((prev) => {
       const next = new Map(prev)
       if (next.has(key)) next.delete(key)
       else next.set(key, { key, label, filter })
@@ -76,65 +63,70 @@ export function GeoSelector({ countries, existingPools, onCreated }: Props) {
     })
   }
 
+  const filtered = countries.filter(
+    (g) => !search || g.country_name.toLowerCase().includes(search.toLowerCase()) || g.country_code.toLowerCase().includes(search.toLowerCase())
+  )
+
   const selectAll = () => {
     const next = new Map<string, SelectedFilter>()
-    filtered.forEach(g => {
-      const key = countryKey(g.country_code)
-      next.set(key, {
-        key,
-        label: `${g.country_name} (${g.country_code})`,
-        filter: { country_code: g.country_code },
-      })
+    filtered.forEach((g) => {
+      next.set(g.country_code, { key: g.country_code, label: `${g.country_name} (${g.country_code})`, filter: { country_code: g.country_code } })
     })
     setSelected(next)
   }
 
-  const clearAll = () => setSelected(new Map())
+  const toggleExpand = useCallback(
+    async (cc: string) => {
+      if (expanded.has(cc)) {
+        setExpanded((prev) => {
+          const s = new Set(prev)
+          s.delete(cc)
+          return s
+        })
+        return
+      }
+      setExpanded((prev) => new Set(prev).add(cc))
+      if (!cities[cc]) {
+        setLoadingCities((prev) => new Set(prev).add(cc))
+        try {
+          const res = await api.getGeoCities(cc)
+          setCities((prev) => ({ ...prev, [cc]: res.cities }))
+        } catch {
+          toast.error(`Failed to load cities for ${cc}`)
+        } finally {
+          setLoadingCities((prev) => {
+            const s = new Set(prev)
+            s.delete(cc)
+            return s
+          })
+        }
+      }
+    },
+    [expanded, cities]
+  )
 
-  // ── expand / load cities ──────────────────────────────────────────────────
-
-  const toggleExpand = useCallback(async (cc: string) => {
-    if (expanded.has(cc)) {
-      setExpanded(prev => { const s = new Set(prev); s.delete(cc); return s })
+  const openCreateFrom = (entries: SelectedFilter[]) => {
+    if (entries.length === 0) {
+      toast.error("Select at least one location")
       return
     }
-    setExpanded(prev => new Set(prev).add(cc))
-    if (!cities[cc]) {
-      setLoadingCities(prev => new Set(prev).add(cc))
-      try {
-        const res = await api.getGeoCities(cc)
-        setCities(prev => ({ ...prev, [cc]: res.cities }))
-      } catch {
-        toast.error(`Failed to load cities for ${cc}`)
-      } finally {
-        setLoadingCities(prev => { const s = new Set(prev); s.delete(cc); return s })
-      }
-    }
-  }, [expanded, cities])
-
-  // ── create pool ───────────────────────────────────────────────────────────
-
-  const openCreate = () => {
-    if (selected.size === 0) { toast.error("Select at least one location"); return }
-    // Auto-generate name from selection
-    const sel = Array.from(selected.values())
-    if (sel.length === 1) {
-      setPoolName(sel[0].label)
-    } else {
-      const countries = [...new Set(sel.map(s => s.filter.country_code))].join(", ")
-      setPoolName(`Mixed: ${countries}`)
-    }
+    setSelected(new Map(entries.map((e) => [e.key, e])))
+    if (entries.length === 1) setPoolName(entries[0].label)
+    else setPoolName(`Mixed: ${[...new Set(entries.map((s) => s.filter.country_code))].join(", ")}`)
     setCreateOpen(true)
   }
 
-  const handleCreate = async () => {
-    if (!poolName.trim()) { toast.error("Pool name required"); return }
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!poolName.trim()) {
+      toast.error("Pool name required")
+      return
+    }
     setSaving(true)
     try {
-      const filters: GeoFilter[] = Array.from(selected.values()).map(s => s.filter)
       await api.createPool({
         name: poolName,
-        geo_filters: filters,
+        geo_filters: Array.from(selected.values()).map((s) => s.filter),
         rotation_method: rotation as CreatePoolRequest["rotation_method"],
         stick_count: stickCount,
         health_check_url: hcUrl,
@@ -143,335 +135,237 @@ export function GeoSelector({ countries, existingPools, onCreated }: Props) {
         auto_sync: autoSync,
         enabled: true,
       })
-      toast.success(`Pool "${poolName}" created and synced`)
+      toast.success(`Pool “${poolName}” created and synced`)
       setCreateOpen(false)
       setSelected(new Map())
       onCreated()
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to create pool")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create pool")
     } finally {
       setSaving(false)
     }
   }
 
-  // ── filter ────────────────────────────────────────────────────────────────
-
-  const filtered = countries.filter(g =>
-    !search ||
-    g.country_name.toLowerCase().includes(search.toLowerCase()) ||
-    g.country_code.toLowerCase().includes(search.toLowerCase())
-  )
-
   const totalProxies = countries.reduce((s, g) => s + g.total, 0)
-  const totalActive  = countries.reduce((s, g) => s + g.active, 0)
-
-  const hasCountryPool = (cc: string) =>
-    existingPools.some(p => p.country_code === cc && !p.city_name)
-
-  // ─────────────────────────────────────────────────────────────────────────
+  const totalActive = countries.reduce((s, g) => s + g.active, 0)
+  const hasCountryPool = (cc: string) => existingPools.some((p) => p.country_code === cc && !p.city_name)
 
   if (countries.length === 0) {
-    return (
-      <Card>
-        <CardContent className="flex flex-col items-center justify-center py-16 gap-3">
-          <Globe className="h-10 w-10 text-muted-foreground" />
-          <p className="text-muted-foreground">No geo data yet.</p>
-          <p className="text-xs text-muted-foreground">
-            Import proxies via Sources, then click &quot;Enrich GeoIP&quot;.
-          </p>
-        </CardContent>
-      </Card>
-    )
+    return <EmptyLine>No geo data yet — import proxies, then run “Resolve GeoIP” on the Sources page.</EmptyLine>
   }
 
-  return (
-    <div className="flex flex-col gap-3">
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-3">
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Countries</CardTitle></CardHeader>
-          <CardContent><div className="text-2xl font-bold">{countries.length}</div></CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Total Proxies</CardTitle></CardHeader>
-          <CardContent><div className="text-2xl font-bold">{totalProxies.toLocaleString()}</div></CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Active</CardTitle></CardHeader>
-          <CardContent><div className="text-2xl font-bold text-green-500">{totalActive.toLocaleString()}</div></CardContent>
-        </Card>
-      </div>
+  const row = "grid grid-cols-[auto_1fr_auto] items-center gap-3 px-4 py-2 md:px-6"
+  const numbers = "num flex items-center gap-4 text-right"
 
-      {/* Toolbar */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <div className="relative flex-1 min-w-48">
-          <Globe className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search country…"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            className="pl-9"
-          />
-        </div>
+  return (
+    <>
+      <StatStrip
+        columns={3}
+        stats={[
+          { label: "Countries", value: count(countries.length), hint: "with at least one proxy" },
+          { label: "Proxies with geo", value: count(totalProxies) },
+          { label: "Active", value: count(totalActive), hint: totalProxies ? `${Math.round((totalActive / totalProxies) * 100)}% of located proxies` : undefined },
+        ]}
+      />
+
+      <div className="border-border flex flex-wrap items-center gap-2 border-b px-4 py-3 md:px-6">
+        <SearchInput value={search} onChange={setSearch} placeholder="Search country" delay={100} aria-label="Search countries" />
         {selected.size > 0 ? (
           <>
-            <Badge variant="secondary" className="shrink-0">
-              {selected.size} selected
-            </Badge>
-            <Button size="sm" onClick={openCreate}>
-              <Plus className="h-4 w-4 mr-1" />
-              Create Pool from selection
+            <span className="num text-muted-foreground ml-2">{selected.size} selected</span>
+            <Button size="sm" onClick={() => openCreateFrom(Array.from(selected.values()))}>
+              Create pool from selection
             </Button>
-            <Button size="sm" variant="ghost" onClick={clearAll}>Clear</Button>
+            <Button size="sm" variant="ghost" onClick={() => setSelected(new Map())}>
+              Clear
+            </Button>
           </>
         ) : (
           <Button size="sm" variant="outline" onClick={selectAll}>
-            <CheckSquare className="h-4 w-4 mr-1" />
-            Select all
+            Select all shown
           </Button>
         )}
       </div>
 
-      {/* Selected summary chips */}
-      {selected.size > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {Array.from(selected.values()).map(s => (
-            <Badge
-              key={s.key}
-              variant="outline"
-              className="cursor-pointer hover:bg-destructive/10"
-              onClick={() => toggle(s.key, s.label, s.filter)}
-            >
-              {s.label} ×
-            </Badge>
-          ))}
-        </div>
-      )}
+      <div className="border-border text-muted-foreground grid grid-cols-[auto_1fr_auto] items-center gap-3 border-b px-4 py-2 md:px-6">
+        <span className="w-4" />
+        <span className="label">Location</span>
+        <span className={cn(numbers, "label")}>
+          <span className="hidden w-24 sm:inline">Usable</span>
+          <span className="w-14">Proxies</span>
+          <span className="w-12">Active</span>
+          <span className="w-16" />
+        </span>
+      </div>
 
-      {/* Country list */}
-      <Card>
-        <CardContent className="p-0 divide-y">
-          {filtered.map(g => {
-            const cc = g.country_code
-            const ck = countryKey(cc)
-            const isExp = expanded.has(cc)
-            const citiesLoading = loadingCities.has(cc)
-            const citiesList = cities[cc] || []
-            const pct = g.total > 0 ? Math.round((g.active / g.total) * 100) : 0
-            const poolExists = hasCountryPool(cc)
+      <ol>
+        {filtered.map((g) => {
+          const cc = g.country_code
+          const isExp = expanded.has(cc)
+          const citiesLoading = loadingCities.has(cc)
+          const citiesList = cities[cc] || []
+          const pct = g.total > 0 ? Math.round((g.active / g.total) * 100) : 0
+          const poolExists = hasCountryPool(cc)
+          const label = `${g.country_name} (${cc})`
 
-            return (
-              <div key={cc}>
-                {/* Country row */}
-                <div className={`flex items-center gap-2 px-4 py-2.5 hover:bg-muted/40 transition-colors ${isSelected(ck) ? "bg-primary/5" : ""}`}>
-                  {/* Checkbox */}
-                  <Checkbox
-                    checked={isSelected(ck)}
-                    onCheckedChange={() => toggle(ck, `${g.country_name} (${cc})`, { country_code: cc })}
-                  />
-
-                  {/* Expand toggle */}
-                  <button
-                    className="flex items-center gap-2 flex-1 text-left min-w-0"
-                    onClick={() => toggleExpand(cc)}
-                  >
-                    <span className="text-muted-foreground w-4 flex-shrink-0">
-                      {citiesLoading
-                        ? <Loader2 className="h-3 w-3 animate-spin" />
-                        : isExp
-                          ? <ChevronDown className="h-3 w-3" />
-                          : <ChevronRight className="h-3 w-3" />}
-                    </span>
-                    {cc !== "??" && (
-                      <img src={FLAG(cc)} alt={cc} className="h-3.5 rounded-sm flex-shrink-0" />
-                    )}
-                    <span className="font-medium text-sm truncate">{g.country_name}</span>
-                    <span className="text-xs text-muted-foreground font-mono flex-shrink-0">{cc}</span>
-                  </button>
-
-                  {/* Stats */}
-                  <div className="flex items-center gap-3 flex-shrink-0">
-                    <div className="flex items-center gap-2 w-28 hidden sm:flex">
-                      <div className="flex-1 bg-muted rounded-full h-1.5 overflow-hidden">
-                        <div className="h-full bg-green-500 rounded-full" style={{ width: `${pct}%` }} />
-                      </div>
-                      <span className="text-xs text-muted-foreground w-8 text-right">{pct}%</span>
-                    </div>
-                    <span className="text-sm font-semibold w-14 text-right">{g.total.toLocaleString()}</span>
-                    <span className="text-sm text-green-500 w-10 text-right">{g.active}</span>
-                    <div className="w-24 flex justify-end">
-                      {poolExists ? (
-                        <span className="text-xs text-muted-foreground flex items-center gap-1">
-                          <Layers className="h-3 w-3" />pool
-                        </span>
-                      ) : (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-6 text-xs px-2"
-                          onClick={e => {
-                            e.stopPropagation()
-                            setSelected(new Map([[ck, { key: ck, label: `${g.country_name} (${cc})`, filter: { country_code: cc } }]]))
-                            setPoolName(`${g.country_name} (${cc})`)
-                            setCreateOpen(true)
-                          }}
-                        >
-                          <Plus className="h-3 w-3 mr-0.5" />Pool
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* City rows */}
-                {isExp && (
-                  <div className="bg-muted/20">
-                    {citiesLoading ? (
-                      <div className="flex justify-center py-4">
-                        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                      </div>
-                    ) : citiesList.length === 0 ? (
-                      <p className="text-xs text-muted-foreground text-center py-3">No city data</p>
+          return (
+            // GeoIP can name one code two ways ("Turkey" / "Türkiye"), so the key needs both.
+            <li key={`${cc}-${g.country_name}`} className="border-border border-b">
+              <div className={cn(row, "hover:bg-muted/40", isSelected(cc) && "bg-accent/60")}>
+                <Checkbox checked={isSelected(cc)} onCheckedChange={() => toggle(cc, label, { country_code: cc })} aria-label={`Select ${label}`} />
+                <button type="button" className="flex min-w-0 items-center gap-2 text-left" onClick={() => toggleExpand(cc)} aria-expanded={isExp}>
+                  <span className="text-muted-foreground w-3.5 shrink-0">
+                    {citiesLoading ? <Loader2 className="size-3 animate-spin" /> : isExp ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+                  </span>
+                  {cc !== "??" && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={FLAG(cc)} alt="" width={16} height={12} className="shrink-0" />
+                  )}
+                  <span className="truncate font-medium">{g.country_name}</span>
+                  <span className="text-muted-foreground shrink-0 font-mono">{cc}</span>
+                </button>
+                <span className={numbers}>
+                  <span className="hidden w-24 items-center gap-2 sm:inline-flex">
+                    <UsageBar value={pct} className="w-14" />
+                    <span className="text-muted-foreground w-8">{pct}%</span>
+                  </span>
+                  <span className="w-14 font-medium">{count(g.total)}</span>
+                  <span className="w-12">{count(g.active)}</span>
+                  <span className="inline-flex w-16 justify-end">
+                    {poolExists ? (
+                      <Tag>has pool</Tag>
                     ) : (
-                      citiesList.map(city => {
-                        const ck2 = cityKey(cc, city.city_name)
-                        const cityPct = city.total > 0 ? Math.round((city.active / city.total) * 100) : 0
-                        const cityPoolExists = existingPools.some(
-                          p => p.country_code === cc && p.city_name === city.city_name
-                        )
-                        return (
-                          <div
-                            key={ck2}
-                            className={`flex items-center gap-2 pl-10 pr-4 py-2 border-t border-muted hover:bg-muted/40 transition-colors ${isSelected(ck2) ? "bg-primary/5" : ""}`}
-                          >
-                            <Checkbox
-                              checked={isSelected(ck2)}
-                              onCheckedChange={() => toggle(
-                                ck2,
-                                `${city.city_name}, ${cc}`,
-                                { country_code: cc, city_name: city.city_name }
-                              )}
-                            />
-                            <MapPin className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-                            <span className="flex-1 text-sm truncate">{city.city_name}</span>
-                            <span className="text-xs text-muted-foreground hidden sm:inline">{city.region_name}</span>
-                            <div className="flex items-center gap-3 flex-shrink-0">
-                              <div className="flex items-center gap-2 w-28 hidden sm:flex">
-                                <div className="flex-1 bg-muted rounded-full h-1.5 overflow-hidden">
-                                  <div className="h-full bg-green-500 rounded-full" style={{ width: `${cityPct}%` }} />
-                                </div>
-                                <span className="text-xs text-muted-foreground w-8 text-right">{cityPct}%</span>
-                              </div>
-                              <span className="text-sm font-semibold w-14 text-right">{city.total.toLocaleString()}</span>
-                              <span className="text-sm text-green-500 w-10 text-right">{city.active}</span>
-                              <div className="w-24 flex justify-end">
-                                {cityPoolExists ? (
-                                  <span className="text-xs text-muted-foreground flex items-center gap-1">
-                                    <Layers className="h-3 w-3" />pool
-                                  </span>
-                                ) : (
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-6 text-xs px-2"
-                                    onClick={e => {
-                                      e.stopPropagation()
-                                      const key = ck2
-                                      setSelected(new Map([[key, {
-                                        key,
-                                        label: `${city.city_name}, ${cc}`,
-                                        filter: { country_code: cc, city_name: city.city_name }
-                                      }]]))
-                                      setPoolName(`${city.city_name}, ${cc}`)
-                                      setCreateOpen(true)
-                                    }}
-                                  >
-                                    <Plus className="h-3 w-3 mr-0.5" />Pool
-                                  </Button>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        )
-                      })
+                      <button
+                        type="button"
+                        className="text-muted-foreground hover:text-foreground font-medium"
+                        onClick={() => openCreateFrom([{ key: cc, label, filter: { country_code: cc } }])}
+                      >
+                        + pool
+                      </button>
                     )}
-                  </div>
-                )}
+                  </span>
+                </span>
               </div>
-            )
-          })}
-        </CardContent>
-      </Card>
 
-      {/* Create pool dialog */}
+              {isExp && (
+                <ol className="bg-muted/20 border-border border-t">
+                  {citiesLoading ? (
+                    <li className="text-muted-foreground px-4 py-3 pl-12 md:px-6 md:pl-14">Loading cities…</li>
+                  ) : citiesList.length === 0 ? (
+                    <li className="text-muted-foreground px-4 py-3 pl-12 md:px-6 md:pl-14">No city-level data for this country.</li>
+                  ) : (
+                    citiesList.map((city) => {
+                      const key = cityKey(cc, city.city_name)
+                      const cityPct = city.total > 0 ? Math.round((city.active / city.total) * 100) : 0
+                      const cityPoolExists = existingPools.some((p) => p.country_code === cc && p.city_name === city.city_name)
+                      const cityLabel = `${city.city_name}, ${cc}`
+                      return (
+                        <li key={key} className={cn(row, "border-border hover:bg-muted/40 border-b pl-12 last:border-b-0 md:pl-14", isSelected(key) && "bg-accent/60")}>
+                          <Checkbox checked={isSelected(key)} onCheckedChange={() => toggle(key, cityLabel, { country_code: cc, city_name: city.city_name })} aria-label={`Select ${cityLabel}`} />
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="truncate">{city.city_name}</span>
+                            <span className="text-muted-foreground hidden truncate sm:inline">{city.region_name}</span>
+                          </span>
+                          <span className={numbers}>
+                            <span className="hidden w-24 items-center gap-2 sm:inline-flex">
+                              <UsageBar value={cityPct} className="w-14" />
+                              <span className="text-muted-foreground w-8">{cityPct}%</span>
+                            </span>
+                            <span className="w-14 font-medium">{count(city.total)}</span>
+                            <span className="w-12">{count(city.active)}</span>
+                            <span className="inline-flex w-16 justify-end">
+                              {cityPoolExists ? (
+                                <Tag>has pool</Tag>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="text-muted-foreground hover:text-foreground font-medium"
+                                  onClick={() => openCreateFrom([{ key, label: cityLabel, filter: { country_code: cc, city_name: city.city_name } }])}
+                                >
+                                  + pool
+                                </button>
+                              )}
+                            </span>
+                          </span>
+                        </li>
+                      )
+                    })
+                  )}
+                </ol>
+              )}
+            </li>
+          )
+        })}
+      </ol>
+      {filtered.length === 0 && <EmptyLine>No country matches “{search}”.</EmptyLine>}
+
+      <Section className="border-b-0">
+        <p className="text-muted-foreground">
+          Counts are proxies whose GeoIP lookup succeeded; proxies without geo data live in the inventory but never appear here.
+        </p>
+      </Section>
+
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Create Pool</DialogTitle>
-          </DialogHeader>
-          <div className="flex flex-col gap-4 py-2">
-            {/* Selection summary */}
-            <div className="bg-muted rounded-md p-3 text-xs space-y-1">
-              <div className="font-medium text-sm mb-1">Geo filters ({selected.size})</div>
-              <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
-                {Array.from(selected.values()).map(s => (
-                  <Badge key={s.key} variant="secondary">{s.label}</Badge>
+        <DialogContent>
+          <form onSubmit={handleCreate} className="space-y-4">
+            <DialogHeader>
+              <DialogTitle>Create pool</DialogTitle>
+              <DialogDescription>The pool takes every proxy in these locations and re-syncs when new proxies are imported.</DialogDescription>
+            </DialogHeader>
+            <div>
+              <p className="label mb-1.5">Locations ({selected.size})</p>
+              <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto">
+                {Array.from(selected.values()).map((s) => (
+                  <Tag key={s.key}>{s.label}</Tag>
                 ))}
               </div>
-              <p className="text-muted-foreground">
-                Pool will include all proxies from the above locations. Auto-syncs when new proxies are imported.
-              </p>
             </div>
-
-            <div className="flex flex-col gap-1.5">
-              <Label>Pool name</Label>
-              <Input value={poolName} onChange={e => setPoolName(e.target.value)} placeholder="e.g. US + UK" />
+            <div className="space-y-1.5">
+              <Label htmlFor="geo-pool-name">Pool name</Label>
+              <Input id="geo-pool-name" value={poolName} onChange={(e) => setPoolName(e.target.value)} required />
             </div>
-
-            <div className="flex flex-col gap-1.5">
-              <Label>Rotation</Label>
-              <Select value={rotation} onValueChange={setRotation}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="roundrobin">Round Robin</SelectItem>
-                  <SelectItem value="random">Random</SelectItem>
-                  <SelectItem value="stick">Sticky (N requests)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {rotation === "stick" && (
-              <div className="flex flex-col gap-1.5">
-                <Label>Requests per IP</Label>
-                <Input type="number" min={1} value={stickCount} onChange={e => setStickCount(+e.target.value || 10)} />
-              </div>
-            )}
-
             <div className="grid grid-cols-2 gap-3">
-              <div className="flex flex-col gap-1.5">
-                <Label>Health check URL</Label>
-                <Input value={hcUrl} onChange={e => setHcUrl(e.target.value)} />
+              <div className="space-y-1.5">
+                <Label htmlFor="geo-rotation">Rotation</Label>
+                <Select value={rotation} onValueChange={setRotation}>
+                  <SelectTrigger id="geo-rotation" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="roundrobin">Round robin</SelectItem>
+                    <SelectItem value="random">Random</SelectItem>
+                    <SelectItem value="stick">Sticky, N requests</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-              <div className="flex flex-col gap-1.5">
-                <Label>Cron</Label>
-                <Input value={hcCron} onChange={e => setHcCron(e.target.value)} placeholder="*/30 * * * *" />
+              {rotation === "stick" && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="geo-stick">Requests per proxy</Label>
+                  <Input id="geo-stick" type="number" min={1} value={stickCount} onChange={(e) => setStickCount(+e.target.value || 10)} />
+                </div>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="geo-hc-url">Health check URL</Label>
+                <Input id="geo-hc-url" className="font-mono" value={hcUrl} onChange={(e) => setHcUrl(e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="geo-hc-cron">Health check cron</Label>
+                <Input id="geo-hc-cron" className="font-mono" value={hcCron} onChange={(e) => setHcCron(e.target.value)} placeholder="*/30 * * * *" />
               </div>
             </div>
-
-            <div className="flex items-center gap-2">
-              <Switch id="auto-sync-dlg" checked={autoSync} onCheckedChange={setAutoSync} />
-              <Label htmlFor="auto-sync-dlg">Auto-sync when proxies are imported</Label>
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="geo-auto-sync" className="text-foreground">Re-sync when proxies are imported</Label>
+              <Switch id="geo-auto-sync" checked={autoSync} onCheckedChange={setAutoSync} />
             </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
-            <Button onClick={handleCreate} disabled={saving}>
-              {saving && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
-              Create &amp; Sync Pool
-            </Button>
-          </DialogFooter>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
+              <Button type="submit" disabled={saving}>{saving ? "Creating…" : "Create and sync"}</Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   )
 }

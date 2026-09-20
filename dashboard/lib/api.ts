@@ -540,7 +540,8 @@ class ApiClient {
   // WebSocket because the underlying socket is replaced on each reconnect;
   // callers close the handle to tear everything down.
   createDashboardWebSocket(
-    onMessage: (data: DashboardStats) => void
+    onMessage: (data: DashboardStats) => void,
+    onStatus?: (connected: boolean) => void
   ): { close: () => void } {
     let ws: WebSocket | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -558,6 +559,7 @@ class ApiClient {
 
       ws.onopen = () => {
         attempts = 0
+        onStatus?.(true)
       }
 
       ws.onmessage = (event) => {
@@ -573,6 +575,7 @@ class ApiClient {
       }
 
       ws.onclose = () => {
+        onStatus?.(false)
         if (closed) return
         // Exponential backoff, capped at 30s.
         const delay = Math.min(1000 * 2 ** attempts, 30000)

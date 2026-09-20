@@ -132,6 +132,12 @@ export interface Settings {
     compression_after_days: number
     cleanup_interval_hours: number
   }
+  proxy_cleanup: {
+    enabled: boolean
+    max_failed_days: number
+    min_success_rate: number
+    cleanup_interval_hours: number
+  }
   geoip: {
     provider: "ip-api" | "maxmind"
     maxmind_license_key: string
