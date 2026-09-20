@@ -82,6 +82,16 @@ func (r *DashboardRepository) GetStats(ctx context.Context) (*models.DashboardSt
 	return &stats, nil
 }
 
+// bucketLabel formats a time bucket for the chart axis: clock time for
+// intra-day buckets, "02 Jan" for daily ones (every daily bucket would
+// otherwise print the same "00:00").
+func bucketLabel(bucket time.Time, interval string) string {
+	if interval == "1d" {
+		return bucket.Format("02 Jan")
+	}
+	return bucket.Format("15:04")
+}
+
 // GetResponseTimeChart retrieves response time chart data
 func (r *DashboardRepository) GetResponseTimeChart(ctx context.Context, interval string) ([]models.ChartDataPoint, error) {
 	// Determine time bucket based on interval
@@ -127,7 +137,7 @@ func (r *DashboardRepository) GetResponseTimeChart(ctx context.Context, interval
 		}
 
 		data = append(data, models.ChartDataPoint{
-			Time:  bucket.Format("15:04"),
+			Time:  bucketLabel(bucket, interval),
 			Value: value,
 		})
 	}
@@ -180,7 +190,7 @@ func (r *DashboardRepository) GetSuccessRateChart(ctx context.Context, interval 
 		}
 
 		data = append(data, models.SuccessRateDataPoint{
-			Time:    bucket.Format("15:04"),
+			Time:    bucketLabel(bucket, interval),
 			Success: success,
 			Failure: failure,
 		})
