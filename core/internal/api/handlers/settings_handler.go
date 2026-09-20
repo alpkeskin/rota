@@ -74,10 +74,24 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 //	@Failure		500		{object}	models.ErrorResponse
 //	@Router			/settings [put]
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
-	var settings models.Settings
+	// Decode over the current values so a client that omits a section (an
+	// older dashboard, a partial API call) does not zero it out — UpdateAll
+	// writes every section back.
+	current, err := h.settingsRepo.GetAll(r.Context())
+	if err != nil {
+		h.logger.Error("failed to load current settings", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "Failed to load settings")
+		return
+	}
+	settings := *current
 	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "Invalid request body")
 		return
+	}
+	// GET never returns the proxy password, so the dashboard round-trips "".
+	// An empty password means "keep the current one", never "clear it".
+	if settings.Authentication.Password == "" {
+		settings.Authentication.Password = current.Authentication.Password
 	}
 
 	// Validate settings
