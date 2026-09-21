@@ -17,6 +17,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Rota",
   description: "Proxy rotation platform",
+  icons: {
+    icon: "/logo-icon.svg",
+    apple: "/apple-touch-icon.png",
+  },
 };
 
 export default function RootLayout({
