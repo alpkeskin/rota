@@ -427,6 +427,38 @@ func (t *UsageTracker) RecordHealthCheck(ctx context.Context, proxyID int, succe
 	return err
 }
 
+// RecordManualTestResult persists the result of an explicit manual proxy test.
+// Status is applied immediately: success -> 'active', failure -> 'failed'.
+// The consecutive-failure counter is kept consistent: reset on success,
+// incremented on failure.
+func (t *UsageTracker) RecordManualTestResult(ctx context.Context, proxyID int, success bool, errorMsg string) error {
+	now := time.Now()
+
+	var lastError *string
+	if !success && errorMsg != "" {
+		lastError = &errorMsg
+	}
+
+	status := "failed"
+	if success {
+		status = "active"
+	}
+
+	query := `
+		UPDATE proxies
+		SET
+			last_check = $1,
+			last_error = $2,
+			status = $3,
+			failed_requests = CASE WHEN $4 THEN 0 ELSE failed_requests + 1 END,
+			updated_at = NOW()
+		WHERE id = $5
+	`
+
+	_, err := t.repo.GetDB().Pool.Exec(ctx, query, now, lastError, status, success, proxyID)
+	return err
+}
+
 // GetRecentRequests retrieves recent requests for a proxy
 func (t *UsageTracker) GetRecentRequests(ctx context.Context, proxyID int, limit int) ([]RequestRecord, error) {
 	// The proxy_requests table stores success (bool) and error — not status /
