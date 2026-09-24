@@ -46,12 +46,13 @@ func (r *AuditRepository) Record(ctx context.Context, e models.AuditEntry) error
 
 // AuditFilter narrows an audit log query. Zero values mean "any".
 type AuditFilter struct {
-	Actor  string // exact actor name
-	Action string // case-insensitive substring of the action
-	From   time.Time
-	To     time.Time
-	Page   int
-	Limit  int
+	ActorID *int   // entries by this account (sessions and its API keys)
+	Actor   string // exact actor name
+	Action  string // case-insensitive substring of the action
+	From    time.Time
+	To      time.Time
+	Page    int
+	Limit   int
 }
 
 // List returns a page of entries, newest first, and the total match count.
@@ -67,6 +68,11 @@ func (r *AuditRepository) List(ctx context.Context, f AuditFilter) ([]models.Aud
 	add := func(cond string, v any) {
 		args = append(args, v)
 		where = append(where, fmt.Sprintf(cond, len(args)))
+	}
+	if f.ActorID != nil {
+		// Anonymous entries never carry an actor id, so an attacker-typed
+		// login name can't be mistaken for the account's own actions.
+		add("actor_id = $%d AND actor_type <> 'anonymous'", *f.ActorID)
 	}
 	if f.Actor != "" {
 		add("actor_name = $%d", f.Actor)

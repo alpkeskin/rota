@@ -480,6 +480,11 @@ func (h *PoolHandler) ListAlertRules(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"failed to get alert rules"}`, http.StatusInternalServerError)
 		return
 	}
+	if !canSeeSecrets(r.Context()) {
+		for i := range rules {
+			rules[i].WebhookURL = redactURL(rules[i].WebhookURL)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"rules": rules})
 }
 

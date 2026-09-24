@@ -115,7 +115,8 @@ export default function SettingsPage() {
       }
     }
     fetchSettings()
-  }, [me.username])
+    // Re-fetch when the role changes: a non-admin copy has secrets redacted.
+  }, [me.username, isAdmin])
 
   const patch = <K extends keyof Settings>(key: K, value: Partial<Settings[K]>) =>
     setSettings((s) => (s ? { ...s, [key]: { ...s[key], ...value } } : s))

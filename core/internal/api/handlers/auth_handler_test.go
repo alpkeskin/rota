@@ -56,7 +56,7 @@ func TestLoginChangePasswordAndSignOut(t *testing.T) {
 	accounts := repository.NewAccountRepository(db)
 	audit := repository.NewAuditRepository(db)
 	secret := "s3cret"
-	h := NewAuthHandler(accounts, audit, logger.New("error"), secret)
+	h := NewAuthHandler(accounts, audit, NewPasswordConfirmGuard(accounts, audit, logger.New("error")), logger.New("error"), secret)
 	if _, err := accounts.Seed(ctx, "admin", "first-pass-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestLoginChangePasswordAndSignOut(t *testing.T) {
 		t.Fatalf("login audit entries = %+v", entries)
 	}
 
-	principal := &auth.Principal{Type: auth.PrincipalSession, AccountID: id, Username: "admin", Role: auth.RoleAdmin}
+	principal := &auth.Principal{Type: auth.PrincipalSession, AccountID: id, Username: "admin", Role: auth.RoleAdmin, TokenVersion: version}
 	withP := func(r *http.Request) *http.Request { return r.WithContext(auth.WithPrincipal(r.Context(), principal)) }
 
 	// /auth/me reflects the principal.
@@ -111,6 +111,7 @@ func TestLoginChangePasswordAndSignOut(t *testing.T) {
 	if w.Code != http.StatusOK || err != nil || newVersion != version+1 {
 		t.Fatalf("change password = %d, version %d→%d, %v", w.Code, version, newVersion, err)
 	}
+	principal.TokenVersion = newVersion
 	w = httptest.NewRecorder()
 	h.ChangePassword(w, withP(httptest.NewRequest(http.MethodPost, "/api/v1/auth/change-password",
 		strings.NewReader(`{"current_password":"second-pass-2","new_password":"short"}`))))
@@ -136,7 +137,8 @@ func TestCreateAPIKeyRequiresCurrentPassword(t *testing.T) {
 	db := openAuthDB(t)
 	ctx := context.Background()
 	accounts := repository.NewAccountRepository(db)
-	h := NewAccessHandler(accounts, repository.NewAPIKeyRepository(db), repository.NewAuditRepository(db), logger.New("error"))
+	audit := repository.NewAuditRepository(db)
+	h := NewAccessHandler(accounts, repository.NewAPIKeyRepository(db), audit, NewPasswordConfirmGuard(accounts, audit, logger.New("error")), logger.New("error"))
 	a, err := accounts.Create(ctx, models.CreateAccountRequest{Username: "op", Password: "password-123", Role: "operator"})
 	if err != nil {
 		t.Fatal(err)
@@ -170,5 +172,49 @@ func TestAuditNameSanitises(t *testing.T) {
 	}
 	if got := auditName("bad\xffname"); !utf8.ValidString(got) {
 		t.Fatalf("auditName kept invalid UTF-8: %q", got)
+	}
+}
+
+func TestRepeatedWrongPasswordsRevokeSessions(t *testing.T) {
+	db := openAuthDB(t)
+	ctx := context.Background()
+	accounts := repository.NewAccountRepository(db)
+	audit := repository.NewAuditRepository(db)
+	h := NewAccessHandler(accounts, repository.NewAPIKeyRepository(db), audit, NewPasswordConfirmGuard(accounts, audit, logger.New("error")), logger.New("error"))
+	a, err := accounts.Create(ctx, models.CreateAccountRequest{Username: "stolen", Password: "password-123", Role: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &auth.Principal{Type: auth.PrincipalSession, AccountID: a.ID, Username: "stolen", Role: auth.RoleAdmin, TokenVersion: a.TokenVersion}
+	try := func(pw string) int {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", strings.NewReader(`{"name":"x","current_password":"`+pw+`"}`))
+		h.CreateAPIKey(w, r.WithContext(auth.WithPrincipal(r.Context(), p)))
+		return w.Code
+	}
+	// A correct password resets the count, so 4 misses + 1 hit + 4 misses is fine.
+	for i := 0; i < 4; i++ {
+		if code := try("guess"); code != http.StatusBadRequest {
+			t.Fatalf("miss %d = %d, want 400", i, code)
+		}
+	}
+	if code := try("password-123"); code != http.StatusCreated {
+		t.Fatalf("hit = %d", code)
+	}
+	for i := 0; i < 4; i++ {
+		try("guess")
+	}
+	if cur, _ := accounts.GetByID(ctx, a.ID); cur.TokenVersion != a.TokenVersion {
+		t.Fatal("sessions revoked before reaching the limit")
+	}
+	// The fifth miss in a row signs the account out everywhere.
+	if code := try("guess"); code != http.StatusUnauthorized {
+		t.Fatalf("fifth miss = %d, want 401", code)
+	}
+	if cur, _ := accounts.GetByID(ctx, a.ID); cur.TokenVersion != a.TokenVersion+1 {
+		t.Fatal("sessions not revoked after repeated wrong passwords")
+	}
+	if entries, _, _ := audit.List(ctx, repository.AuditFilter{Action: "auth.sessions_revoked"}); len(entries) != 1 {
+		t.Fatalf("lockout audit entries = %d, want 1", len(entries))
 	}
 }

@@ -125,6 +125,11 @@ func TestRouteRoleMatrix(t *testing.T) {
 		{"DELETE", "/api/v1/proxies", want{min: auth.RoleOperator}},
 		{"POST", "/api/v1/proxy-users/1/export-token", want{min: auth.RoleOperator}},
 		{"DELETE", "/api/v1/pools/1/alert-rules/2", want{min: auth.RoleOperator}},
+		{"POST", "/api/v1/sources/1/fetch", want{min: auth.RoleOperator}},
+		{"POST", "/api/v1/sources", want{min: auth.RoleAdmin}},
+		{"PUT", "/api/v1/sources/1", want{min: auth.RoleAdmin}},
+		{"POST", "/api/v1/pools/1/alert-rules", want{min: auth.RoleAdmin}},
+		{"PUT", "/api/v1/pools/1/alert-rules/2", want{min: auth.RoleAdmin}},
 		{"PUT", "/api/v1/settings", want{min: auth.RoleAdmin}},
 		{"POST", "/api/v1/settings/reset", want{min: auth.RoleAdmin}},
 		{"GET", "/api/v1/audit-log", want{min: auth.RoleAdmin}},
@@ -296,7 +301,7 @@ func TestRejectedCredentialsAreAuditedWithKeyHint(t *testing.T) {
 		t.Fatalf("entries = %+v, %v", entries, err)
 	}
 	rejected, accepted := entries[0], entries[1]
-	if rejected.Status != http.StatusUnauthorized || rejected.ActorType != "anonymous" ||
+	if rejected.Status != http.StatusUnauthorized || rejected.ActorType != "anonymous" || rejected.Action != "DELETE /api/v1/proxies" ||
 		rejected.Details["credential"] != f.tokens["operator-key"][:len(repository.APIKeyPrefix)+6]+"…" {
 		t.Errorf("rejected-key entry = %+v", rejected)
 	}
@@ -336,5 +341,53 @@ func TestLiveMiddlewareEndsRevokedStreams(t *testing.T) {
 	case <-ended:
 	case <-time.After(2 * time.Second):
 		t.Fatal("stream kept running after the session was revoked")
+	}
+}
+
+func TestAnonymousRequestsAreNotAuditedAndRejectionsAreBounded(t *testing.T) {
+	f := newAccessFixture(t)
+	ctx := context.Background()
+	audit := repository.NewAuditRepository(f.db)
+
+	// No credential at all: never audited, however many.
+	for i := 0; i < 50; i++ {
+		f.do("POST", "/api/v1/proxies", "")
+	}
+	if _, total, _ := audit.List(ctx, repository.AuditFilter{}); total != 0 {
+		t.Fatalf("credential-less requests audited: %d entries", total)
+	}
+	// Bogus credentials from one IP: audited up to the per-IP budget.
+	f.tokens["bogus"] = repository.APIKeyPrefix + "not-a-real-key-at-all"
+	for i := 0; i < rejectedAuditPerMinute+20; i++ {
+		f.do("POST", "/api/v1/proxies", "bogus")
+	}
+	if _, total, _ := audit.List(ctx, repository.AuditFilter{}); total != rejectedAuditPerMinute {
+		t.Fatalf("rejected-credential entries = %d, want %d", total, rejectedAuditPerMinute)
+	}
+	// Authenticated writes are never throttled.
+	for i := 0; i < 5; i++ {
+		f.do("POST", "/api/v1/proxies", "operator")
+	}
+	if _, total, _ := audit.List(ctx, repository.AuditFilter{Actor: "operator"}); total != 5 {
+		t.Fatalf("authenticated entries = %d, want 5", total)
+	}
+}
+
+func TestIPRateLimiter(t *testing.T) {
+	l := newIPRateLimiter(3)
+	for i := 0; i < 3; i++ {
+		if !l.Allow("a") {
+			t.Fatalf("event %d refused within budget", i)
+		}
+	}
+	if l.Allow("a") {
+		t.Fatal("event over budget allowed")
+	}
+	if !l.Allow("b") {
+		t.Fatal("other IP throttled")
+	}
+	l.buckets["a"].last = l.buckets["a"].last.Add(-time.Minute) // a minute passes
+	if !l.Allow("a") {
+		t.Fatal("budget not refilled after a minute")
 	}
 }

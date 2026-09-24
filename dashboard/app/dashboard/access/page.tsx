@@ -92,10 +92,12 @@ function CopyField({ id, value }: { id: string; value: string }) {
 
 // ── API keys ────────────────────────────────────────────────────────────────
 
-function keyState(k: ApiKey): { label: string; tone: "good" | "muted" } {
-  if (k.revoked_at) return { label: "Revoked", tone: "muted" }
-  if (k.expires_at && new Date(k.expires_at) <= new Date()) return { label: "Expired", tone: "muted" }
-  return { label: "Active", tone: "good" }
+function keyState(k: ApiKey): { label: string; tone: "good" | "muted"; usable: boolean; revocable: boolean } {
+  if (k.revoked_at) return { label: "Revoked", tone: "muted", usable: false, revocable: false }
+  if (k.expires_at && new Date(k.expires_at) <= new Date()) return { label: "Expired", tone: "muted", usable: false, revocable: false }
+  // Not revoked: it comes back if the owner is re-enabled, so it can still be revoked.
+  if (!k.owner_enabled) return { label: "Owner disabled", tone: "muted", usable: false, revocable: true }
+  return { label: "Active", tone: "good", usable: true, revocable: true }
 }
 
 function ApiKeysTab() {
@@ -210,7 +212,10 @@ function ApiKeysTab() {
                   <TableCell className="font-mono">{k.prefix}…</TableCell>
                   {showAll && <TableCell>{k.username}</TableCell>}
                   <TableCell>
-                    <Tag className="capitalize">{k.role}</Tag>
+                    <Tag className="capitalize" title={k.effective_role !== k.role ? `Created as ${k.role}; capped by the owner's current role` : undefined}>
+                      {k.effective_role}
+                    </Tag>
+                    {k.effective_role !== k.role && <span className="text-muted-foreground ml-1.5 capitalize line-through">{k.role}</span>}
                   </TableCell>
                   <TableCell className="text-muted-foreground">{k.last_used_at ? relative(k.last_used_at) : "Never"}</TableCell>
                   <TableCell className="text-muted-foreground">{k.expires_at ? formatDateTime(k.expires_at) : "Never"}</TableCell>
@@ -220,7 +225,7 @@ function ApiKeysTab() {
                     </StatusLabel>
                   </TableCell>
                   <TableCell className="text-right">
-                    {st.label === "Active" && (
+                    {st.revocable && (
                       <Button variant="ghost" size="sm" onClick={() => setRevokeTarget(k)}>
                         Revoke
                       </Button>
@@ -562,7 +567,9 @@ function statusLook(status: number): { tone: "good" | "warning" | "critical" | "
   return { tone: "good", icon: CheckCircle2 }
 }
 
-function AuditTab({ page, actor, action, onChange }: { page: number; actor: string; action: string; onChange: (p: { page?: string; actor?: string; action?: string }) => void }) {
+type AuditUrl = { page?: string; actor_id?: string; actor?: string; action?: string }
+
+function AuditTab({ page, actorId, actor, action, onChange }: { page: number; actorId: string; actor: string; action: string; onChange: (p: AuditUrl) => void }) {
   const [entries, setEntries] = React.useState<AuditEntry[]>([])
   const [total, setTotal] = React.useState(0)
   const [loading, setLoading] = React.useState(true)
@@ -571,7 +578,7 @@ function AuditTab({ page, actor, action, onChange }: { page: number; actor: stri
     let cancelled = false
     setLoading(true)
     api
-      .getAuditLog({ page, limit: AUDIT_LIMIT, actor, action })
+      .getAuditLog({ page, limit: AUDIT_LIMIT, actorId: parseInt(actorId) || undefined, action })
       .then((res) => {
         if (cancelled) return
         setEntries(res.entries)
@@ -582,15 +589,15 @@ function AuditTab({ page, actor, action, onChange }: { page: number; actor: stri
     return () => {
       cancelled = true
     }
-  }, [page, actor, action])
+  }, [page, actorId, action])
 
   return (
     <Content>
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <SearchInput value={action} onChange={(v) => onChange({ action: v, page: "1" })} placeholder="Filter by action, e.g. DELETE or proxies" />
-        {actor && (
-          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => onChange({ actor: "", page: "1" })}>
-            Actor: <span className="font-mono">{actor}</span> ✕
+        {actorId && (
+          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => onChange({ actor_id: "", actor: "", page: "1" })}>
+            Account: <span className="font-mono">{actor || `#${actorId}`}</span> ✕
           </button>
         )}
       </div>
@@ -618,10 +625,26 @@ function AuditTab({ page, actor, action, onChange }: { page: number; actor: stri
                     {relative(e.at)}
                   </TableCell>
                   <TableCell>
-                    <button type="button" className="hover:underline" onClick={() => onChange({ actor: e.actor_name, page: "1" })}>
-                      {e.actor_name || "—"}
-                    </button>
-                    {e.actor_type === "api_key" && <Tag className="ml-2">key</Tag>}
+                    {e.actor_type === "anonymous" ? (
+                      // Not a verified identity: a failed sign-in shows the name the
+                      // client typed; a rejected credential shows nothing.
+                      <span className="text-muted-foreground" title="Unauthenticated — the name, if any, was typed by the client and isn't verified">
+                        <Tag>anonymous</Tag>
+                        {e.actor_name && <span className="ml-2 italic">tried “{e.actor_name}”</span>}
+                        {typeof e.details?.credential === "string" && <span className="ml-2 font-mono text-[0.75rem]">{e.details.credential}</span>}
+                      </span>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className="hover:underline"
+                          onClick={() => onChange({ actor_id: e.actor_id ? String(e.actor_id) : "", actor: e.actor_name.replace(/ \(key: .*\)$/, ""), page: "1" })}
+                        >
+                          {e.actor_name || "—"}
+                        </button>
+                        {e.actor_type === "api_key" && <Tag className="ml-2">key</Tag>}
+                      </>
+                    )}
                   </TableCell>
                   <TableCell className="font-mono text-[0.75rem]">{e.action}</TableCell>
                   <TableCell className="text-muted-foreground font-mono text-[0.75rem]">{e.resource || "—"}</TableCell>
@@ -642,7 +665,7 @@ function AuditTab({ page, actor, action, onChange }: { page: number; actor: stri
 
 // ── Page ────────────────────────────────────────────────────────────────────
 
-const URL_DEFAULTS = { tab: "keys", page: "1", actor: "", action: "" }
+const URL_DEFAULTS = { tab: "keys", page: "1", actor_id: "", actor: "", action: "" }
 
 function AccessPage() {
   const isAdmin = useCan("admin")
@@ -669,6 +692,7 @@ function AccessPage() {
       {tab === "audit" && (
         <AuditTab
           page={Math.max(1, parseInt(url.page) || 1)}
+          actorId={url.actor_id}
           actor={url.actor}
           action={url.action}
           onChange={(p) => setUrl(p, { replace: p.action !== undefined })}

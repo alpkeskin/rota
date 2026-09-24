@@ -40,6 +40,11 @@ func (h *SourceHandler) List(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"failed to list sources"}`, http.StatusInternalServerError)
 		return
 	}
+	if !canSeeSecrets(r.Context()) {
+		for i := range sources {
+			sources[i].URL = redactURL(sources[i].URL)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"sources": sources})
 }
 

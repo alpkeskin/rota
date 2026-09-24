@@ -25,6 +25,12 @@ var (
 	ErrLastAdmin = errors.New("at least one enabled admin account must remain")
 	// ErrUsernameTaken is returned when the username is already in use.
 	ErrUsernameTaken = errors.New("username is already taken")
+	// ErrWrongPassword is returned when a re-entered current password
+	// doesn't match. It is a ValidationError, so it maps to 400.
+	ErrWrongPassword error = &ValidationError{Msg: "current password is incorrect"}
+	// ErrStaleSession is returned when the account's credentials changed
+	// after the session was issued (e.g. an admin reset the password).
+	ErrStaleSession = errors.New("your session is no longer current; sign in again")
 )
 
 // ValidationError is a client-side input problem; its message is safe to show.
@@ -348,7 +354,8 @@ func (r *AccountRepository) RevokeSessions(ctx context.Context, id int) (*models
 }
 
 // VerifyPassword checks an account's current password. It returns
-// ErrInvalidCredentials when it doesn't match (or the account is gone).
+// ErrWrongPassword when it doesn't match and ErrInvalidCredentials when the
+// account is gone or disabled.
 func (r *AccountRepository) VerifyPassword(ctx context.Context, id int, password string) error {
 	var hash string
 	err := r.db.Pool.QueryRow(ctx, `SELECT password_hash FROM accounts WHERE id = $1 AND enabled`, id).Scan(&hash)
@@ -359,7 +366,7 @@ func (r *AccountRepository) VerifyPassword(ctx context.Context, id int, password
 		return fmt.Errorf("load account: %w", err)
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
-		return ErrInvalidCredentials
+		return ErrWrongPassword
 	}
 	return nil
 }
@@ -367,16 +374,27 @@ func (r *AccountRepository) VerifyPassword(ctx context.Context, id int, password
 // ChangeOwnCredentials lets an account change its own password (and
 // optionally username) after re-entering the current password. Other
 // sessions are revoked; the returned account carries the new token version.
-func (r *AccountRepository) ChangeOwnCredentials(ctx context.Context, id int, currentPassword, newPassword, newUsername string) (*models.Account, error) {
+//
+// sessionVersion is the caller's session token version. The update only
+// applies if the password hash and token version are still the ones checked
+// here, so it can't overwrite a concurrent admin reset or revocation.
+func (r *AccountRepository) ChangeOwnCredentials(ctx context.Context, id, sessionVersion int, currentPassword, newPassword, newUsername string) (*models.Account, error) {
 	var hash string
-	if err := r.db.Pool.QueryRow(ctx, `SELECT password_hash FROM accounts WHERE id = $1`, id).Scan(&hash); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrAccountNotFound
-		}
+	var version int
+	var enabled bool
+	err := r.db.Pool.QueryRow(ctx, `SELECT password_hash, token_version, enabled FROM accounts WHERE id = $1`, id).
+		Scan(&hash, &version, &enabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAccountNotFound
+	}
+	if err != nil {
 		return nil, fmt.Errorf("load account: %w", err)
 	}
+	if !enabled || version != sessionVersion {
+		return nil, ErrStaleSession
+	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(currentPassword)) != nil {
-		return nil, invalid("current password is incorrect")
+		return nil, ErrWrongPassword
 	}
 	if err := validatePassword(newPassword); err != nil {
 		return nil, err
@@ -398,7 +416,8 @@ func (r *AccountRepository) ChangeOwnCredentials(ctx context.Context, id int, cu
 			username      = COALESCE($3::text, username),
 			token_version = token_version + 1,
 			updated_at    = NOW()
-		WHERE id = $1 RETURNING `+accountColumns, id, newHash, username))
+		WHERE id = $1 AND password_hash = $4 AND token_version = $5 AND enabled
+		RETURNING `+accountColumns, id, newHash, username, hash, sessionVersion))
 	if isUniqueViolation(err) {
 		return nil, ErrUsernameTaken
 	}
@@ -406,7 +425,7 @@ func (r *AccountRepository) ChangeOwnCredentials(ctx context.Context, id int, cu
 		return nil, err
 	}
 	if a == nil {
-		return nil, ErrAccountNotFound
+		return nil, ErrStaleSession // changed between the check and the update
 	}
 	return a, nil
 }

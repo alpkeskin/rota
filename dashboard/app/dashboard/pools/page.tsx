@@ -47,6 +47,7 @@ import { DefinitionList } from "@/components/definition-list"
 import { SplitBar, UsageBar } from "@/components/usage-bar"
 import { ErrorStatus, OkStatus, OnOff, ProxyStatus, RunningStatus, Tag } from "@/components/status"
 import { useUrlState } from "@/hooks/use-url-state"
+import { useCan } from "@/lib/session"
 import { count, formatDateTime, ms, percent, relative, seconds } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
@@ -79,6 +80,9 @@ const DEFAULT_POOL_FORM: CreatePoolRequest = {
 const URL_DEFAULTS = { tab: "pools", pool: "" }
 
 function PoolsPage() {
+  // Webhook URLs make the core call out to an address of the caller's
+  // choosing, so only admins set them (the core enforces this too).
+  const canSetWebhooks = useCan("admin")
   const [url, setUrl] = useUrlState(URL_DEFAULTS)
   const tab = url.tab === "geo" ? "geo" : "pools"
   const selectedId = parseInt(url.pool) || null
@@ -725,9 +729,11 @@ function PoolsPage() {
                         <h3 className="label">
                           Alert rules <span className="num">({count(alertRules.length)})</span>
                         </h3>
-                        <Button variant="outline" size="sm" onClick={openCreateAlertRule}>
-                          Add rule
-                        </Button>
+                        {canSetWebhooks && (
+                          <Button variant="outline" size="sm" onClick={openCreateAlertRule}>
+                            Add rule
+                          </Button>
+                        )}
                       </div>
                       {alertRules.length === 0 ? (
                         <p className="text-muted-foreground py-4 text-center">No rules — nobody is told when this pool runs dry.</p>
@@ -754,7 +760,7 @@ function PoolsPage() {
                                   </Button>
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent align="end">
-                                  <DropdownMenuItem onClick={() => openEditAlertRule(rule)}>Edit</DropdownMenuItem>
+                                  {canSetWebhooks && <DropdownMenuItem onClick={() => openEditAlertRule(rule)}>Edit</DropdownMenuItem>}
                                   <DropdownMenuItem variant="destructive" onClick={() => setDeleteRuleId(rule.id)}>Delete</DropdownMenuItem>
                                 </DropdownMenuContent>
                               </DropdownMenu>

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/auth"
@@ -48,7 +49,7 @@ func (a *authenticator) Middleware() func(next http.Handler) http.Handler {
 			}
 			p, err := a.resolve(r.Context(), tokenStr)
 			if h := principalHolderFrom(r.Context()); h != nil {
-				h.p, h.credential = p, credentialHint(tokenStr)
+				h.p, h.presented, h.credential = p, true, credentialHint(tokenStr)
 			}
 			if err != nil {
 				if errors.Is(err, repository.ErrInvalidCredentials) || errors.Is(err, auth.ErrInvalidToken) {
@@ -80,10 +81,11 @@ func (a *authenticator) resolve(ctx context.Context, tokenStr string) (*auth.Pri
 		return nil, auth.ErrInvalidToken
 	}
 	return &auth.Principal{
-		Type:      auth.PrincipalSession,
-		AccountID: acct.ID,
-		Username:  acct.Username,
-		Role:      auth.Role(acct.Role),
+		Type:         auth.PrincipalSession,
+		AccountID:    acct.ID,
+		Username:     acct.Username,
+		Role:         auth.Role(acct.Role),
+		TokenVersion: acct.TokenVersion,
 	}, nil
 }
 
@@ -136,7 +138,8 @@ func credentialHint(tokenStr string) string {
 // authenticator resolved.
 type principalHolder struct {
 	p          *auth.Principal
-	credential string
+	presented  bool   // a credential was sent (valid or not)
+	credential string // public hint for API keys
 }
 
 type principalHolderKey struct{}
@@ -196,6 +199,7 @@ var auditedReads = map[string]bool{
 // including requests refused by RequireRole. Request bodies are never
 // stored: they can carry passwords and keys.
 func AuditMiddleware(rec auditRecorder, log *logger.Logger) func(next http.Handler) http.Handler {
+	rejected := newIPRateLimiter(rejectedAuditPerMinute)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			holder := &principalHolder{}
@@ -205,7 +209,13 @@ func AuditMiddleware(rec auditRecorder, log *logger.Logger) func(next http.Handl
 			// out as a 500) is still audited; the panic is then re-raised.
 			defer func() {
 				p := recover()
-				recordAudit(r, holder, ww.Status(), p != nil, rec, log)
+				// Requests rejected before authentication are audited only
+				// when they presented a credential (a revoked or leaked one
+				// in use) and at a bounded rate per IP, so anonymous floods
+				// can't grow the audit log without limit.
+				if holder.p != nil || (holder.presented && rejected.Allow(clientIP(r))) {
+					recordAudit(r, holder, ww.Status(), p != nil, rec, log)
+				}
 				if p != nil {
 					panic(p)
 				}
@@ -225,8 +235,13 @@ func recordAudit(r *http.Request, holder *principalHolder, status int, panicked 
 	if !mutating && !auditedReads[route] {
 		return
 	}
-	if route == "" {
-		route = "unmatched"
+	if route == "" || strings.HasSuffix(route, "/*") {
+		// Rejected before the subrouter matched a route: record the path
+		// the caller tried, bounded in length.
+		route = r.URL.Path
+		if len(route) > 200 {
+			route = route[:200] + "…"
+		}
 	}
 	switch {
 	case panicked:
@@ -287,4 +302,54 @@ func clientIP(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr // RealIP stores a bare IP without a port
+}
+
+// rejectedAuditPerMinute bounds audit entries for rejected credentials per IP.
+const rejectedAuditPerMinute = 30
+
+// ipRateLimiter is a small per-IP token bucket with periodic eviction.
+type ipRateLimiter struct {
+	mu      sync.Mutex
+	perMin  int
+	buckets map[string]*ipBucket
+	sweep   time.Time
+}
+
+type ipBucket struct {
+	tokens float64
+	last   time.Time
+}
+
+func newIPRateLimiter(perMinute int) *ipRateLimiter {
+	return &ipRateLimiter{perMin: perMinute, buckets: map[string]*ipBucket{}, sweep: time.Now()}
+}
+
+// Allow reports whether ip may emit one more event now.
+func (l *ipRateLimiter) Allow(ip string) bool {
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if now.Sub(l.sweep) > 10*time.Minute {
+		for k, b := range l.buckets {
+			if now.Sub(b.last) > 10*time.Minute {
+				delete(l.buckets, k)
+			}
+		}
+		l.sweep = now
+	}
+	b, ok := l.buckets[ip]
+	if !ok {
+		b = &ipBucket{tokens: float64(l.perMin), last: now}
+		l.buckets[ip] = b
+	}
+	b.tokens += now.Sub(b.last).Minutes() * float64(l.perMin)
+	if b.tokens > float64(l.perMin) {
+		b.tokens = float64(l.perMin)
+	}
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }

@@ -178,13 +178,17 @@ func TestAccountLifecycle(t *testing.T) {
 	}
 
 	// Own credentials.
-	if _, err := r.ChangeOwnCredentials(ctx, second.ID, "wrong", "another-pass-1", ""); !errors.As(err, &verr) {
+	tv := second.TokenVersion
+	if _, err := r.ChangeOwnCredentials(ctx, second.ID, tv, "wrong", "another-pass-1", ""); !errors.Is(err, ErrWrongPassword) || !errors.As(err, &verr) {
 		t.Fatalf("wrong current password err = %v", err)
 	}
-	if _, err := r.ChangeOwnCredentials(ctx, second.ID, "password-123", "another-pass-1", "admin"); !errors.Is(err, ErrUsernameTaken) {
+	if _, err := r.ChangeOwnCredentials(ctx, second.ID, tv+1, "password-123", "another-pass-1", ""); !errors.Is(err, ErrStaleSession) {
+		t.Fatalf("stale session err = %v", err)
+	}
+	if _, err := r.ChangeOwnCredentials(ctx, second.ID, tv, "password-123", "another-pass-1", "admin"); !errors.Is(err, ErrUsernameTaken) {
 		t.Fatalf("rename to taken username err = %v", err)
 	}
-	changed, err := r.ChangeOwnCredentials(ctx, second.ID, "password-123", "another-pass-1", "ada2")
+	changed, err := r.ChangeOwnCredentials(ctx, second.ID, tv, "password-123", "another-pass-1", "ada2")
 	if err != nil || changed.Username != "ada2" || changed.TokenVersion != second.TokenVersion+1 {
 		t.Fatalf("change own = %+v, %v", changed, err)
 	}
@@ -267,6 +271,9 @@ func TestAPIKeys(t *testing.T) {
 	if p, _ := keys.Authenticate(ctx, secret); p == nil || p.Role != auth.RoleViewer {
 		t.Fatalf("key role after owner demotion = %+v", p)
 	}
+	if got, _ := keys.get(ctx, k.ID); got.Role != "operator" || got.EffectiveRole != "viewer" || !got.OwnerEnabled {
+		t.Fatalf("listed key after owner demotion = %+v; want role operator, effective viewer", got)
+	}
 
 	// Disabled owner, expiry, revocation and unknown keys all fail.
 	off, on := false, true
@@ -275,6 +282,9 @@ func TestAPIKeys(t *testing.T) {
 	}
 	if _, err := keys.Authenticate(ctx, secret); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("disabled owner key err = %v", err)
+	}
+	if got, _ := keys.get(ctx, k.ID); got.OwnerEnabled {
+		t.Fatal("listed key doesn't show its owner is disabled")
 	}
 	if _, err := accounts.Update(ctx, op.ID, models.UpdateAccountRequest{Enabled: &on}); err != nil {
 		t.Fatal(err)
@@ -354,6 +364,13 @@ func TestAuditLog(t *testing.T) {
 	if got, total, _ := r.List(ctx, AuditFilter{Actor: "alice"}); total != 1 || got[0].Action != "POST /api/v1/proxies" {
 		t.Fatalf("actor filter = %+v (total %d)", got, total)
 	}
+	// actor_id covers the account's sessions and keys, never anonymous rows.
+	if err := r.Record(ctx, models.AuditEntry{ActorType: "anonymous", ActorID: &id, ActorName: "alice", Action: "auth.login", Status: 401}); err != nil {
+		t.Fatal(err)
+	}
+	if _, total, _ := r.List(ctx, AuditFilter{ActorID: &id}); total != 2 {
+		t.Fatalf("actor_id filter total = %d, want 2 (session + key, not anonymous)", total)
+	}
 	if _, total, _ := r.List(ctx, AuditFilter{Action: "proxies"}); total != 2 {
 		t.Fatalf("action substring filter total = %d, want 2", total)
 	}
@@ -365,7 +382,7 @@ func TestAuditLog(t *testing.T) {
 		t.Fatalf("time window total = %d, want 2", total)
 	}
 	page2, total, _ := r.List(ctx, AuditFilter{Page: 2, Limit: 3})
-	if total != 4 || len(page2) != 1 || page2[0].ActorName != "old" {
+	if total != 5 || len(page2) != 2 || page2[1].ActorName != "old" {
 		t.Fatalf("page 2 = %+v (total %d)", page2, total)
 	}
 
@@ -426,7 +443,7 @@ func TestVerifyPassword(t *testing.T) {
 	if err := r.VerifyPassword(ctx, a.ID, "password-123"); err != nil {
 		t.Fatalf("right password: %v", err)
 	}
-	if err := r.VerifyPassword(ctx, a.ID, "nope"); !errors.Is(err, ErrInvalidCredentials) {
+	if err := r.VerifyPassword(ctx, a.ID, "nope"); !errors.Is(err, ErrWrongPassword) {
 		t.Fatalf("wrong password err = %v", err)
 	}
 	off := false
@@ -436,5 +453,28 @@ func TestVerifyPassword(t *testing.T) {
 	}
 	if err := r.VerifyPassword(ctx, a.ID, "password-123"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("disabled account err = %v", err)
+	}
+}
+
+// A self-service password change must not undo an admin's reset that lands
+// after the session was issued.
+func TestOwnPasswordChangeLosesToAdminReset(t *testing.T) {
+	db := openAccessDB(t, "rota_access_reset_race", nil)
+	r := NewAccountRepository(db)
+	ctx := context.Background()
+	mustCreate(t, r, "boss", "admin")
+	victim := mustCreate(t, r, "victim", "operator")
+	sessionVersion := victim.TokenVersion
+
+	reset := "admin-chosen-1"
+	if _, err := r.Update(ctx, victim.ID, models.UpdateAccountRequest{Password: &reset}); err != nil {
+		t.Fatal(err)
+	}
+	// The attacker's session (issued before the reset) still knows the old password.
+	if _, err := r.ChangeOwnCredentials(ctx, victim.ID, sessionVersion, "password-123", "attacker-pass-1", ""); !errors.Is(err, ErrStaleSession) {
+		t.Fatalf("change from a pre-reset session err = %v, want ErrStaleSession", err)
+	}
+	if _, err := r.Authenticate(ctx, "victim", reset); err != nil {
+		t.Fatalf("admin's reset password no longer works: %v", err)
 	}
 }

@@ -16,6 +16,7 @@ import (
 
 // AccessHandler manages accounts, API keys and the audit log.
 type AccessHandler struct {
+	guard    *PasswordConfirmGuard
 	accounts *repository.AccountRepository
 	keys     *repository.APIKeyRepository
 	audit    *repository.AuditRepository
@@ -23,8 +24,8 @@ type AccessHandler struct {
 }
 
 // NewAccessHandler creates a new AccessHandler.
-func NewAccessHandler(accounts *repository.AccountRepository, keys *repository.APIKeyRepository, audit *repository.AuditRepository, log *logger.Logger) *AccessHandler {
-	return &AccessHandler{accounts: accounts, keys: keys, audit: audit, logger: log}
+func NewAccessHandler(accounts *repository.AccountRepository, keys *repository.APIKeyRepository, audit *repository.AuditRepository, guard *PasswordConfirmGuard, log *logger.Logger) *AccessHandler {
+	return &AccessHandler{accounts: accounts, keys: keys, audit: audit, guard: guard, logger: log}
 }
 
 func pathID(w http.ResponseWriter, r *http.Request) (int, bool) {
@@ -152,13 +153,14 @@ func (h *AccessHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.accounts.VerifyPassword(r.Context(), p.AccountID, req.CurrentPassword); err != nil {
-		if errors.Is(err, repository.ErrInvalidCredentials) {
-			writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "current password is incorrect"})
+		if errors.Is(err, repository.ErrWrongPassword) && h.guard.Failed(r.Context(), p, requestIP(r)) {
+			writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{Error: "too many wrong passwords; you have been signed out"})
 			return
 		}
 		writeAccountError(w, h.logger, err)
 		return
 	}
+	h.guard.Succeeded(p.AccountID)
 	key, k, err := h.keys.Create(r.Context(), p.AccountID, p.Role, req)
 	if err != nil {
 		writeAccountError(w, h.logger, err)
@@ -193,6 +195,14 @@ func (h *AccessHandler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 func (h *AccessHandler) ListAuditLog(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := repository.AuditFilter{Actor: q.Get("actor"), Action: q.Get("action")}
+	if v := q.Get("actor_id"); v != "" {
+		id, err := strconv.Atoi(v)
+		if err != nil || id <= 0 {
+			writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "actor_id must be a positive integer"})
+			return
+		}
+		f.ActorID = &id
+	}
 	f.Page, _ = strconv.Atoi(q.Get("page"))
 	f.Limit, _ = strconv.Atoi(q.Get("limit"))
 	for _, tc := range []struct {

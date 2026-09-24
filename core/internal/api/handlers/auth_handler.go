@@ -18,6 +18,7 @@ import (
 
 // AuthHandler handles sign-in and the signed-in account's own credentials.
 type AuthHandler struct {
+	guard     *PasswordConfirmGuard
 	accounts  *repository.AccountRepository
 	audit     *repository.AuditRepository
 	logger    *logger.Logger
@@ -25,8 +26,9 @@ type AuthHandler struct {
 }
 
 // NewAuthHandler creates a new AuthHandler
-func NewAuthHandler(accounts *repository.AccountRepository, audit *repository.AuditRepository, log *logger.Logger, jwtSecret string) *AuthHandler {
+func NewAuthHandler(accounts *repository.AccountRepository, audit *repository.AuditRepository, guard *PasswordConfirmGuard, log *logger.Logger, jwtSecret string) *AuthHandler {
 	return &AuthHandler{
+		guard:     guard,
 		accounts:  accounts,
 		audit:     audit,
 		logger:    log,
@@ -149,11 +151,16 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acct, err := h.accounts.ChangeOwnCredentials(r.Context(), p.AccountID, req.CurrentPassword, req.NewPassword, req.NewUsername)
+	acct, err := h.accounts.ChangeOwnCredentials(r.Context(), p.AccountID, p.TokenVersion, req.CurrentPassword, req.NewPassword, req.NewUsername)
+	if errors.Is(err, repository.ErrWrongPassword) && h.guard.Failed(r.Context(), p, requestIP(r)) {
+		h.errorResponse(w, http.StatusUnauthorized, "too many wrong passwords; you have been signed out")
+		return
+	}
 	if err != nil {
 		h.accountError(w, err)
 		return
 	}
+	h.guard.Succeeded(p.AccountID)
 	token, err := auth.IssueSession(h.jwtSecret, acct.ID, acct.TokenVersion, acct.Username, time.Now())
 	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to generate token")
@@ -208,7 +215,7 @@ func writeAccountError(w http.ResponseWriter, log *logger.Logger, err error) {
 		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: verr.Msg})
 	case errors.Is(err, repository.ErrAccountNotFound), errors.Is(err, repository.ErrAPIKeyNotFound):
 		writeJSON(w, http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
-	case errors.Is(err, repository.ErrLastAdmin), errors.Is(err, repository.ErrUsernameTaken):
+	case errors.Is(err, repository.ErrLastAdmin), errors.Is(err, repository.ErrUsernameTaken), errors.Is(err, repository.ErrStaleSession):
 		writeJSON(w, http.StatusConflict, models.ErrorResponse{Error: err.Error()})
 	default:
 		log.Error("account operation failed", "error", err)

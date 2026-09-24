@@ -82,6 +82,9 @@ type Principal struct {
 	Role       Role
 	APIKeyID   int
 	APIKeyName string
+	// TokenVersion is the session's token version (sessions only), so
+	// credential changes can require that the session is still current.
+	TokenVersion int
 }
 
 // ActorName is a human-readable label for audit entries.

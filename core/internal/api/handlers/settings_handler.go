@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/alpkeskin/rota/core/internal/auth"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/internal/services"
@@ -59,10 +58,13 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	// Never expose proxy authentication password in response
 	settings.Authentication.Password = ""
-	// The MaxMind license key is a credential; only admins (who can change
-	// settings) see it.
-	if p := auth.FromContext(r.Context()); p == nil || !p.Role.AtLeast(auth.RoleAdmin) {
-		settings.GeoIP.MaxMindLicenseKey = ""
+	// The MaxMind license key and health-check header values are
+	// credentials; only admins (who can change settings) see them.
+	if !canSeeSecrets(r.Context()) {
+		if settings.GeoIP.MaxMindLicenseKey != "" {
+			settings.GeoIP.MaxMindLicenseKey = Redacted
+		}
+		settings.HealthCheck.Headers = redactHeaders(settings.HealthCheck.Headers)
 	}
 
 	h.jsonResponse(w, http.StatusOK, settings)
@@ -99,6 +101,12 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if settings.Authentication.Password == "" {
 		settings.Authentication.Password = current.Authentication.Password
 	}
+	// A form loaded while the caller couldn't see secrets carries redacted
+	// placeholders; they mean "keep", never "set to the placeholder".
+	if settings.GeoIP.MaxMindLicenseKey == Redacted {
+		settings.GeoIP.MaxMindLicenseKey = current.GeoIP.MaxMindLicenseKey
+	}
+	settings.HealthCheck.Headers = restoreRedactedHeaders(settings.HealthCheck.Headers, current.HealthCheck.Headers)
 
 	// Validate settings
 	if err := h.validateSettings(&settings); err != nil {

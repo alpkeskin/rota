@@ -197,6 +197,10 @@ export interface ApiKey {
   expires_at?: string
   last_used_at?: string
   revoked_at?: string
+  /** False when the owning account is disabled (the key then doesn't work). */
+  owner_enabled: boolean
+  /** The key's role capped by its owner's current role. */
+  effective_role: Role
 }
 
 export interface CreateApiKeyRequest {

@@ -42,18 +42,20 @@ func hashAPIKey(key string) string {
 }
 
 const apiKeyColumns = `k.id, k.account_id, a.username, k.name, k.key_prefix, k.role,
-	k.created_at, k.expires_at, k.last_used_at, k.revoked_at`
+	k.created_at, k.expires_at, k.last_used_at, k.revoked_at, a.enabled, a.role`
 
 func scanAPIKey(row pgx.Row) (*models.APIKey, error) {
 	var k models.APIKey
+	var ownerRole string
 	err := row.Scan(&k.ID, &k.AccountID, &k.Username, &k.Name, &k.Prefix, &k.Role,
-		&k.CreatedAt, &k.ExpiresAt, &k.LastUsedAt, &k.RevokedAt)
+		&k.CreatedAt, &k.ExpiresAt, &k.LastUsedAt, &k.RevokedAt, &k.OwnerEnabled, &ownerRole)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("scan api key: %w", err)
 	}
+	k.EffectiveRole = string(auth.Min(auth.Role(k.Role), auth.Role(ownerRole)))
 	return &k, nil
 }
 

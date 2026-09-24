@@ -131,8 +131,9 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	poolSvc := services.NewPoolService(poolRepo, proxyRepo, log)
 
 	// Initialize handlers
-	authHandler := handlers.NewAuthHandler(accountRepo, auditRepo, log, jwtSecret)
-	accessHandler := handlers.NewAccessHandler(accountRepo, apiKeyRepo, auditRepo, log)
+	passwordGuard := handlers.NewPasswordConfirmGuard(accountRepo, auditRepo, log)
+	authHandler := handlers.NewAuthHandler(accountRepo, auditRepo, passwordGuard, log, jwtSecret)
+	accessHandler := handlers.NewAccessHandler(accountRepo, apiKeyRepo, auditRepo, passwordGuard, log)
 	healthHandler := handlers.NewHealthHandler(db, proxyRepo, log)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardRepo, proxyRepo, log)
 	proxyHandler := handlers.NewProxyHandler(proxyRepo, healthChecker, log)
@@ -381,8 +382,6 @@ func (s *Server) setupRoutes() {
 			r.Post("/proxies/{id}/test", s.proxyHandler.Test)
 			r.Post("/proxies/reload", s.ReloadProxyPool)
 
-			r.Post("/sources", s.sourceHandler.Create)
-			r.Put("/sources/{id}", s.sourceHandler.Update)
 			r.Delete("/sources/{id}", s.sourceHandler.Delete)
 			r.Post("/sources/{id}/fetch", s.sourceHandler.FetchNow)
 			r.Post("/sources/enrich-geo", s.sourceHandler.EnrichGeo)
@@ -400,14 +399,20 @@ func (s *Server) setupRoutes() {
 			r.Delete("/pools/{id}/proxies", s.poolHandler.RemoveProxies)
 			r.Post("/pools/{id}/sync", s.poolHandler.Sync)
 			r.Post("/pools/{id}/health-check", s.poolHandler.HealthCheck)
-			r.Post("/pools/{id}/alert-rules", s.poolHandler.CreateAlertRule)
-			r.Put("/pools/{id}/alert-rules/{rule_id}", s.poolHandler.UpdateAlertRule)
 			r.Delete("/pools/{id}/alert-rules/{rule_id}", s.poolHandler.DeleteAlertRule)
 		})
 
-		// Settings and the audit log — admin.
+		// Settings, outbound URLs and the audit log — admin. Source list URLs
+		// and alert webhooks make the core send requests to an address of
+		// the caller's choosing (including internal ones), so only admins
+		// may set them; operators can still fetch, delete and see them
+		// (redacted).
 		r.Group(func(r chi.Router) {
 			r.Use(RequireRole(auth.RoleAdmin))
+			r.Post("/sources", s.sourceHandler.Create)
+			r.Put("/sources/{id}", s.sourceHandler.Update)
+			r.Post("/pools/{id}/alert-rules", s.poolHandler.CreateAlertRule)
+			r.Put("/pools/{id}/alert-rules/{rule_id}", s.poolHandler.UpdateAlertRule)
 			r.Put("/settings", s.settingsHandler.Update)
 			r.Post("/settings/reset", s.settingsHandler.Reset)
 			r.Post("/settings/geoip/update-db", s.settingsHandler.UpdateGeoIPDB)

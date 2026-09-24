@@ -521,9 +521,9 @@ Everyone who signs in to the dashboard or API has an **account** with one role
 
 | Role | Can |
 |---|---|
-| `viewer` | Read everything except accounts, the audit log and secrets (e.g. the MaxMind license key) |
-| `operator` | …and change proxies, sources, pools and proxy users (including export tokens) |
-| `admin` | …and change settings, manage accounts and API keys of others, read the audit log |
+| `viewer` | Read everything except accounts and the audit log; secrets in configuration (webhook and source URLs past the host, health-check header values, the MaxMind key) are shown redacted |
+| `operator` | …and change proxies, pools and proxy users (including export tokens), fetch/delete sources, delete alert rules |
+| `admin` | …and change settings, **set source and webhook URLs** (they make the core call an address of the caller's choosing), manage accounts and others' API keys, read the audit log |
 
 Role changes apply to open sessions immediately — including open live views
 (WebSockets), which re-check their credentials every 15 seconds. Disabling an
@@ -550,7 +550,8 @@ Scripts and integrations should use an **API key** instead (**Access → API
 keys**). A key is shown once, can expire, can be revoked, and acts with its own
 role capped by its owner's current role. Keys can't manage accounts, keys or
 passwords, so a leaked key can't mint new credentials, and creating a key asks
-for your password, so a stolen session token can't either. Keys are separate
+for your password, so a stolen session token can't either (five wrong
+passwords in a row sign the account out everywhere). Keys are separate
 from sessions: signing out (everywhere) or a password reset doesn't revoke
 them — revoke them explicitly if an account may be compromised; disabling or
 deleting the account stops its keys at once.

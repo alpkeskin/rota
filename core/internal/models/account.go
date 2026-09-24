@@ -42,6 +42,12 @@ type APIKey struct {
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	// OwnerEnabled is false when the owning account is disabled, which
+	// stops the key even though it isn't revoked.
+	OwnerEnabled bool `json:"owner_enabled"`
+	// EffectiveRole is the role the key acts with now: its own role capped
+	// by the owner's current role.
+	EffectiveRole string `json:"effective_role"`
 }
 
 // CreateAPIKeyRequest is the payload for POST /api/v1/api-keys.

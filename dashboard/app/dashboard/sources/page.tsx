@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react"
 import { ChevronDown } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/lib/api"
+import { useCan } from "@/lib/session"
 import { ProxySource, CreateSourceRequest } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -46,6 +47,9 @@ const DEFAULT_FORM: CreateSourceRequest = {
 }
 
 export default function SourcesPage() {
+  // Source URLs make the core fetch an address of the caller's choosing, so
+  // only admins add or edit them (the core enforces this too).
+  const canEditSources = useCan("admin")
   const [sources, setSources] = useState<ProxySource[]>([])
   const [loading, setLoading] = useState(true)
   const [fetchingId, setFetchingId] = useState<number | null>(null)
@@ -177,7 +181,7 @@ export default function SourcesPage() {
         <Button variant="outline" onClick={handleEnrichGeo} disabled={enriching}>
           {enriching ? "Resolving GeoIP…" : "Resolve GeoIP"}
         </Button>
-        <Button onClick={openCreate}>Add source</Button>
+        {canEditSources && <Button onClick={openCreate}>Add source</Button>}
       </PageHeader>
 
       <StatStrip
@@ -257,7 +261,7 @@ export default function SourcesPage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem onClick={() => handleFetch(s.id)} disabled={fetchingId === s.id}>Fetch now</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => openEdit(s)}>Edit</DropdownMenuItem>
+                        {canEditSources && <DropdownMenuItem onClick={() => openEdit(s)}>Edit</DropdownMenuItem>}
                         <DropdownMenuSeparator />
                         <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget(s)}>Delete</DropdownMenuItem>
                       </DropdownMenuContent>

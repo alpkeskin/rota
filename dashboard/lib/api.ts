@@ -174,8 +174,9 @@ class ApiClient {
   }
 
   // ── Audit log (admin) ─────────────────────────────────────────────────────
-  async getAuditLog(params: { page?: number; limit?: number; actor?: string; action?: string } = {}): Promise<AuditLogResponse> {
+  async getAuditLog(params: { page?: number; limit?: number; actor?: string; actorId?: number; action?: string } = {}): Promise<AuditLogResponse> {
     const q = new URLSearchParams()
+    if (params.actorId) q.set("actor_id", String(params.actorId))
     if (params.page) q.set("page", String(params.page))
     if (params.limit) q.set("limit", String(params.limit))
     if (params.actor) q.set("actor", params.actor)
