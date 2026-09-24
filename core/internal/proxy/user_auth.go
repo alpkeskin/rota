@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -21,15 +22,10 @@ func bcryptCompare(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
-// userChainKey is the context key that carries the resolved *PoolChain.
-type userChainKey struct{}
-
-// UserChainContextKey is exported for use in the handler.
-var UserChainContextKey = userChainKey{}
-
 // userEntry caches a resolved PoolChain and the verified password hash for a user.
 // This avoids bcrypt on every request — bcrypt only runs on first auth or after TTL expiry.
 type userEntry struct {
+	user      *models.ProxyUser
 	chain     *PoolChain
 	expiresAt time.Time
 	// passwordHash is the bcrypt hash we verified against. If the user changes their
@@ -84,52 +80,102 @@ func NewUserAuthMiddleware(
 	return m
 }
 
-// HandleRequest is called for every HTTP proxy request.
-// It reads Proxy-Authorization, looks up the user, builds a PoolChain and stores
-// it in the request context so the handler can use it.
+// AuthResult is the outcome of authorising a proxy client.
+type AuthResult int
+
+const (
+	// AuthAllowed: proceed. The ProxyRequest is set for proxy users and nil
+	// for an open proxy or the legacy single-user credentials.
+	AuthAllowed AuthResult = iota
+	// AuthRejected: missing or wrong credentials (HTTP 407).
+	AuthRejected
+	// AuthBadOptions: the username's routing options are invalid (HTTP 400);
+	// the error says why and is safe to show.
+	AuthBadOptions
+)
+
+// Authorize checks proxy credentials (hasCreds=false when none were sent)
+// and resolves the user's routing. It is shared by the HTTP proxy and the
+// SOCKS5 listener so both apply exactly the same rules:
+//   - no credentials: allowed only on a fully open proxy (no legacy auth,
+//     no proxy users) — otherwise that would be an auth bypass (AUD-1);
+//   - proxy-user credentials, optionally with routing options in the
+//     username (see ParseUsername);
+//   - otherwise the legacy single-user credentials, when enabled.
+func (m *UserAuthMiddleware) Authorize(ctx context.Context, username, password string, hasCreds bool) (*ProxyRequest, AuthResult, error) {
+	if !hasCreds {
+		if m.legacy != nil && m.legacy.IsEnabled() {
+			return nil, AuthRejected, nil
+		}
+		if m.hasProxyUsers(ctx) {
+			return nil, AuthRejected, nil
+		}
+		return nil, AuthAllowed, nil
+	}
+
+	legacyOK := func() bool { return m.legacy != nil && m.legacy.IsEnabled() && m.legacy.Check(username, password) }
+
+	opts, optErr := ParseUsername(username)
+	if optErr != nil {
+		// Legacy credentials are checked verbatim and may contain dashes.
+		if legacyOK() {
+			return nil, AuthAllowed, nil
+		}
+		return nil, AuthBadOptions, optErr
+	}
+
+	user, chain, err := m.resolve(ctx, opts.Username, password)
+	if err != nil && opts.Username != username {
+		// An account created before routing options existed may itself be
+		// named like "team-session-a"; accept it verbatim, without options.
+		if u, c, rawErr := m.resolve(ctx, username, password); rawErr == nil {
+			user, chain, err = u, c, nil
+			opts = UsernameOptions{Username: username, SessionTTL: defaultSessionTTL}
+		}
+	}
+	if err != nil {
+		m.logger.Warn("user auth failed", "username", opts.Username, "err", err)
+		// Fall back to legacy single-user auth ONLY when it is enforcing and
+		// the credentials match it (AUD-1); never allow through otherwise.
+		if legacyOK() {
+			return nil, AuthAllowed, nil
+		}
+		return nil, AuthRejected, nil
+	}
+	return &ProxyRequest{User: user, Chain: chain, Opts: opts}, AuthAllowed, nil
+}
+
+// HandleRequest is called for every HTTP proxy request. It authorises the
+// Proxy-Authorization credentials and, for proxy users, attaches the
+// resolved ProxyRequest to the request context.
 func (m *UserAuthMiddleware) HandleRequest(req *http.Request) (*http.Request, *http.Response) {
 	username, password, ok := parseProxyAuth(req)
-	if !ok {
-		// No credentials provided. Delegate to legacy single-user auth if enabled.
-		if m.legacy != nil && m.legacy.IsEnabled() {
-			if _, resp := m.legacy.HandleRequest(req); resp != nil {
-				// Legacy is enabled and demands authentication → 407.
-				return req, resp
-			}
-		}
-		// Legacy is disabled (or absent). If proxy_users are configured, an
-		// unauthenticated request must NOT be allowed through — otherwise this
-		// would be an auth bypass (AUD-1). Only a fully-unconfigured proxy (no
-		// legacy auth, no proxy_users) stays open.
-		if m.hasProxyUsers(req.Context()) {
-			return req, unauthorized()
-		}
-		return req, nil
-	}
-
-	chain, err := m.resolve(req.Context(), username, password)
-	if err != nil {
-		m.logger.Warn("user auth failed", "username", username, "err", err)
-		// Credentials were supplied but didn't match a proxy_user. Fall back to
-		// legacy single-user auth ONLY when it is actually enforcing (AUD-1):
-		// if legacy is disabled we must reject, never allow through.
-		if m.legacy != nil && m.legacy.IsEnabled() {
-			// Legacy enabled: it authoritatively accepts (nil) or rejects (407).
-			if _, resp := m.legacy.HandleRequest(req); resp != nil {
-				return req, resp
-			}
-			// legacy auth passed with these same credentials → allow without pool chain
-			return req, nil
-		}
-		// No valid auth path for these credentials → reject.
+	preq, result, err := m.Authorize(req.Context(), username, password, ok)
+	switch result {
+	case AuthRejected:
 		return req, unauthorized()
+	case AuthBadOptions:
+		return req, badProxyRequest(err.Error())
 	}
-
-	// Attach chain to context and strip the Proxy-Authorization header
-	newCtx := context.WithValue(req.Context(), UserChainContextKey, chain)
-	req = req.WithContext(newCtx)
 	req.Header.Del("Proxy-Authorization")
+	if preq != nil {
+		req = req.WithContext(WithProxyRequest(req.Context(), preq))
+	}
 	return req, nil
+}
+
+// badProxyRequest builds a 400 explaining invalid routing options.
+func badProxyRequest(msg string) *http.Response {
+	resp := &http.Response{
+		StatusCode:    http.StatusBadRequest,
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(strings.NewReader(msg + "\n")),
+		ContentLength: int64(len(msg) + 1),
+	}
+	resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	return resp
 }
 
 // HandleConnect is the same but for HTTPS CONNECT.
@@ -142,7 +188,7 @@ func (m *UserAuthMiddleware) HandleConnect(req *http.Request) (*http.Request, *h
 // On cache hits the incoming password is compared directly against the cached
 // bcrypt hash using bcrypt.CompareHashAndPassword — but this only happens once
 // per 60-second window, not on every request.
-func (m *UserAuthMiddleware) resolve(ctx context.Context, username, password string) (*PoolChain, error) {
+func (m *UserAuthMiddleware) resolve(ctx context.Context, username, password string) (*models.ProxyUser, *PoolChain, error) {
 	now := time.Now()
 
 	// ── Fast path: cache hit within TTL ──────────────────────────────────
@@ -156,31 +202,32 @@ func (m *UserAuthMiddleware) resolve(ctx context.Context, username, password str
 		// For even higher throughput, consider storing a fast HMAC of password+secret
 		// instead — but bcrypt cache is sufficient for most workloads.
 		if err := bcryptCompare(entry.verifiedPwHash, password); err != nil {
-			return nil, fmt.Errorf("invalid credentials")
+			return nil, nil, fmt.Errorf("invalid credentials")
 		}
-		return entry.chain, nil
+		return entry.user, entry.chain, nil
 	}
 
 	// ── Slow path: full DB lookup + bcrypt (runs at most once per 60s per user) ──
 	user, err := m.userRepo.Authenticate(ctx, username, password)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	chain, err := m.buildChain(ctx, user)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	m.mu.Lock()
 	m.cache[username] = userEntry{
+		user:           user,
 		chain:          chain,
 		expiresAt:      now.Add(60 * time.Second),
 		verifiedPwHash: user.PasswordHash,
 	}
 	m.mu.Unlock()
 
-	return chain, nil
+	return user, chain, nil
 }
 
 // buildChain constructs an ordered PoolChain for a user: [mainPool, ...fallbackPools].

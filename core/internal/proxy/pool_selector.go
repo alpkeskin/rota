@@ -41,7 +41,8 @@ func (ps *PoolSelector) Refresh(ctx context.Context) error {
 	rows, err := ps.db.Pool.Query(ctx, `
 		SELECT p.id, p.address, p.protocol, p.username, p.password,
 		       p.status, p.requests, p.successful_requests, p.failed_requests,
-		       p.avg_response_time, p.last_check, p.last_error, p.created_at, p.updated_at
+		       p.avg_response_time, p.last_check, p.last_error, p.created_at, p.updated_at,
+		       p.country_code, p.city_name
 		FROM proxies p
 		JOIN pool_proxies pp ON pp.proxy_id = p.id
 		WHERE pp.pool_id = $1
@@ -60,6 +61,7 @@ func (ps *PoolSelector) Refresh(ctx context.Context) error {
 			&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Password,
 			&p.Status, &p.Requests, &p.SuccessfulRequests, &p.FailedRequests,
 			&p.AvgResponseTime, &p.LastCheck, &p.LastError, &p.CreatedAt, &p.UpdatedAt,
+			&p.CountryCode, &p.CityName,
 		)
 		if err != nil {
 			return fmt.Errorf("pool selector scan: %w", err)
@@ -122,6 +124,28 @@ func (ps *PoolSelector) Select(_ context.Context) (*models.Proxy, error) {
 		ps.rrIdx = (ps.rrIdx + 1) % len(ps.proxies)
 		return p, nil
 	}
+}
+
+// Snapshot returns the pool's current proxies (a copy of the slice; the
+// proxies themselves are shared and must not be modified).
+func (ps *PoolSelector) Snapshot() []*models.Proxy {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	out := make([]*models.Proxy, len(ps.proxies))
+	copy(out, ps.proxies)
+	return out
+}
+
+// Find returns the pool's proxy with the given id, or nil.
+func (ps *PoolSelector) Find(proxyID int) *models.Proxy {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for _, p := range ps.proxies {
+		if p.ID == proxyID {
+			return p
+		}
+	}
+	return nil
 }
 
 // RemoveProxy removes a specific proxy from the in-memory list (called after failure).

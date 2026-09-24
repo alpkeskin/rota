@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/go-chi/chi/v5"
@@ -67,14 +68,27 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"username and password are required"}`, http.StatusBadRequest)
 		return
 	}
+	// "-country-", "-session-" etc. carry routing options in the proxy
+	// username, so an account named that way could never sign in.
+	if proxy.ReservedUsername(req.Username) {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{
+			Error: "username must not contain -country-, -city-, -session- or -sesstime- (they carry routing options)",
+		})
+		return
+	}
 	if req.MaxRetries <= 0 {
 		req.MaxRetries = 5
 	}
 
 	u, err := h.userRepo.Create(r.Context(), req)
 	if err != nil {
+		var verr *repository.ValidationError
+		if errors.As(err, &verr) {
+			writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: verr.Msg})
+			return
+		}
 		h.logger.Error("create user failed", "error", err)
-		http.Error(w, `{"error":"failed to create user: `+err.Error()+`"}`, http.StatusInternalServerError)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "failed to create user (is the username taken?)"})
 		return
 	}
 	writeJSON(w, http.StatusCreated, u)
@@ -93,6 +107,11 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := h.userRepo.Update(r.Context(), id, req)
+	var verr *repository.ValidationError
+	if errors.As(err, &verr) {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: verr.Msg})
+		return
+	}
 	if err != nil || u == nil {
 		http.Error(w, `{"error":"user not found or update failed"}`, http.StatusNotFound)
 		return

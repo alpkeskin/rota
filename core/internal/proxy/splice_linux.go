@@ -11,7 +11,7 @@ import (
 // trySplice attempts zero-copy transfer using Linux splice(2) syscall.
 // Returns (true, err) if splice was used, (false, nil) if caller should
 // fall back to io.Copy (e.g. non-TCP connections).
-func trySplice(dst, src net.Conn) (bool, error) {
+func trySplice(dst, src net.Conn, count func(int64)) (bool, error) {
 	// Both connections must be raw TCP to get file descriptors.
 	srcTCP, ok := src.(*net.TCPConn)
 	if !ok {
@@ -52,7 +52,7 @@ func trySplice(dst, src net.Conn) (bool, error) {
 	srcRC.Read(func(srcFD uintptr) bool {
 		// The inner Write call gives us the dst fd.
 		dstRC.Write(func(dstFD uintptr) bool {
-			spliceErr = splicePump(int(srcFD), int(dstFD), pipeR, pipeW)
+			spliceErr = splicePump(int(srcFD), int(dstFD), pipeR, pipeW, count)
 			return true
 		})
 		return true
@@ -66,7 +66,7 @@ func trySplice(dst, src net.Conn) (bool, error) {
 
 // splicePump moves data: src → pipeW → pipeR → dst using splice(2).
 // Runs until src returns EOF (n==0) or an error occurs.
-func splicePump(srcFD, dstFD, pipeR, pipeW int) error {
+func splicePump(srcFD, dstFD, pipeR, pipeW int, count func(int64)) error {
 	const spliceFlags = unix.SPLICE_F_MOVE | unix.SPLICE_F_NONBLOCK
 
 	for {
@@ -101,6 +101,9 @@ func splicePump(srcFD, dstFD, pipeR, pipeW int) error {
 				return err
 			}
 			written += int64(w)
+			if count != nil && w > 0 {
+				count(int64(w))
+			}
 		}
 	}
 }

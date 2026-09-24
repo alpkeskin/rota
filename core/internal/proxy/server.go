@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -94,6 +95,9 @@ type Server struct {
 	authMiddleware *AuthMiddleware
 	userAuthMw     *UserAuthMiddleware
 	rateLimitMw    *RateLimitMiddleware
+	accountant     *UsageAccountant
+	socks          *socksServer
+	socksPort      int
 	proxyRepo      *repository.ProxyRepository
 	settingsRepo   *repository.SettingsRepository
 	refreshTicker  *time.Ticker
@@ -138,6 +142,10 @@ func New(
 
 	// Create upstream proxy handler
 	handler := NewUpstreamProxyHandler(selector, tracker, &settings.Rotation, log)
+	// Per-user limits and bandwidth metering.
+	accountant := NewUsageAccountant(userRepo, log)
+	accountant.Start()
+	handler.accountant = accountant
 
 	// Create middlewares
 	authMiddleware := NewAuthMiddleware(settings.Authentication)
@@ -174,6 +182,7 @@ func New(
 		authMiddleware: authMiddleware,
 		userAuthMw:     userAuthMw,
 		rateLimitMw:    rateLimitMw,
+		accountant:     accountant,
 		proxyRepo:      proxyRepo,
 		settingsRepo:   settingsRepo,
 		stopChan:       make(chan struct{}),
@@ -230,7 +239,8 @@ func (s *Server) startBackgroundTasks() {
 			case <-s.cleanupTicker.C:
 				safeworker.Call(s.logger, "rate_limit_cleanup", func() {
 					s.rateLimitMw.CleanupLimiters()
-					s.logger.Debug("cleaned up rate limiters")
+					stickySessions.Sweep()
+					s.logger.Debug("cleaned up rate limiters and expired sticky sessions")
 				})
 			case <-s.stopChan:
 				return
@@ -239,9 +249,28 @@ func (s *Server) startBackgroundTasks() {
 	}()
 }
 
+// EnableSOCKS5 makes Start also listen for SOCKS5 clients on port.
+func (s *Server) EnableSOCKS5(port int) {
+	s.socksPort = port
+	s.socks = newSOCKSServer(s.userAuthMw, s.rateLimitMw, s.handler, s.logger)
+}
+
 // Start starts the proxy server
 func (s *Server) Start() error {
 	s.logger.Info("starting proxy server", "port", s.port)
+
+	if s.socks != nil {
+		l, err := net.Listen("tcp", fmt.Sprintf(":%d", s.socksPort))
+		if err != nil {
+			return fmt.Errorf("socks5 listener: %w", err)
+		}
+		s.logger.Info("starting SOCKS5 listener", "port", s.socksPort)
+		go func() {
+			if err := s.socks.Serve(l); err != nil {
+				s.logger.Error("socks5 listener stopped", "error", err)
+			}
+		}()
+	}
 
 	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("proxy server failed: %w", err)
@@ -265,8 +294,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.tracker != nil {
 		s.tracker.Stop()
 	}
-
-	return s.server.Shutdown(ctx)
+	if s.socks != nil {
+		s.socks.Close(ctx) //nolint:errcheck
+	}
+	err := s.server.Shutdown(ctx)
+	// Stop metering last, so the final flush includes the tunnels just closed.
+	if s.accountant != nil {
+		s.accountant.Stop()
+	}
+	return err
 }
 
 // ReloadSettings reloads settings from database and updates components

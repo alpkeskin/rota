@@ -46,6 +46,16 @@ func (m *AuthMiddleware) UpdateSettings(settings models.AuthenticationSettings) 
 	m.password = settings.Password
 }
 
+// Check reports whether username/password match the legacy credentials,
+// in constant time. It doesn't consider whether legacy auth is enabled.
+func (m *AuthMiddleware) Check(username, password string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(m.username))
+	passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(m.password))
+	return userMatch&passMatch == 1
+}
+
 // HandleRequest validates proxy authentication for HTTP requests
 func (m *AuthMiddleware) HandleRequest(req *http.Request) (*http.Request, *http.Response) {
 	m.mu.RLock()
@@ -159,6 +169,15 @@ func (m *RateLimitMiddleware) HandleRequest(req *http.Request) (*http.Request, *
 	}
 
 	return req, nil
+}
+
+// Allow reports whether a request from clientIP is within the limit (always
+// true when rate limiting is disabled). Used by the SOCKS5 listener.
+func (m *RateLimitMiddleware) Allow(clientIP string) bool {
+	m.mu.RLock()
+	enabled := m.enabled
+	m.mu.RUnlock()
+	return !enabled || m.allow(clientIP)
 }
 
 // HandleConnect validates rate limits for HTTPS CONNECT requests

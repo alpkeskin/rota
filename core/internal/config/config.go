@@ -13,6 +13,8 @@ import (
 type Config struct {
 	ProxyPort int
 	APIPort   int
+	// SOCKSPort, when non-zero, also serves the proxy over SOCKS5. (SOCKS_PORT)
+	SOCKSPort int
 	LogLevel  string
 	Database  DatabaseConfig
 	AdminUser string
@@ -105,6 +107,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		ProxyPort: getEnvAsInt("PROXY_PORT", 8000),
 		APIPort:   getEnvAsInt("API_PORT", 8001),
+		SOCKSPort: getEnvAsInt("SOCKS_PORT", 0),
 		LogLevel:  getEnv("LOG_LEVEL", "info"),
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
@@ -155,6 +158,14 @@ func (c *Config) Validate() error {
 	}
 	if c.ProxyPort == c.APIPort {
 		return fmt.Errorf("proxy port and API port cannot be the same: %d", c.ProxyPort)
+	}
+	if c.SOCKSPort != 0 {
+		if c.SOCKSPort < 1 || c.SOCKSPort > 65535 {
+			return fmt.Errorf("invalid SOCKS port: %d", c.SOCKSPort)
+		}
+		if c.SOCKSPort == c.ProxyPort || c.SOCKSPort == c.APIPort {
+			return fmt.Errorf("SOCKS port %d collides with the proxy or API port", c.SOCKSPort)
+		}
 	}
 
 	validLogLevels := map[string]bool{

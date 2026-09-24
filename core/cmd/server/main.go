@@ -159,6 +159,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("failed to create proxy server: %w", err)
 	}
+	if cfg.SOCKSPort > 0 {
+		proxyServer.EnableSOCKS5(cfg.SOCKSPort)
+	}
 	apiServer := api.New(cfg, log, db)
 
 	// Set proxy server reference in API server for reload functionality
