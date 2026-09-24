@@ -26,6 +26,7 @@ import {
   ProxyUser,
   CreateProxyUserRequest,
   UpdateProxyUserRequest,
+  ExportTokenResponse,
   PoolAlertRule,
   CreatePoolAlertRuleRequest,
 } from "./types"
@@ -467,6 +468,15 @@ class ApiClient {
 
   async deleteProxyUser(id: number): Promise<void> {
     return this.request(`/api/v1/proxy-users/${id}`, { method: "DELETE" })
+  }
+
+  // Issues a new export token (revoking the previous one). Shown only once.
+  async rotateProxyUserExportToken(id: number): Promise<ExportTokenResponse> {
+    return this.request(`/api/v1/proxy-users/${id}/export-token`, { method: "POST" })
+  }
+
+  async revokeProxyUserExportToken(id: number): Promise<void> {
+    return this.request(`/api/v1/proxy-users/${id}/export-token`, { method: "DELETE" })
   }
 
   // ── Pool Export ──────────────────────────────────────────────────────────

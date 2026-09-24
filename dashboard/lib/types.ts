@@ -367,8 +367,15 @@ export interface ProxyUser {
   fallback_pool_ids: number[]
   max_retries: number
   requests_per_minute: number
+  has_export_token?: boolean
+  export_token_created_at?: string
   created_at: string
   updated_at: string
+}
+
+export interface ExportTokenResponse {
+  token: string
+  created_at: string
 }
 
 export interface CreateProxyUserRequest {

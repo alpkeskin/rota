@@ -558,6 +558,21 @@ var migrations = []Migration{
 		`,
 		Down: `DROP TABLE IF EXISTS system_secrets;`,
 	},
+	{
+		Version:     26,
+		Description: "Add revocable export tokens to proxy_users",
+		Up: `
+			ALTER TABLE proxy_users ADD COLUMN IF NOT EXISTS export_token_hash TEXT;
+			ALTER TABLE proxy_users ADD COLUMN IF NOT EXISTS export_token_created_at TIMESTAMP;
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_users_export_token_hash
+				ON proxy_users(export_token_hash) WHERE export_token_hash IS NOT NULL;
+		`,
+		Down: `
+			DROP INDEX IF EXISTS idx_proxy_users_export_token_hash;
+			ALTER TABLE proxy_users DROP COLUMN IF EXISTS export_token_created_at;
+			ALTER TABLE proxy_users DROP COLUMN IF EXISTS export_token_hash;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

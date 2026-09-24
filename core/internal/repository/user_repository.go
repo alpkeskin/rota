@@ -2,7 +2,14 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/models"
@@ -27,6 +34,7 @@ func (r *UserRepository) List(ctx context.Context) ([]models.ProxyUser, error) {
 		       COALESCE(pu.allow_working_proxies_export, false),
 		       pu.main_pool_id, pu.fallback_pool_ids, pu.max_retries,
 		       COALESCE(pu.requests_per_minute, 0),
+		       pu.export_token_hash IS NOT NULL, pu.export_token_created_at,
 		       pu.created_at, pu.updated_at,
 		       COALESCE(pp.name, '') AS main_pool_name
 		FROM proxy_users pu
@@ -46,6 +54,7 @@ func (r *UserRepository) List(ctx context.Context) ([]models.ProxyUser, error) {
 			&u.ID, &u.Username, &u.Enabled, &u.AllowWorkingProxiesExport,
 			&u.MainPoolID, &u.FallbackPoolIDs, &u.MaxRetries,
 			&u.RequestsPerMinute,
+			&u.HasExportToken, &u.ExportTokenCreatedAt,
 			&u.CreatedAt, &u.UpdatedAt, &u.MainPoolName,
 		); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
@@ -63,23 +72,23 @@ func (r *UserRepository) List(ctx context.Context) ([]models.ProxyUser, error) {
 
 // GetByID returns a user by primary key (includes password_hash)
 func (r *UserRepository) GetByID(ctx context.Context, id int) (*models.ProxyUser, error) {
-	return r.scan(ctx, `SELECT id, username, password_hash, enabled,
-		COALESCE(allow_working_proxies_export, false),
-		main_pool_id, fallback_pool_ids, max_retries,
-		COALESCE(requests_per_minute, 0),
-		created_at, updated_at
-		FROM proxy_users WHERE id = $1`, id)
+	return r.scan(ctx, proxyUserSelect+`id = $1`, id)
 }
 
 // GetByUsername returns a user by username (includes password_hash — used for auth)
 func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*models.ProxyUser, error) {
-	return r.scan(ctx, `SELECT id, username, password_hash, enabled,
+	return r.scan(ctx, proxyUserSelect+`username = $1`, username)
+}
+
+// proxyUserSelect is the column list scan expects, followed by an open WHERE.
+// Keep it the single source of truth so every lookup scans the same shape.
+const proxyUserSelect = `SELECT id, username, password_hash, enabled,
 		COALESCE(allow_working_proxies_export, false),
 		main_pool_id, fallback_pool_ids, max_retries,
 		COALESCE(requests_per_minute, 0),
+		export_token_hash IS NOT NULL, export_token_created_at,
 		created_at, updated_at
-		FROM proxy_users WHERE username = $1`, username)
-}
+		FROM proxy_users WHERE `
 
 func (r *UserRepository) scan(ctx context.Context, query string, arg interface{}) (*models.ProxyUser, error) {
 	var u models.ProxyUser
@@ -87,6 +96,7 @@ func (r *UserRepository) scan(ctx context.Context, query string, arg interface{}
 		&u.ID, &u.Username, &u.PasswordHash, &u.Enabled, &u.AllowWorkingProxiesExport,
 		&u.MainPoolID, &u.FallbackPoolIDs, &u.MaxRetries,
 		&u.RequestsPerMinute,
+		&u.HasExportToken, &u.ExportTokenCreatedAt,
 		&u.CreatedAt, &u.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -199,10 +209,11 @@ func (r *UserRepository) Update(ctx context.Context, id int, req models.UpdatePr
 			updated_at                   = NOW()
 		WHERE id = $8
 		RETURNING id, username, enabled, allow_working_proxies_export, main_pool_id, fallback_pool_ids, max_retries,
-		          COALESCE(requests_per_minute, 0), created_at, updated_at
+		          COALESCE(requests_per_minute, 0), export_token_hash IS NOT NULL, export_token_created_at,
+		          created_at, updated_at
 	`, hashPtr, enabled, allowExport, mainPoolID, fallbackPoolIDs, maxRetries, requestsPerMin, id,
 	).Scan(&u.ID, &u.Username, &u.Enabled, &u.AllowWorkingProxiesExport, &u.MainPoolID, &u.FallbackPoolIDs,
-		&u.MaxRetries, &u.RequestsPerMinute, &u.CreatedAt, &u.UpdatedAt)
+		&u.MaxRetries, &u.RequestsPerMinute, &u.HasExportToken, &u.ExportTokenCreatedAt, &u.CreatedAt, &u.UpdatedAt)
 
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -225,14 +236,88 @@ func (r *UserRepository) Delete(ctx context.Context, id int) error {
 // Authenticate checks username/password and returns the user if valid.
 func (r *UserRepository) Authenticate(ctx context.Context, username, password string) (*models.ProxyUser, error) {
 	u, err := r.GetByUsername(ctx, username)
-	if err != nil || u == nil {
-		return nil, fmt.Errorf("user not found")
+	if err != nil {
+		return nil, err
 	}
-	if !u.Enabled {
-		return nil, fmt.Errorf("user disabled")
+	if u == nil || !u.Enabled {
+		return nil, ErrInvalidCredentials
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
-		return nil, fmt.Errorf("invalid password")
+		return nil, ErrInvalidCredentials
+	}
+	return u, nil
+}
+
+// ExportTokenPrefix marks working-proxies export tokens so they are easy to
+// recognise in configs and secret scanners.
+const ExportTokenPrefix = "rota_exp_"
+
+// ErrUserNotFound is returned when the target proxy user does not exist.
+var ErrUserNotFound = errors.New("user not found")
+
+// ErrInvalidCredentials is returned when credentials or an export token don't
+// match an enabled user. Any other error from the Authenticate* methods is an
+// infrastructure failure (e.g. the database is unavailable).
+var ErrInvalidCredentials = errors.New("invalid credentials")
+
+func hashExportToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// RotateExportToken issues a new export token for the user, replacing (and so
+// revoking) any previous one. Only a SHA-256 hash is stored; the plaintext
+// token is returned to the caller exactly once.
+func (r *UserRepository) RotateExportToken(ctx context.Context, id int) (string, time.Time, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", time.Time{}, fmt.Errorf("generate export token: %w", err)
+	}
+	token := ExportTokenPrefix + base64.RawURLEncoding.EncodeToString(buf)
+
+	var createdAt time.Time
+	err := r.db.Pool.QueryRow(ctx, `
+		UPDATE proxy_users
+		SET export_token_hash = $1, export_token_created_at = NOW(), updated_at = NOW()
+		WHERE id = $2
+		RETURNING export_token_created_at
+	`, hashExportToken(token), id).Scan(&createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", time.Time{}, ErrUserNotFound
+	}
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("store export token: %w", err)
+	}
+	return token, createdAt, nil
+}
+
+// RevokeExportToken removes the user's export token.
+func (r *UserRepository) RevokeExportToken(ctx context.Context, id int) error {
+	tag, err := r.db.Pool.Exec(ctx, `
+		UPDATE proxy_users
+		SET export_token_hash = NULL, export_token_created_at = NULL, updated_at = NOW()
+		WHERE id = $1
+	`, id)
+	if err != nil {
+		return fmt.Errorf("revoke export token: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// AuthenticateExportToken resolves an export token to its enabled user.
+func (r *UserRepository) AuthenticateExportToken(ctx context.Context, token string) (*models.ProxyUser, error) {
+	if !strings.HasPrefix(token, ExportTokenPrefix) {
+		return nil, ErrInvalidCredentials
+	}
+	u, err := r.scan(ctx, proxyUserSelect+`export_token_hash = $1`, hashExportToken(token))
+	if err != nil {
+		return nil, err
+	}
+	if u == nil || !u.Enabled {
+		return nil, ErrInvalidCredentials
 	}
 	return u, nil
 }
