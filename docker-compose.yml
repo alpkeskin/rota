@@ -53,6 +53,7 @@ services:
       - ROTA_ENCRYPTION_KEY=${ROTA_ENCRYPTION_KEY:-}
       - ROTA_ENCRYPTION_KEYS_PREVIOUS=${ROTA_ENCRYPTION_KEYS_PREVIOUS:-}
       - METRICS_TOKEN=${METRICS_TOKEN:-}
+      - AUDIT_LOG_RETENTION_DAYS=${AUDIT_LOG_RETENTION_DAYS:-365}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-*}
       # The core sits behind Caddy, so trust its X-Forwarded-For for the login
       # rate limiter's per-IP tracking. Set to false only if you expose the API

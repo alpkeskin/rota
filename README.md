@@ -129,7 +129,8 @@ server's IP.
 
 > First-boot credentials are seeded once. Leave `ROTA_ADMIN_PASSWORD` unset to
 > get a strong random password (shown in the logs), or set it in `.env` to pick
-> your own. Change it anytime via **Settings → Admin account**.
+> your own. Change it anytime via **Settings → Your account**, and add more
+> accounts under **Access → Accounts**.
 
 `make help` lists the shortcuts: `up`, `build`, `down`, `restart`, `logs`, `ps`,
 `password`, `dev-core`, `dev-dashboard`.
@@ -145,6 +146,7 @@ only to change something. The common knobs:
 | `ROTA_ADMIN_PASSWORD` | _(random)_ | Initial admin password; blank → generated & logged |
 | `ROTA_ADMIN_USER` | `admin` | Initial dashboard username (seeded once) |
 | `JWT_SECRET` | _(generated, stored in DB)_ | Dashboard session signing key. Leave unset; set only to manage rotation yourself (changing it logs everyone out) |
+| `AUDIT_LOG_RETENTION_DAYS` | `365` | How long audit log entries are kept; `0` keeps them forever |
 | `PROXY_PORT` | `8000` | Host port for the proxy your clients connect to |
 | `HTTP_PORT` / `HTTPS_PORT` | `80` / `443` | Web entry ports (Caddy) |
 | `DB_PASSWORD` | `rota_password` | TimescaleDB password |
@@ -158,7 +160,7 @@ only to change something. The common knobs:
 See `.env.example` for the full list including auth brute-force protection.
 
 > **Note**: `ROTA_ADMIN_USER` / `ROTA_ADMIN_PASSWORD` are only used when the
-> database is empty (first start). Afterwards, use **Settings → Admin account**.
+> database is empty (first start). Afterwards, manage accounts under **Access**.
 
 ### Encryption at rest
 
@@ -510,19 +512,55 @@ A user can only export its own pools (main + fallbacks); any other pool returns 
 
 ---
 
-## 🔐 API Authentication
+## 🔐 Access Control
 
-All API endpoints require a JWT bearer token obtained from `POST /api/v1/auth/login`.
+### Accounts and roles
+
+Everyone who signs in to the dashboard or API has an **account** with one role
+(**Access → Accounts**, admins only). Roles are cumulative:
+
+| Role | Can |
+|---|---|
+| `viewer` | Read everything except accounts, the audit log and secrets (e.g. the MaxMind license key) |
+| `operator` | …and change proxies, sources, pools and proxy users (including export tokens) |
+| `admin` | …and change settings, manage accounts and API keys of others, read the audit log |
+
+Role changes apply to open sessions immediately. Disabling an account or
+resetting its password signs it out everywhere, and anyone can **Sign out
+everywhere** from the account menu. At least one enabled admin always remains:
+the last one can't be demoted, disabled or deleted.
+
+> Upgrading from a version without accounts: the existing admin login becomes
+> an `admin` account, and open dashboard sessions must sign in once more.
+
+### Sessions and API keys
+
+Interactive use signs in for a 24-hour session token:
 
 ```bash
-# Login
 TOKEN=$(curl -s -X POST http://localhost/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"yourpassword"}' | jq -r '.token')
 
-# Use token
 curl -H "Authorization: Bearer $TOKEN" http://localhost/api/v1/proxies
 ```
+
+Scripts and integrations should use an **API key** instead (**Access → API
+keys**). A key is shown once, can expire, can be revoked, and acts with its own
+role capped by its owner's current role. Keys can't manage accounts, keys or
+passwords, so a leaked key can't mint new credentials.
+
+```bash
+curl -H "Authorization: Bearer rota_key_..." http://localhost/api/v1/proxies
+```
+
+### Audit log
+
+Every change made through the API — who, what route, which ids, the result and
+the client IP — is recorded, including requests refused for lack of a role,
+sign-in attempts and bulk exports. Admins browse it under **Access → Audit
+log** or `GET /api/v1/audit-log?actor=&action=&from=&to=&page=`. Request bodies
+are never stored. Entries are kept for `AUDIT_LOG_RETENTION_DAYS` (365).
 
 Public endpoints (no token required):
 - `GET /health`, `GET /livez`, `GET /readyz`
