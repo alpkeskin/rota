@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -159,13 +160,23 @@ type SourceService struct {
 	proxyRepo  *repository.ProxyRepository
 	poolRepo   *repository.PoolRepository
 	geoSvc     *GeoIPService
+	geoQueue   *geoQueue
 	tester     ProxyTester // optional: auto health-check after import
 	logger     *logger.Logger
 	client     *http.Client
 
+	// syncPoolsFunc, when set, overrides syncAllPools (test hook for
+	// observing the post-geo pool re-sync).
+	syncPoolsFunc func(ctx context.Context)
+
 	mu       sync.Mutex
 	fetching bool // guarded by mu: true while a fetchDueSources batch is running
 	stopCh   chan struct{}
+
+	// geoSyncMu guards geoSyncLast: re-sync of auto pools after a geo batch
+	// is throttled to at most once every 5 minutes.
+	geoSyncMu   sync.Mutex
+	geoSyncLast time.Time
 }
 
 // NewSourceService creates a new SourceService.
@@ -181,6 +192,7 @@ func NewSourceService(
 		proxyRepo:  proxyRepo,
 		poolRepo:   poolRepo,
 		geoSvc:     geoSvc,
+		geoQueue:   newGeoQueue(),
 		logger:     log,
 		client:     &http.Client{Timeout: 30 * time.Second},
 		stopCh:     make(chan struct{}),
@@ -192,7 +204,8 @@ func (s *SourceService) SetHealthChecker(t ProxyTester) {
 	s.tester = t
 }
 
-// Start runs a background goroutine that checks for due sources every minute.
+// Start runs a background goroutine that checks for due sources every
+// minute, plus the geo enrichment worker.
 func (s *SourceService) Start(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
@@ -210,6 +223,158 @@ func (s *SourceService) Start(ctx context.Context) {
 			}
 		}
 	}()
+	s.StartGeoWorker(ctx)
+}
+
+// StartGeoWorker runs the single geo enrichment consumer. Every 300 ms it
+// drains the in-memory queue (falling back to the DB backlog when the queue
+// is empty), resolves geo data via the GeoIPService, and writes the results
+// back to the DB.
+func (s *SourceService) StartGeoWorker(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(300 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				safeworker.Call(s.logger, "geo_enrich", func() {
+					s.geoWorkerTick(ctx)
+				})
+			case <-ctx.Done():
+				s.logger.Info("geo enrichment worker stopped")
+				return
+			}
+		}
+	}()
+}
+
+// geoWorkerTick is one pass of the geo enrichment worker.
+func (s *SourceService) geoWorkerTick(ctx context.Context) {
+	// 1. Collect addresses: in-memory queue first, then the DB backlog.
+	// The drain size is provider-aware: the local MaxMind DB is drained
+	// faster (LocalBatchSize) than the external ip-api (BatchSize).
+	drainSize := s.geoSvc.DrainBatchSize()
+	addresses := s.geoQueue.Drain(drainSize)
+	if len(addresses) == 0 {
+		addresses = s.drainGeoBacklog(ctx, drainSize)
+	}
+
+	// 2. Refresh the queue-state metrics (in-memory depth + DB backlog).
+	dbBacklog := s.countGeoBacklog(ctx)
+	s.geoSvc.SetQueueState(s.geoQueue.Len(), dbBacklog)
+
+	if len(addresses) == 0 {
+		return
+	}
+
+	// 3. Normalize and dedupe by IP (ip -> address). Addresses that cannot
+	// be looked up (unparseable, reserved) are marked processed so they stop
+	// matching the DB backlog query — otherwise they are re-drained every
+	// tick forever.
+	ipToAddr := make(map[string]string, len(addresses))
+	var ips []netip.Addr
+	var skipped []string
+	for _, addr := range addresses {
+		ip, reason := ExtractPublicIP(addr)
+		if reason != "" {
+			skipped = append(skipped, addr)
+			continue
+		}
+		key := ip.String()
+		if _, seen := ipToAddr[key]; !seen {
+			ipToAddr[key] = addr
+			ips = append(ips, ip)
+		}
+	}
+	if len(skipped) > 0 {
+		s.markGeoSkipped(ctx, skipped)
+	}
+	if len(ips) == 0 {
+		return
+	}
+
+	// 4. Enrich.
+	updated, failures, err := s.geoSvc.EnrichBatch(ctx, ips)
+	if err != nil {
+		s.logger.Warn("geo batch failed", "ips", len(ips), "error", err)
+	}
+
+	// 5. Persist successes (keyed by address).
+	geoByAddr := make(map[string]models.GeoInfo, len(updated))
+	for ip, geo := range updated {
+		if addr, ok := ipToAddr[ip]; ok {
+			geoByAddr[addr] = geo
+		}
+	}
+	if n := s.updateGeo(ctx, geoByAddr); n > 0 {
+		s.geoSvc.RecordIPsUpdated(n)
+		s.scheduleGeoPoolSync(ctx)
+	}
+
+	for _, f := range failures {
+		// Retryable failures stay in the DB backlog and come back on a
+		// later drain; permanent ones are logged for visibility.
+		s.logger.Warn("geo enrichment failed for ip",
+			"ip", f.IP, "reason", f.Reason, "retryable", f.Retryable)
+	}
+
+	s.logger.Info("geo batch processed",
+		"addresses", len(addresses),
+		"ips", len(ips),
+		"updated", len(geoByAddr),
+		"failed", len(failures),
+		"db_backlog", dbBacklog,
+	)
+}
+
+// drainGeoBacklog pulls up to limit addresses without geo data from the DB —
+// the restart-safe fallback when the in-memory queue is empty.
+func (s *SourceService) drainGeoBacklog(ctx context.Context, limit int) []string {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
+		`SELECT address FROM proxies WHERE country_code IS NULL AND geo_updated_at IS NULL LIMIT $1`, limit)
+	if err != nil {
+		s.logger.Warn("geo backlog drain query failed", "error", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var addresses []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			continue
+		}
+		addresses = append(addresses, addr)
+	}
+	return addresses
+}
+
+// countGeoBacklog counts proxies without geo data (the work still to do).
+func (s *SourceService) countGeoBacklog(ctx context.Context) int {
+	var n int
+	err := s.proxyRepo.GetDB().Pool.QueryRow(ctx,
+		`SELECT COUNT(*)::int FROM proxies WHERE country_code IS NULL`).Scan(&n)
+	if err != nil {
+		s.logger.Warn("failed to count geo backlog", "error", err)
+		return 0
+	}
+	return n
+}
+
+// scheduleGeoPoolSync re-syncs auto pools after a geo batch changed rows,
+// throttled to at most once every 5 minutes.
+func (s *SourceService) scheduleGeoPoolSync(ctx context.Context) {
+	s.geoSyncMu.Lock()
+	if time.Since(s.geoSyncLast) < 5*time.Minute {
+		s.geoSyncMu.Unlock()
+		return
+	}
+	s.geoSyncLast = time.Now()
+	s.geoSyncMu.Unlock()
+	go s.syncAllPools(ctx)
 }
 
 // FetchNow fetches a single source immediately (called from API handler).
@@ -270,6 +435,10 @@ func (s *SourceService) fetchDueSources(ctx context.Context) {
 
 // syncAllPools re-syncs all auto_sync pools — called after a fetch batch completes
 func (s *SourceService) syncAllPools(ctx context.Context) {
+	if s.syncPoolsFunc != nil {
+		s.syncPoolsFunc(ctx)
+		return
+	}
 	synced, err := s.poolRepo.SyncAllAutoSyncPools(ctx)
 	if err != nil {
 		s.logger.Error("auto pool sync after fetch failed", "error", err)
@@ -346,8 +515,12 @@ func (s *SourceService) fetchAndImport(ctx context.Context, src *models.ProxySou
 		}
 	}
 
-	// Enrich geo data in the background
-	go s.enrichGeo(context.Background(), addresses)
+	// Queue geo enrichment — the geo worker drains it (and the DB backlog)
+	// in the background under the ip-api rate limit.
+	if queued := s.geoQueue.Enqueue(addresses); queued > 0 {
+		s.logger.Info("geo enrichment queued",
+			"source_id", src.ID, "added", queued, "queue_len", s.geoQueue.Len())
+	}
 
 	return created, total, nil
 }
@@ -369,16 +542,14 @@ func (s *SourceService) bulkUpsert(ctx context.Context, proxies []models.CreateP
 	return created, failed
 }
 
-// enrichGeo fetches geo data for the given addresses and updates the DB.
-func (s *SourceService) enrichGeo(ctx context.Context, addresses []string) {
-	if len(addresses) == 0 {
-		return
-	}
-	geos := s.geoSvc.EnrichProxies(ctx, addresses)
+// updateGeo writes geo data for the given addresses to the DB.
+// Returns the number of rows written.
+func (s *SourceService) updateGeo(ctx context.Context, geos map[string]models.GeoInfo) int {
 	if len(geos) == 0 {
-		return
+		return 0
 	}
 
+	updated := 0
 	for addr, geo := range geos {
 		if _, err := s.proxyRepo.GetDB().Pool.Exec(ctx, `
 			UPDATE proxies SET
@@ -395,14 +566,33 @@ func (s *SourceService) enrichGeo(ctx context.Context, addresses []string) {
 			geo.Latitude, geo.Longitude, geo.ISP, addr,
 		); err != nil {
 			s.logger.Warn("failed to update geo for proxy", "address", addr, "error", err)
+		} else {
+			updated++
+		}
+	}
+	return updated
+}
+
+// markGeoSkipped stamps addresses that can never be enriched (unparseable or
+// reserved IPs) with geo_updated_at so they leave the DB backlog.
+func (s *SourceService) markGeoSkipped(ctx context.Context, addresses []string) {
+	for _, addr := range addresses {
+		if _, err := s.proxyRepo.GetDB().Pool.Exec(ctx,
+			`UPDATE proxies SET geo_updated_at = NOW()
+			 WHERE address = $1 AND geo_updated_at IS NULL`, addr,
+		); err != nil {
+			s.logger.Warn("failed to mark geo-skipped proxy", "address", addr, "error", err)
 		}
 	}
 }
 
-// EnrichAll re-runs geo enrichment for all proxies that have no geo data yet.
+// EnrichAll queues geo enrichment for all proxies that have no geo data yet
+// (no LIMIT — the whole backlog). It returns the number of addresses placed
+// in the queue; the geo worker processes them in the background under the
+// ip-api rate limit and re-syncs auto pools as rows get geo data.
 func (s *SourceService) EnrichAll(ctx context.Context) (int, error) {
 	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
-		`SELECT address FROM proxies WHERE country_code IS NULL LIMIT 500`)
+		`SELECT address FROM proxies WHERE country_code IS NULL`)
 	if err != nil {
 		return 0, err
 	}
@@ -416,35 +606,13 @@ func (s *SourceService) EnrichAll(ctx context.Context) (int, error) {
 		}
 		addresses = append(addresses, addr)
 	}
-	rows.Close()
 
-	if len(addresses) == 0 {
-		return 0, nil
+	queued := s.geoQueue.Enqueue(addresses)
+	if queued > 0 {
+		s.logger.Info("geo enrichment queued from EnrichAll",
+			"queued", queued, "queue_len", s.geoQueue.Len())
 	}
-
-	geos := s.geoSvc.EnrichProxies(ctx, addresses)
-	for addr, geo := range geos {
-		if _, err := s.proxyRepo.GetDB().Pool.Exec(ctx, `
-			UPDATE proxies SET
-				country_code   = $1,
-				country_name   = $2,
-				region_name    = $3,
-				city_name      = $4,
-				latitude       = $5,
-				longitude      = $6,
-				isp            = $7,
-				geo_updated_at = NOW()
-			WHERE address = $8
-		`, geo.CountryCode, geo.CountryName, geo.RegionName, geo.CityName,
-			geo.Latitude, geo.Longitude, geo.ISP, addr); err != nil {
-			s.logger.Warn("failed to update geo for proxy (EnrichAll)", "address", addr, "error", err)
-		}
-	}
-
-	// Re-sync pools now that geo data has changed
-	go s.syncAllPools(context.Background())
-
-	return len(geos), nil
+	return queued, nil
 }
 
 // Bounds on how much we're willing to read from a single (possibly hostile)

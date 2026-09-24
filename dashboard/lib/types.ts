@@ -90,6 +90,17 @@ export interface SystemMetrics {
     mem_alloc: number
     mem_sys: number
   }
+  // Optional background-pipeline sections (omitted by the API when the
+  // corresponding provider is not wired)
+  geo?: {
+    provider?: string
+    queue_pending: number
+    queued_in_memory: number
+    batch_requests_last_minute: number
+    batch_requests_limit: number
+    usage_percent_1m: number
+    ips_updated_last_10m: number
+  } | null
 }
 
 export interface Settings {
