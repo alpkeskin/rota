@@ -62,6 +62,41 @@ var (
 		Help:      "CONNECT tunnels closed, by result (clean or error).",
 	}, []string{"result"})
 
+	// CircuitOpen is the number of upstream proxies whose circuit is open
+	// (skipped after repeated live-traffic failures).
+	CircuitOpen = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: "proxy",
+		Name:      "circuit_open",
+		Help:      "Upstream proxies currently skipped by the circuit breaker.",
+	})
+
+	// CircuitTransitions counts breaker state changes (to: open | closed).
+	CircuitTransitions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "proxy",
+		Name:      "circuit_transitions_total",
+		Help:      "Circuit breaker transitions, by the state entered.",
+	}, []string{"to"})
+
+	// Bytes counts proxied payload bytes. direction: up (client→upstream) |
+	// down (upstream→client).
+	Bytes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "proxy",
+		Name:      "bytes_total",
+		Help:      "Proxied payload bytes, by direction.",
+	}, []string{"direction"})
+
+	// LimitRejections counts requests refused by per-user limits.
+	// reason: rate_limit | quota | concurrency.
+	LimitRejections = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "proxy",
+		Name:      "limit_rejections_total",
+		Help:      "Requests refused by per-user limits, by reason.",
+	}, []string{"reason"})
+
 	// APIRequests counts REST API requests by route pattern (not raw path, to
 	// keep cardinality bounded), method and status code.
 	APIRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -95,6 +130,10 @@ func init() {
 		ProxyRequestDuration,
 		ActiveTunnels,
 		TunnelsClosed,
+		CircuitOpen,
+		CircuitTransitions,
+		Bytes,
+		LimitRejections,
 		APIRequests,
 		APIRequestDuration,
 		buildInfo,
