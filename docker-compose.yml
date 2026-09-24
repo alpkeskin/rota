@@ -22,19 +22,16 @@ services:
       rota-core:
         condition: service_healthy
 
+  # 1. Main instance dedicated ONLY to Dashboard and REST API (connected to Caddy)
   rota-core:
     build:
       context: ./core
       dockerfile: Dockerfile
     container_name: rota-core
     restart: unless-stopped
-    ports:
-      # The proxy itself is the product — keep it reachable on the host.
-      # The REST API (8001) is internal only; reach it via Caddy at /api.
-      # The container-side port must match PROXY_PORT (the core binds to it).
-      - "${PROXY_PORT:-8000}:${PROXY_PORT:-8000}"
+    # Internal ports only; HTTP/WebSocket traffic is routed through Caddy container
     environment:
-      - PROXY_PORT=${PROXY_PORT:-8000}
+      - PROXY_PORT=8000
       - API_PORT=8001
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - DB_HOST=${DB_HOST:-timescaledb}
@@ -44,28 +41,13 @@ services:
       - DB_NAME=${DB_NAME:-rota}
       - DB_SSLMODE=${DB_SSLMODE:-disable}
       - ROTA_ADMIN_USER=${ROTA_ADMIN_USER:-admin}
-      # Leave empty to auto-generate a strong password on first boot (printed in
-      # the core logs). Set it in .env to choose your own.
       - ROTA_ADMIN_PASSWORD=${ROTA_ADMIN_PASSWORD:-}
-      # Optional; unset = generated once and persisted in the DB.
-      - JWT_SECRET=${JWT_SECRET:-}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-*}
-      # The core sits behind Caddy, so trust its X-Forwarded-For for the login
-      # rate limiter's per-IP tracking. Set to false only if you expose the API
-      # directly without a trusted reverse proxy (AUD-20).
       - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-true}
     networks:
       - rota-network
     healthcheck:
-      test:
-        [
-          "CMD",
-          "wget",
-          "--no-verbose",
-          "--tries=1",
-          "--spider",
-          "http://localhost:8001/health",
-        ]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8001/health"]
       interval: 30s
       timeout: 3s
       start_period: 5s
@@ -74,26 +56,41 @@ services:
       timescaledb:
         condition: service_healthy
 
-  rota-dashboard:
+  # 2. Isolated worker instance dedicated ONLY to handling your Python script load
+  rota-proxy-worker:
     build:
-      context: ./dashboard
+      context: ./core
       dockerfile: Dockerfile
-      args:
-        # Empty → the dashboard calls the API same-origin through Caddy.
-        # No rebuild needed when your host/domain changes.
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
-        - NEXT_PUBLIC_PROXY_PORT=${PROXY_PORT:-8000}
-    container_name: rota-dashboard
+    container_name: rota-proxy-worker
     restart: unless-stopped
-    # No host port — the dashboard is served through Caddy.
+    ports:
+      # Target your high-concurrency Python scripts to this port
+      - "${PROXY_PORT:-8000}:${PROXY_PORT:-8000}"
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
-      - NEXT_PUBLIC_PROXY_PORT=${PROXY_PORT:-8000}
+      - PROXY_PORT=${PROXY_PORT:-8000}
+      - API_PORT=8002 # Shift internal API port to avoid port collision inside network
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - DB_HOST=${DB_HOST:-timescaledb} # Shared database, synced automatically
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_USER=${DB_USER:-rota}
+      - DB_PASSWORD=${DB_PASSWORD:-rota_password}
+      - DB_NAME=${DB_NAME:-rota}
+      - DB_SSLMODE=${DB_SSLMODE:-disable}
+      - ROTA_ADMIN_USER=${ROTA_ADMIN_USER:-admin}
+      - ROTA_ADMIN_PASSWORD=${ROTA_ADMIN_PASSWORD:-}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-*}
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-false} # Direct connection bypassing reverse proxy
+    ulimits:
+      # Crucial: boost maximum open file descriptors to handle thousands of concurrent TCP sockets
+      nofile:
+        soft: 65535
+        hard: 65535
     networks:
       - rota-network
     depends_on:
-      rota-core:
+      timescaledb:
         condition: service_healthy
+
 
   timescaledb:
     image: timescale/timescaledb:2.22.1-pg17
