@@ -34,6 +34,9 @@ func (r *UserRepository) List(ctx context.Context) ([]models.ProxyUser, error) {
 		       COALESCE(pu.allow_working_proxies_export, false),
 		       pu.main_pool_id, pu.fallback_pool_ids, pu.max_retries,
 		       COALESCE(pu.requests_per_minute, 0),
+		       pu.monthly_bandwidth_limit_bytes, pu.max_concurrent_connections,
+		       COALESCE((SELECT b.bytes_up + b.bytes_down FROM proxy_user_bandwidth b
+		                 WHERE b.user_id = pu.id AND b.month = date_trunc('month', NOW() AT TIME ZONE 'UTC')::date), 0),
 		       pu.export_token_hash IS NOT NULL, pu.export_token_created_at,
 		       pu.created_at, pu.updated_at,
 		       COALESCE(pp.name, '') AS main_pool_name
@@ -54,6 +57,7 @@ func (r *UserRepository) List(ctx context.Context) ([]models.ProxyUser, error) {
 			&u.ID, &u.Username, &u.Enabled, &u.AllowWorkingProxiesExport,
 			&u.MainPoolID, &u.FallbackPoolIDs, &u.MaxRetries,
 			&u.RequestsPerMinute,
+			&u.MonthlyBandwidthLimitBytes, &u.MaxConcurrentConnections, &u.BandwidthUsedBytes,
 			&u.HasExportToken, &u.ExportTokenCreatedAt,
 			&u.CreatedAt, &u.UpdatedAt, &u.MainPoolName,
 		); err != nil {
@@ -86,6 +90,7 @@ const proxyUserSelect = `SELECT id, username, password_hash, enabled,
 		COALESCE(allow_working_proxies_export, false),
 		main_pool_id, fallback_pool_ids, max_retries,
 		COALESCE(requests_per_minute, 0),
+		monthly_bandwidth_limit_bytes, max_concurrent_connections,
 		export_token_hash IS NOT NULL, export_token_created_at,
 		created_at, updated_at
 		FROM proxy_users WHERE `
@@ -96,6 +101,7 @@ func (r *UserRepository) scan(ctx context.Context, query string, arg interface{}
 		&u.ID, &u.Username, &u.PasswordHash, &u.Enabled, &u.AllowWorkingProxiesExport,
 		&u.MainPoolID, &u.FallbackPoolIDs, &u.MaxRetries,
 		&u.RequestsPerMinute,
+		&u.MonthlyBandwidthLimitBytes, &u.MaxConcurrentConnections,
 		&u.HasExportToken, &u.ExportTokenCreatedAt,
 		&u.CreatedAt, &u.UpdatedAt,
 	)
@@ -127,29 +133,33 @@ func (r *UserRepository) Create(ctx context.Context, req models.CreateProxyUserR
 		fbIDs = []int{}
 	}
 
-	var u models.ProxyUser
+	if req.RequestsPerMinute < 0 || req.MonthlyBandwidthLimitBytes < 0 || req.MaxConcurrentConnections < 0 {
+		return nil, invalid("limits must not be negative (0 = unlimited)")
+	}
+
+	var id int
 	err = r.db.Pool.QueryRow(ctx, `
-		INSERT INTO proxy_users (username, password_hash, enabled, allow_working_proxies_export, main_pool_id, fallback_pool_ids, max_retries, requests_per_minute)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, username, enabled, allow_working_proxies_export, main_pool_id, fallback_pool_ids, max_retries,
-		          COALESCE(requests_per_minute, 0), created_at, updated_at
-	`, req.Username, string(hash), req.Enabled, req.AllowWorkingProxiesExport, req.MainPoolID, fbIDs, maxRetries, req.RequestsPerMinute,
-	).Scan(&u.ID, &u.Username, &u.Enabled, &u.AllowWorkingProxiesExport, &u.MainPoolID, &u.FallbackPoolIDs,
-		&u.MaxRetries, &u.RequestsPerMinute, &u.CreatedAt, &u.UpdatedAt)
+		INSERT INTO proxy_users (username, password_hash, enabled, allow_working_proxies_export, main_pool_id, fallback_pool_ids,
+		                         max_retries, requests_per_minute, monthly_bandwidth_limit_bytes, max_concurrent_connections)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id
+	`, req.Username, string(hash), req.Enabled, req.AllowWorkingProxiesExport, req.MainPoolID, fbIDs, maxRetries,
+		req.RequestsPerMinute, req.MonthlyBandwidthLimitBytes, req.MaxConcurrentConnections,
+	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
 	}
-	if u.FallbackPoolIDs == nil {
-		u.FallbackPoolIDs = []int{}
-	}
-	return &u, nil
+	return r.GetByID(ctx, id)
 }
 
 // Update modifies an existing user
 func (r *UserRepository) Update(ctx context.Context, id int, req models.UpdateProxyUserRequest) (*models.ProxyUser, error) {
 	current, err := r.GetByID(ctx, id)
-	if err != nil || current == nil {
-		return nil, fmt.Errorf("user not found: %w", err)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, nil
 	}
 
 	enabled := current.Enabled
@@ -185,6 +195,17 @@ func (r *UserRepository) Update(ctx context.Context, id int, req models.UpdatePr
 	if req.RequestsPerMinute != nil {
 		requestsPerMin = *req.RequestsPerMinute
 	}
+	bandwidthLimit := current.MonthlyBandwidthLimitBytes
+	if req.MonthlyBandwidthLimitBytes != nil {
+		bandwidthLimit = *req.MonthlyBandwidthLimitBytes
+	}
+	maxConns := current.MaxConcurrentConnections
+	if req.MaxConcurrentConnections != nil {
+		maxConns = *req.MaxConcurrentConnections
+	}
+	if requestsPerMin < 0 || bandwidthLimit < 0 || maxConns < 0 {
+		return nil, invalid("limits must not be negative (0 = unlimited)")
+	}
 
 	var hashPtr *string
 	if req.Password != "" {
@@ -196,35 +217,56 @@ func (r *UserRepository) Update(ctx context.Context, id int, req models.UpdatePr
 		hashPtr = &s
 	}
 
-	var u models.ProxyUser
-	err = r.db.Pool.QueryRow(ctx, `
+	tag, err := r.db.Pool.Exec(ctx, `
 		UPDATE proxy_users SET
-			password_hash                = CASE WHEN $1::TEXT IS NOT NULL THEN $1 ELSE password_hash END,
-			enabled                      = $2,
-			allow_working_proxies_export = $3,
-			main_pool_id                 = $4,
-			fallback_pool_ids            = $5,
-			max_retries                  = $6,
-			requests_per_minute          = $7,
-			updated_at                   = NOW()
-		WHERE id = $8
-		RETURNING id, username, enabled, allow_working_proxies_export, main_pool_id, fallback_pool_ids, max_retries,
-		          COALESCE(requests_per_minute, 0), export_token_hash IS NOT NULL, export_token_created_at,
-		          created_at, updated_at
-	`, hashPtr, enabled, allowExport, mainPoolID, fallbackPoolIDs, maxRetries, requestsPerMin, id,
-	).Scan(&u.ID, &u.Username, &u.Enabled, &u.AllowWorkingProxiesExport, &u.MainPoolID, &u.FallbackPoolIDs,
-		&u.MaxRetries, &u.RequestsPerMinute, &u.HasExportToken, &u.ExportTokenCreatedAt, &u.CreatedAt, &u.UpdatedAt)
-
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
+			password_hash                 = CASE WHEN $1::TEXT IS NOT NULL THEN $1 ELSE password_hash END,
+			enabled                       = $2,
+			allow_working_proxies_export  = $3,
+			main_pool_id                  = $4,
+			fallback_pool_ids             = $5,
+			max_retries                   = $6,
+			requests_per_minute           = $7,
+			monthly_bandwidth_limit_bytes = $8,
+			max_concurrent_connections    = $9,
+			updated_at                    = NOW()
+		WHERE id = $10
+	`, hashPtr, enabled, allowExport, mainPoolID, fallbackPoolIDs, maxRetries, requestsPerMin, bandwidthLimit, maxConns, id)
 	if err != nil {
 		return nil, fmt.Errorf("update user: %w", err)
 	}
-	if u.FallbackPoolIDs == nil {
-		u.FallbackPoolIDs = []int{}
+	if tag.RowsAffected() == 0 {
+		return nil, nil
 	}
-	return &u, nil
+	return r.GetByID(ctx, id)
+}
+
+// AddBandwidth adds proxied bytes to a user's total for the month starting
+// at month (UTC). Usage for users deleted meanwhile is dropped.
+func (r *UserRepository) AddBandwidth(ctx context.Context, userID int, month time.Time, up, down int64) error {
+	_, err := r.db.Pool.Exec(ctx, `
+		INSERT INTO proxy_user_bandwidth (user_id, month, bytes_up, bytes_down)
+		SELECT $1, $2::date, $3, $4 WHERE EXISTS (SELECT 1 FROM proxy_users WHERE id = $1)
+		ON CONFLICT (user_id, month) DO UPDATE SET
+			bytes_up   = proxy_user_bandwidth.bytes_up + EXCLUDED.bytes_up,
+			bytes_down = proxy_user_bandwidth.bytes_down + EXCLUDED.bytes_down,
+			updated_at = NOW()
+	`, userID, month.UTC().Format("2006-01-02"), up, down)
+	if err != nil {
+		return fmt.Errorf("add bandwidth: %w", err)
+	}
+	return nil
+}
+
+// MonthBandwidth returns a user's up+down bytes for the month starting at month.
+func (r *UserRepository) MonthBandwidth(ctx context.Context, userID int, month time.Time) (int64, error) {
+	var total int64
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(bytes_up + bytes_down), 0) FROM proxy_user_bandwidth
+		WHERE user_id = $1 AND month = $2::date`, userID, month.UTC().Format("2006-01-02")).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("month bandwidth: %w", err)
+	}
+	return total, nil
 }
 
 // Delete removes a user

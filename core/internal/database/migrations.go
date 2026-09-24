@@ -629,6 +629,32 @@ var migrations = []Migration{
 			ALTER TABLE accounts RENAME TO admin_credentials;
 		`,
 	},
+	{
+		Version:     28,
+		Description: "Per-user bandwidth quotas, connection caps and monthly usage",
+		Up: `
+			-- 0 = unlimited for both.
+			ALTER TABLE proxy_users ADD COLUMN IF NOT EXISTS monthly_bandwidth_limit_bytes BIGINT NOT NULL DEFAULT 0
+				CHECK (monthly_bandwidth_limit_bytes >= 0);
+			ALTER TABLE proxy_users ADD COLUMN IF NOT EXISTS max_concurrent_connections INTEGER NOT NULL DEFAULT 0
+				CHECK (max_concurrent_connections >= 0);
+
+			-- Proxied payload bytes per user per calendar month (UTC).
+			CREATE TABLE IF NOT EXISTS proxy_user_bandwidth (
+				user_id    INTEGER NOT NULL REFERENCES proxy_users(id) ON DELETE CASCADE,
+				month      DATE NOT NULL,
+				bytes_up   BIGINT NOT NULL DEFAULT 0,
+				bytes_down BIGINT NOT NULL DEFAULT 0,
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				PRIMARY KEY (user_id, month)
+			);
+		`,
+		Down: `
+			DROP TABLE IF EXISTS proxy_user_bandwidth;
+			ALTER TABLE proxy_users DROP COLUMN IF EXISTS max_concurrent_connections;
+			ALTER TABLE proxy_users DROP COLUMN IF EXISTS monthly_bandwidth_limit_bytes;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

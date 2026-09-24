@@ -14,6 +14,13 @@ type ProxyUser struct {
 	FallbackPoolIDs           []int  `json:"fallback_pool_ids"`
 	MaxRetries                int    `json:"max_retries"`
 	RequestsPerMinute         int    `json:"requests_per_minute"` // 0 = no limit
+	// MonthlyBandwidthLimitBytes caps proxied bytes (up + down) per calendar
+	// month in UTC; 0 = unlimited.
+	MonthlyBandwidthLimitBytes int64 `json:"monthly_bandwidth_limit_bytes"`
+	// MaxConcurrentConnections caps open requests and tunnels; 0 = unlimited.
+	MaxConcurrentConnections int `json:"max_concurrent_connections"`
+	// BandwidthUsedBytes is this month's usage (list responses only).
+	BandwidthUsedBytes int64 `json:"bandwidth_used_bytes"`
 	// HasExportToken reports whether a working-proxies export token is issued.
 	// The token itself is only returned once, when it is generated.
 	HasExportToken       bool       `json:"has_export_token"`
@@ -34,25 +41,29 @@ type ProxyUserWithPools struct {
 
 // CreateProxyUserRequest is the payload for POST /api/v1/proxy-users
 type CreateProxyUserRequest struct {
-	Username                  string `json:"username"                     validate:"required"`
-	Password                  string `json:"password"                     validate:"required,min=6"`
-	Enabled                   bool   `json:"enabled"`
-	AllowWorkingProxiesExport bool   `json:"allow_working_proxies_export"`
-	MainPoolID                *int   `json:"main_pool_id,omitempty"`
-	FallbackPoolIDs           []int  `json:"fallback_pool_ids"`
-	MaxRetries                int    `json:"max_retries"                   validate:"min=1,max=50"`
-	RequestsPerMinute         int    `json:"requests_per_minute"` // 0 = no limit
+	Username                   string `json:"username"                     validate:"required"`
+	Password                   string `json:"password"                     validate:"required,min=6"`
+	Enabled                    bool   `json:"enabled"`
+	AllowWorkingProxiesExport  bool   `json:"allow_working_proxies_export"`
+	MainPoolID                 *int   `json:"main_pool_id,omitempty"`
+	FallbackPoolIDs            []int  `json:"fallback_pool_ids"`
+	MaxRetries                 int    `json:"max_retries"                   validate:"min=1,max=50"`
+	RequestsPerMinute          int    `json:"requests_per_minute"`           // 0 = no limit
+	MonthlyBandwidthLimitBytes int64  `json:"monthly_bandwidth_limit_bytes"` // 0 = unlimited
+	MaxConcurrentConnections   int    `json:"max_concurrent_connections"`    // 0 = unlimited
 }
 
 // UpdateProxyUserRequest is the payload for PUT /api/v1/proxy-users/{id}
 type UpdateProxyUserRequest struct {
-	Password                  string `json:"password,omitempty"`
-	Enabled                   *bool  `json:"enabled,omitempty"`
-	AllowWorkingProxiesExport *bool  `json:"allow_working_proxies_export,omitempty"`
-	MainPoolID                *int   `json:"main_pool_id"`      // null clears it
-	FallbackPoolIDs           []int  `json:"fallback_pool_ids"` // replaces list
-	MaxRetries                int    `json:"max_retries,omitempty"`
-	RequestsPerMinute         *int   `json:"requests_per_minute,omitempty"`
+	Password                   string `json:"password,omitempty"`
+	Enabled                    *bool  `json:"enabled,omitempty"`
+	AllowWorkingProxiesExport  *bool  `json:"allow_working_proxies_export,omitempty"`
+	MainPoolID                 *int   `json:"main_pool_id"`      // null clears it
+	FallbackPoolIDs            []int  `json:"fallback_pool_ids"` // replaces list
+	MaxRetries                 int    `json:"max_retries,omitempty"`
+	RequestsPerMinute          *int   `json:"requests_per_minute,omitempty"`
+	MonthlyBandwidthLimitBytes *int64 `json:"monthly_bandwidth_limit_bytes,omitempty"`
+	MaxConcurrentConnections   *int   `json:"max_concurrent_connections,omitempty"`
 }
 
 // ExportTokenResponse is returned once when an export token is (re)generated.

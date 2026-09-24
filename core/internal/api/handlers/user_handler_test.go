@@ -110,9 +110,13 @@ func openExportTestDB(t *testing.T) *pgxpool.Pool {
 			requests_per_minute INTEGER NOT NULL DEFAULT 0,
 			allow_working_proxies_export BOOLEAN NOT NULL DEFAULT false,
 			export_token_hash TEXT, export_token_created_at TIMESTAMP,
+			monthly_bandwidth_limit_bytes BIGINT NOT NULL DEFAULT 0, max_concurrent_connections INTEGER NOT NULL DEFAULT 0,
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(), updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 		);
 		CREATE UNIQUE INDEX ON proxy_users(export_token_hash) WHERE export_token_hash IS NOT NULL;
+		CREATE TABLE proxy_user_bandwidth (user_id INT NOT NULL, month DATE NOT NULL,
+			bytes_up BIGINT NOT NULL DEFAULT 0, bytes_down BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, month));
 	`); err != nil {
 		t.Fatalf("create tables: %v", err)
 	}
