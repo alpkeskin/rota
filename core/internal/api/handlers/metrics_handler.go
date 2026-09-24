@@ -14,14 +14,32 @@ import (
 
 // MetricsHandler handles system metrics requests
 type MetricsHandler struct {
-	logger *logger.Logger
+	logger      *logger.Logger
+	geoProvider func() *GeoMetrics
 }
 
-// NewMetricsHandler creates a new metrics handler
-func NewMetricsHandler(log *logger.Logger) *MetricsHandler {
+// NewMetricsHandler creates a new metrics handler. The provider functions are
+// optional (nil-safe) and supply the background-pipeline stats sections.
+func NewMetricsHandler(
+	log *logger.Logger,
+	geoProvider func() *GeoMetrics,
+) *MetricsHandler {
 	return &MetricsHandler{
-		logger: log,
+		logger:      log,
+		geoProvider: geoProvider,
 	}
+}
+
+// GeoMetrics is the geo section of the system metrics API (1:1 with the
+// GeoIP batch-enrichment snapshot; see feature 03).
+type GeoMetrics struct {
+	Provider             string  `json:"provider"`
+	QueuePending         int     `json:"queue_pending"`
+	QueuedInMemory       int     `json:"queued_in_memory"`
+	BatchRequestsLastMin int     `json:"batch_requests_last_minute"`
+	BatchRequestsLimit   int     `json:"batch_requests_limit"`
+	UsagePercent1m       float64 `json:"usage_percent_1m"`
+	IPsUpdatedLast10m    int     `json:"ips_updated_last_10m"`
 }
 
 // SystemMetrics represents system resource metrics
@@ -30,6 +48,9 @@ type SystemMetrics struct {
 	CPU     CPUMetrics     `json:"cpu"`
 	Disk    DiskMetrics    `json:"disk"`
 	Runtime RuntimeMetrics `json:"runtime"`
+	// Geo is the GeoIP batch-enrichment pipeline (feature 03). Omitted when
+	// the geo provider is not wired.
+	Geo *GeoMetrics `json:"geo,omitempty"`
 }
 
 // MemoryMetrics represents memory usage metrics
@@ -64,8 +85,9 @@ type RuntimeMetrics struct {
 }
 
 // GetSystemMetrics retrieves current system metrics
+//
 //	@Summary		System metrics
-//	@Description	Get current system resource metrics (CPU, memory, disk, runtime)
+//	@Description	Get current system resource metrics (CPU, memory, disk, runtime) plus optional background-pipeline sections (geo)
 //	@Tags			metrics
 //	@Produce		json
 //	@Success		200	{object}	SystemMetrics	"System metrics"
@@ -153,6 +175,11 @@ func (h *MetricsHandler) collectSystemMetrics() *SystemMetrics {
 		GCPauseCount: m.NumGC,
 		MemAlloc:     m.Alloc,
 		MemSys:       m.Sys,
+	}
+
+	// GeoIP batch-enrichment pipeline metrics (feature 03).
+	if h.geoProvider != nil {
+		metrics.Geo = h.geoProvider()
 	}
 
 	return metrics

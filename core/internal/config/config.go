@@ -48,6 +48,26 @@ type Config struct {
 	AuthIPBlockMinutes     int // how long to block an IP               (AUTH_IP_BLOCK_MINUTES, default 30)
 	AuthGlobalMaxPerMinute int // max total attempts/min before lockout (AUTH_GLOBAL_MAX_PER_MINUTE, default 1000)
 	AuthGlobalLockoutMin   int // global lockout duration in minutes    (AUTH_GLOBAL_LOCKOUT_MINUTES, default 1)
+
+	GeoIP GeoIPConfig
+}
+
+// GeoIPConfig controls the GeoIP batch enrichment pipeline (ip-api.com).
+type GeoIPConfig struct {
+	// BatchRequestsPerMinute is the sliding-window cap on outbound batch
+	// requests: at most N in any 60-second window. The ip-api.com free tier
+	// allows 15 requests/minute, so the default sits exactly at the limit.
+	BatchRequestsPerMinute int // (GEOIP_BATCH_REQUESTS_PER_MINUTE, default 15, range 1-15)
+	// BatchSize is the maximum number of IPs per batch request (ip-api.com
+	// accepts at most 100 per call).
+	BatchSize int // (GEOIP_BATCH_SIZE, default 100, range 1-100)
+	// MaxRetries is how many times a retryable batch failure (network error,
+	// 429, 5xx) is retried with exponential backoff + jitter.
+	MaxRetries int // (GEOIP_MAX_RETRIES, default 3, range 0-10)
+	// LocalBatchSize is the number of addresses the geo worker processes per
+	// tick when using the local MaxMind DB. Local lookups are fast and not
+	// subject to the external rate limit, so this is larger than BatchSize.
+	LocalBatchSize int // (GEOIP_LOCAL_BATCH_SIZE, default 1000, range 1-10000)
 }
 
 // DatabaseConfig holds database configuration
@@ -108,6 +128,13 @@ func Load() (*Config, error) {
 		AuthIPBlockMinutes:     getEnvAsInt("AUTH_IP_BLOCK_MINUTES", 30),
 		AuthGlobalMaxPerMinute: getEnvAsInt("AUTH_GLOBAL_MAX_PER_MINUTE", 1000),
 		AuthGlobalLockoutMin:   getEnvAsInt("AUTH_GLOBAL_LOCKOUT_MINUTES", 1),
+
+		GeoIP: GeoIPConfig{
+			BatchRequestsPerMinute: getEnvAsInt("GEOIP_BATCH_REQUESTS_PER_MINUTE", 15),
+			BatchSize:              getEnvAsInt("GEOIP_BATCH_SIZE", 100),
+			MaxRetries:             getEnvAsInt("GEOIP_MAX_RETRIES", 3),
+			LocalBatchSize:         getEnvAsInt("GEOIP_LOCAL_BATCH_SIZE", 1000),
+		},
 	}
 
 	// Warn (but don't fail) when the well-known default DB password is in use.
@@ -142,6 +169,19 @@ func (c *Config) Validate() error {
 	}
 	if !validLogLevels[c.LogLevel] {
 		return fmt.Errorf("invalid log level: %s (must be debug, info, warn, or error)", c.LogLevel)
+	}
+
+	if c.GeoIP.BatchRequestsPerMinute < 1 || c.GeoIP.BatchRequestsPerMinute > 15 {
+		return fmt.Errorf("invalid GEOIP_BATCH_REQUESTS_PER_MINUTE: %d (must be 1-15; the ip-api.com free tier allows 15/min)", c.GeoIP.BatchRequestsPerMinute)
+	}
+	if c.GeoIP.BatchSize < 1 || c.GeoIP.BatchSize > 100 {
+		return fmt.Errorf("invalid GEOIP_BATCH_SIZE: %d (must be 1-100; ip-api.com accepts at most 100 IPs per batch)", c.GeoIP.BatchSize)
+	}
+	if c.GeoIP.MaxRetries < 0 || c.GeoIP.MaxRetries > 10 {
+		return fmt.Errorf("invalid GEOIP_MAX_RETRIES: %d (must be 0-10)", c.GeoIP.MaxRetries)
+	}
+	if c.GeoIP.LocalBatchSize < 1 || c.GeoIP.LocalBatchSize > 10000 {
+		return fmt.Errorf("invalid GEOIP_LOCAL_BATCH_SIZE: %d (must be 1-10000; per-tick drain for the local MaxMind DB)", c.GeoIP.LocalBatchSize)
 	}
 
 	return nil

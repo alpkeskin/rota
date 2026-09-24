@@ -386,12 +386,31 @@ definitions:
       threads:
         type: integer
     type: object
+  internal_api_handlers.GeoMetrics:
+    properties:
+      batch_requests_last_minute:
+        type: integer
+      batch_requests_limit:
+        type: integer
+      ips_updated_last_10m:
+        type: integer
+      provider:
+        type: string
+      queue_pending:
+        type: integer
+      queued_in_memory:
+        type: integer
+      usage_percent_1m:
+        type: number
+    type: object
   internal_api_handlers.SystemMetrics:
     properties:
       cpu:
         $ref: '#/definitions/internal_api_handlers.CPUMetrics'
       disk:
         $ref: '#/definitions/internal_api_handlers.DiskMetrics'
+      geo:
+        $ref: '#/definitions/internal_api_handlers.GeoMetrics'
       memory:
         $ref: '#/definitions/internal_api_handlers.MemoryMetrics'
       runtime:
@@ -645,7 +664,7 @@ paths:
       - logs
   /metrics/system:
     get:
-      description: Get current system resource metrics (CPU, memory, disk, runtime)
+      description: Get current system resource metrics (CPU, memory, disk, runtime) plus optional background-pipeline sections (geo)
       produces:
       - application/json
       responses:
@@ -1003,6 +1022,25 @@ paths:
       summary: Reset settings
       tags:
       - settings
+  /sources/enrich-geo:
+    post:
+      description: Queue geo enrichment for all proxies without geo data. Returns
+        the number of addresses placed in the queue; lookups run in the background.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Number of addresses queued
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Enrichment failed
+          schema:
+            type: string
+      summary: Enrich geo
+      tags:
+      - sources
   /status:
     get:
       description: Get detailed system status including proxy and request statistics

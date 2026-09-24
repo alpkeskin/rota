@@ -370,7 +370,7 @@ class ApiClient {
     return this.request(`/api/v1/sources/${id}/fetch`, { method: "POST" })
   }
 
-  async enrichGeo(): Promise<{ enriched: number }> {
+  async enrichGeo(): Promise<{ queued: number }> {
     return this.request("/api/v1/sources/enrich-geo", { method: "POST" })
   }
 
