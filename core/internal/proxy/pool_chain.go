@@ -178,9 +178,9 @@ func (c *PoolChain) pickTargeted(t Targeting, tried map[int]bool) (*models.Proxy
 // markFailed records a failure for the proxy and only removes it from its pool's
 // in-memory list after chainFailureThreshold consecutive failures, so transient
 // timeouts don't immediately evict a healthy proxy (AUD-11). The shared circuit
-// breaker is told as well.
-func (c *PoolChain) markFailed(selIdx int, proxyID int) {
-	breaker.Failure(proxyID)
+// breaker only counts it if the proxy itself was unreachable.
+func (c *PoolChain) markFailed(selIdx int, proxyID int, err error) {
+	reportOutcome(proxyID, err)
 	c.mu.Lock()
 	c.failCounts[proxyID]++
 	count := c.failCounts[proxyID]
@@ -242,7 +242,9 @@ func (c *PoolChain) SendWithRetry(
 		transport, err := CreateProxyTransport(selectedProxy)
 		if err != nil {
 			// Transport-build failure is a local/config error, not a proxy fault —
-			// do not count it toward eviction (AUD-11).
+			// do not count it toward eviction (AUD-11), and give back a
+			// half-open trial slot this attempt may hold.
+			breaker.Abandon(selectedProxy.ID)
 			lastErr = err
 			continue
 		}
@@ -278,7 +280,7 @@ func (c *PoolChain) SendWithRetry(
 			}
 			lastErr = fmt.Errorf("proxy %s attempt %d: %w", selectedProxy.Address, attempt+1, err)
 			log.Warn("pool chain: proxy failed", "proxy", selectedProxy.Address, "err", err)
-			c.markFailed(selIdx, selectedProxy.ID)
+			c.markFailed(selIdx, selectedProxy.ID, err)
 			continue
 		}
 
@@ -329,7 +331,7 @@ func (c *PoolChain) ConnectWithRetry(
 		if err != nil {
 			lastErr = fmt.Errorf("CONNECT proxy %s attempt %d: %w", selectedProxy.Address, attempt+1, err)
 			log.Warn("pool chain CONNECT: failed", "proxy", selectedProxy.Address, "err", err)
-			c.markFailed(selIdx, selectedProxy.ID)
+			c.markFailed(selIdx, selectedProxy.ID, err)
 			continue
 		}
 

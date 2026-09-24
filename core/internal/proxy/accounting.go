@@ -46,6 +46,11 @@ func monthStart(t time.Time) time.Time {
 }
 
 type userUsage struct {
+	// io serialises this user's store reads (reload) and writes (flush), so
+	// a reload can't interleave with a flush and double-count or drop the
+	// flushed bytes. Lock order: io before UsageAccountant.mu.
+	io sync.Mutex
+
 	month    time.Time
 	stored   int64 // month total known to be in the store
 	loadedAt time.Time
@@ -158,35 +163,30 @@ func (a *UsageAccountant) Begin(ctx context.Context, user *models.ProxyUser) (*L
 	now := a.now()
 	month := monthStart(now)
 
-	// Load the month's stored total outside the lock when it's missing or
-	// stale, so a slow store doesn't block other users.
 	a.mu.Lock()
 	u := a.users[user.ID]
-	needLoad := u == nil || !u.month.Equal(month) || now.Sub(u.loadedAt) > accountingReloadInterval
-	a.mu.Unlock()
-	var loaded int64
-	var loadErr error
-	if needLoad {
-		loaded, loadErr = a.store.MonthBandwidth(ctx, user.ID, month)
-		if loadErr != nil {
-			a.logger.Warn("failed to load bandwidth usage; enforcing with the last known total", "user_id", user.ID, "error", loadErr)
-		}
-	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	u = a.users[user.ID]
 	if u == nil {
 		u = &userUsage{month: month}
 		a.users[user.ID] = u
 	}
-	if !u.month.Equal(month) {
-		// New month: pending bytes from the old month are flushed under the
-		// month they are flushed in; the stored total starts over.
-		u.month, u.stored, u.loadedAt = month, 0, time.Time{}
+	u.lastSeen = now // keep Flush from evicting it while we reload
+	stale := !u.month.Equal(month) || now.Sub(u.loadedAt) > accountingReloadInterval
+	a.mu.Unlock()
+
+	// (Re)load the month's stored total when missing or stale, outside the
+	// global lock so a slow store only delays this user.
+	if stale {
+		a.reload(ctx, u, user.ID, month, now)
 	}
-	if needLoad && loadErr == nil {
-		u.stored, u.loadedAt = loaded, now
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Evicted meanwhile: adopt whichever entry is registered now, so the
+	// lease never counts into an entry Flush no longer sees.
+	if cur, ok := a.users[user.ID]; !ok {
+		a.users[user.ID] = u
+	} else if cur != u {
+		u = cur
 	}
 	u.limit = user.MonthlyBandwidthLimitBytes
 	u.lastSeen = now
@@ -214,6 +214,39 @@ func (a *UsageAccountant) Begin(ctx context.Context, user *models.ProxyUser) (*L
 	u.active++
 	a.nextID++
 	return &Lease{a: a, u: u, userID: user.ID, id: a.nextID}, nil
+}
+
+// accountingLoadRetry is how soon a failed reload is retried; until then the
+// last known total is enforced (fail open for a user never loaded).
+const accountingLoadRetry = 30 * time.Second
+
+// reload refreshes u.stored from the store under u.io.
+func (a *UsageAccountant) reload(ctx context.Context, u *userUsage, userID int, month, now time.Time) {
+	u.io.Lock()
+	defer u.io.Unlock()
+	a.mu.Lock()
+	if !u.month.Equal(month) {
+		// New month: pending bytes from the old month are flushed under the
+		// month they are flushed in; the stored total starts over.
+		u.month, u.stored, u.loadedAt = month, 0, time.Time{}
+	}
+	fresh := now.Sub(u.loadedAt) <= accountingReloadInterval // another caller just reloaded
+	a.mu.Unlock()
+	if fresh {
+		return
+	}
+	loaded, err := a.store.MonthBandwidth(ctx, userID, month)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err != nil {
+		a.logger.Warn("failed to load bandwidth usage; enforcing with the last known total", "user_id", userID, "error", err)
+		// Don't retry on every request while the store is down.
+		u.loadedAt = now.Add(-accountingReloadInterval + accountingLoadRetry)
+		return
+	}
+	if u.month.Equal(month) {
+		u.stored, u.loadedAt = loaded, now
+	}
 }
 
 // Start runs the periodic flush until Stop.
@@ -270,10 +303,12 @@ func (a *UsageAccountant) Flush(ctx context.Context) {
 	a.mu.Unlock()
 
 	for _, p := range work {
+		p.u.io.Lock()
 		fctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err := a.store.AddBandwidth(fctx, p.id, month, p.up, p.down)
 		cancel()
 		if err != nil {
+			p.u.io.Unlock()
 			// Put the bytes back so they're retried at the next flush.
 			p.u.pendingUp.Add(p.up)
 			p.u.pendingDown.Add(p.down)
@@ -285,6 +320,7 @@ func (a *UsageAccountant) Flush(ctx context.Context) {
 			p.u.stored += p.up + p.down
 		}
 		a.mu.Unlock()
+		p.u.io.Unlock()
 	}
 
 	// Enforce the quota on open tunnels.

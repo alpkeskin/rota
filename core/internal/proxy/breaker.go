@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"errors"
+	"net"
 	"sync"
 	"time"
 
@@ -148,4 +150,62 @@ func (b *CircuitBreaker) OpenCount() int {
 		}
 	}
 	return n
+}
+
+// Abandon releases a half-open trial slot without an outcome (the attempt
+// never reached the proxy, e.g. building its transport failed locally).
+func (b *CircuitBreaker) Abandon(proxyID int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if s, ok := b.states[proxyID]; ok {
+		s.probing = false
+	}
+}
+
+// Retain forgets every proxy for which keep returns false (deleted from the
+// inventory), so state and the open-circuit gauge don't outlive them.
+func (b *CircuitBreaker) Retain(keep func(proxyID int) bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id, s := range b.states {
+		if keep(id) {
+			continue
+		}
+		if !s.openUntil.IsZero() {
+			metrics.CircuitOpen.Dec()
+		}
+		delete(b.states, id)
+	}
+}
+
+// errTransportBuild marks a local failure to build a proxy's transport.
+var errTransportBuild = errors.New("failed to create transport")
+
+// isProxyFault reports whether an attempt failed because the upstream proxy
+// itself couldn't be reached — the only failures the shared breaker counts.
+// Errors after the proxy answered (it refused the CONNECT, the destination
+// is unreachable, the destination timed out) can be caused by the client's
+// choice of target, and must not let one user take proxies away from others.
+func isProxyFault(err error) bool {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if op, ok := e.(*net.OpError); ok && (op.Op == "dial" || op.Op == "proxyconnect") {
+			return true
+		}
+	}
+	return false
+}
+
+// reportOutcome feeds an attempt's result to the breaker: proxy faults count
+// as failures; anything else means the proxy answered, so it is reachable.
+func reportOutcome(proxyID int, err error) {
+	switch {
+	case errors.Is(err, errTransportBuild):
+		breaker.Abandon(proxyID) // never reached the proxy
+	case err == nil:
+		breaker.Success(proxyID)
+	case isProxyFault(err):
+		breaker.Failure(proxyID)
+	default:
+		breaker.Success(proxyID)
+	}
 }

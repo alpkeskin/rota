@@ -97,3 +97,16 @@ var bufPool = sync.Pool{
 		return buf
 	},
 }
+
+// abortConn tears a tunnel connection down from another goroutine without
+// blocking. A plain Close can block indefinitely while a splice(2) pump is
+// parked in poll() on the socket (Close waits for the in-flight raw read),
+// so the socket is first shut down — which wakes poll and makes splice
+// return — and then closed in the background.
+func abortConn(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		tc.CloseRead()  //nolint:errcheck // best effort
+		tc.CloseWrite() //nolint:errcheck // best effort
+	}
+	go c.Close() //nolint:errcheck // best effort
+}

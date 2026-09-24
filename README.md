@@ -531,16 +531,18 @@ options give `400`. Usernames of new accounts can't contain `-country-`,
 |---|---|
 | Requests per minute | `429` with `Retry-After` |
 | Concurrent connections (requests + tunnels) | `429` |
-| Monthly bandwidth (up + down, calendar month in UTC) | `429`; open tunnels are closed within ~10 s |
+| Monthly bandwidth (up + down, calendar month in UTC) | `429`; open tunnels and downloads in progress are cut within ~10 s |
 
 Usage this month shows in **Users**; it is counted in memory and written to
 the database every 10 seconds (`rota_proxy_bytes_total` has the totals).
 
 #### Circuit breaker
 
-Independently of scheduled health checks, a proxy that fails 5 requests in a
-row on live traffic is skipped for 30 s (doubling on repeated failures, up to
-5 min), then gets one trial request. This applies to every user and the
+Independently of scheduled health checks, a proxy that can't be reached 5
+times in a row on live traffic is skipped for 30 s (doubling on repeated
+failures, up to 5 min), then gets one trial request. Only failures to reach
+the proxy itself count — not a refused or unreachable destination, which a
+client could otherwise use to take healthy proxies away from other users. This applies to every user and the
 global rotation; if every candidate is tripped, Rota still tries one rather
 than failing outright. `rota_proxy_circuit_open` shows how many are out.
 

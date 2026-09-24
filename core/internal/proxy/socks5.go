@@ -80,17 +80,19 @@ func (s *socksServer) Serve(l net.Listener) error {
 			if closed {
 				return nil
 			}
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				if tempDelay == 0 {
-					tempDelay = 5 * time.Millisecond
-				} else if tempDelay *= 2; tempDelay > time.Second {
-					tempDelay = time.Second
-				}
-				time.Sleep(tempDelay)
-				continue
+			if errors.Is(err, net.ErrClosed) {
+				return err
 			}
-			return err
+			// Anything else (EMFILE, ECONNABORTED, …) is transient for a
+			// listener: back off and keep serving, like net/http does.
+			if tempDelay == 0 {
+				tempDelay = 5 * time.Millisecond
+			} else if tempDelay *= 2; tempDelay > time.Second {
+				tempDelay = time.Second
+			}
+			s.logger.Warn("socks5 accept failed; retrying", "error", err, "delay", tempDelay)
+			time.Sleep(tempDelay)
+			continue
 		}
 		tempDelay = 0
 		if !s.track(conn, true) {
@@ -130,7 +132,7 @@ func (s *socksServer) Close(ctx context.Context) error {
 		err = s.listener.Close()
 	}
 	for c := range s.conns {
-		c.Close() //nolint:errcheck // best-effort close/write
+		abortConn(c) //nolint:errcheck // best-effort close/write
 	}
 	s.mu.Unlock()
 

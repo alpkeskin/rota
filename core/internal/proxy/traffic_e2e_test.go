@@ -39,7 +39,7 @@ func newFakeUpstream(t *testing.T, id int, name, country, city string) *fakeUpst
 			if err != nil {
 				return
 			}
-			defer conn.Close() //nolint:errcheck // best-effort close/write
+			defer conn.Close()                                                //nolint:errcheck // best-effort close/write
 			conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")) //nolint:errcheck
 			io.Copy(conn, buf)                                                //nolint:errcheck
 			return

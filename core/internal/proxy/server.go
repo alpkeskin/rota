@@ -240,6 +240,7 @@ func (s *Server) startBackgroundTasks() {
 				safeworker.Call(s.logger, "rate_limit_cleanup", func() {
 					s.rateLimitMw.CleanupLimiters()
 					stickySessions.Sweep()
+					s.pruneBreaker()
 					s.logger.Debug("cleaned up rate limiters and expired sticky sessions")
 				})
 			case <-s.stopChan:
@@ -253,6 +254,33 @@ func (s *Server) startBackgroundTasks() {
 func (s *Server) EnableSOCKS5(port int) {
 	s.socksPort = port
 	s.socks = newSOCKSServer(s.userAuthMw, s.rateLimitMw, s.handler, s.logger)
+}
+
+// pruneBreaker drops circuit state for proxies deleted from the inventory.
+func (s *Server) pruneBreaker() {
+	if s.proxyRepo == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx, `SELECT id FROM proxies`)
+	if err != nil {
+		s.logger.Warn("failed to list proxies for breaker pruning", "error", err)
+		return
+	}
+	defer rows.Close()
+	ids := make(map[int]bool)
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return
+		}
+		ids[id] = true
+	}
+	if rows.Err() != nil {
+		return
+	}
+	breaker.Retain(func(id int) bool { return ids[id] })
 }
 
 // Start starts the proxy server
@@ -298,6 +326,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.socks.Close(ctx) //nolint:errcheck
 	}
 	err := s.server.Shutdown(ctx)
+	// Hijacked tunnels aren't covered by Shutdown; close them so their final
+	// bytes are metered before the last flush below.
+	s.handler.CloseTunnels(ctx)
 	// Stop metering last, so the final flush includes the tunnels just closed.
 	if s.accountant != nil {
 		s.accountant.Stop()

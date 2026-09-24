@@ -6,11 +6,17 @@ import (
 	"time"
 )
 
-// maxStickySessions bounds memory; when full, expired entries are swept and,
-// if none expired, new sessions simply aren't pinned.
-const maxStickySessions = 200_000
+// Memory bounds. A user can hold at most maxStickyPerUser sessions, so one
+// tenant can't crowd out everyone else; past either limit new sessions are
+// served without pinning. A full table is swept at most once a minute.
+const (
+	maxStickySessions = 200_000
+	maxStickyPerUser  = 10_000
+	stickySweepEvery  = time.Minute
+)
 
 type stickyEntry struct {
+	userID  int
 	proxyID int
 	expires time.Time
 }
@@ -18,14 +24,16 @@ type stickyEntry struct {
 // StickySessions pins a user's session id to one upstream proxy for the
 // session's lifetime, so requests carrying the same id exit from the same IP.
 type StickySessions struct {
-	mu      sync.Mutex
-	entries map[string]stickyEntry
-	now     func() time.Time
+	mu        sync.Mutex
+	entries   map[string]stickyEntry
+	perUser   map[int]int
+	lastSweep time.Time
+	now       func() time.Time
 }
 
 // NewStickySessions creates an empty store.
 func NewStickySessions() *StickySessions {
-	return &StickySessions{entries: make(map[string]stickyEntry), now: time.Now}
+	return &StickySessions{entries: make(map[string]stickyEntry), perUser: make(map[int]int), now: time.Now}
 }
 
 func stickyKey(userID int, session string) string {
@@ -55,13 +63,18 @@ func (s *StickySessions) Bind(userID int, session string, proxyID int, ttl time.
 	if e, ok := s.entries[key]; ok && now.Before(e.expires) {
 		expires = e.expires
 	}
-	if _, exists := s.entries[key]; !exists && len(s.entries) >= maxStickySessions {
-		s.sweepLocked(now)
-		if len(s.entries) >= maxStickySessions {
+	if _, exists := s.entries[key]; !exists {
+		full := len(s.entries) >= maxStickySessions || s.perUser[userID] >= maxStickyPerUser
+		if full && now.Sub(s.lastSweep) >= stickySweepEvery {
+			s.sweepLocked(now)
+			full = len(s.entries) >= maxStickySessions || s.perUser[userID] >= maxStickyPerUser
+		}
+		if full {
 			return
 		}
+		s.perUser[userID]++
 	}
-	s.entries[key] = stickyEntry{proxyID: proxyID, expires: expires}
+	s.entries[key] = stickyEntry{userID: userID, proxyID: proxyID, expires: expires}
 }
 
 // Sweep removes expired sessions.
@@ -72,9 +85,13 @@ func (s *StickySessions) Sweep() {
 }
 
 func (s *StickySessions) sweepLocked(now time.Time) {
+	s.lastSweep = now
 	for k, e := range s.entries {
 		if !now.Before(e.expires) {
 			delete(s.entries, k)
+			if s.perUser[e.userID]--; s.perUser[e.userID] <= 0 {
+				delete(s.perUser, e.userID)
+			}
 		}
 	}
 }

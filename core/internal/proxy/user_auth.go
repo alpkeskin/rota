@@ -117,6 +117,11 @@ func (m *UserAuthMiddleware) Authorize(ctx context.Context, username, password s
 
 	opts, optErr := ParseUsername(username)
 	if optErr != nil {
+		// An account created before routing options existed may be named
+		// like "shop-city"; accept it verbatim, without options.
+		if user, chain, err := m.resolve(ctx, username, password); err == nil {
+			return &ProxyRequest{User: user, Chain: chain, Opts: UsernameOptions{Username: username, SessionTTL: defaultSessionTTL}}, AuthAllowed, nil
+		}
 		// Legacy credentials are checked verbatim and may contain dashes.
 		if legacyOK() {
 			return nil, AuthAllowed, nil
@@ -208,6 +213,9 @@ func (m *UserAuthMiddleware) resolve(ctx context.Context, username, password str
 	}
 
 	// ── Slow path: full DB lookup + bcrypt (runs at most once per 60s per user) ──
+	if m.userRepo == nil { // legacy-only setups (and tests) have no user store
+		return nil, nil, fmt.Errorf("invalid credentials")
+	}
 	user, err := m.userRepo.Authenticate(ctx, username, password)
 	if err != nil {
 		return nil, nil, err
