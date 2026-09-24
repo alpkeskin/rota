@@ -25,6 +25,21 @@ type Config struct {
 	// in the database — for operators who want to control rotation themselves.
 	JWTSecret string
 
+	// EncryptionKey seals sensitive columns (upstream proxy passwords) at rest.
+	// When empty, a random key is generated once and stored in the database —
+	// that still keeps secrets out of exports and table-level dumps, but only a
+	// key kept outside the database protects against a full database leak.
+	// (ROTA_ENCRYPTION_KEY)
+	EncryptionKey string
+	// EncryptionKeysPrevious are retired keys still accepted for decryption so
+	// the primary key can be rotated; data is re-encrypted with the primary at
+	// startup. (ROTA_ENCRYPTION_KEYS_PREVIOUS, comma-separated)
+	EncryptionKeysPrevious []string
+
+	// MetricsToken, when set, requires "Authorization: Bearer <token>" on the
+	// Prometheus /metrics endpoint. (METRICS_TOKEN)
+	MetricsToken string
+
 	// CORSAllowedOrigins controls the Access-Control-Allow-Origin values.
 	// Defaults to ["*"]. Behind the bundled reverse proxy the dashboard is
 	// same-origin, so CORS is irrelevant; set this to lock down direct API access.
@@ -95,11 +110,14 @@ func Load() (*Config, error) {
 			Name:     getEnv("DB_NAME", "rota"),
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 		},
-		AdminUser:          getEnv("ROTA_ADMIN_USER", "admin"),
-		AdminPass:          adminPass,
-		AdminPassGenerated: adminPassGenerated,
-		JWTSecret:          os.Getenv("JWT_SECRET"),
-		CORSAllowedOrigins: splitAndTrim(getEnv("CORS_ALLOWED_ORIGINS", "*")),
+		AdminUser:              getEnv("ROTA_ADMIN_USER", "admin"),
+		AdminPass:              adminPass,
+		AdminPassGenerated:     adminPassGenerated,
+		JWTSecret:              os.Getenv("JWT_SECRET"),
+		EncryptionKey:          strings.TrimSpace(os.Getenv("ROTA_ENCRYPTION_KEY")),
+		EncryptionKeysPrevious: splitList(os.Getenv("ROTA_ENCRYPTION_KEYS_PREVIOUS")),
+		MetricsToken:           strings.TrimSpace(os.Getenv("METRICS_TOKEN")),
+		CORSAllowedOrigins:     splitAndTrim(getEnv("CORS_ALLOWED_ORIGINS", "*")),
 
 		TrustProxyHeaders: getEnvAsBool("TRUST_PROXY_HEADERS", false),
 
@@ -206,6 +224,18 @@ func splitAndTrim(value string) []string {
 	}
 	if len(out) == 0 {
 		return []string{"*"}
+	}
+	return out
+}
+
+// splitList splits a comma-separated env value into trimmed, non-empty items.
+// Unlike splitAndTrim it has no wildcard default: empty input yields nil.
+func splitList(value string) []string {
+	var out []string
+	for _, p := range strings.Split(value, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
 	}
 	return out
 }

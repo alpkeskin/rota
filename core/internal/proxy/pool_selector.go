@@ -8,6 +8,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/secrets"
 )
 
 // PoolSelector selects a proxy from a specific pool using the pool's rotation strategy.
@@ -63,6 +64,7 @@ func (ps *PoolSelector) Refresh(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("pool selector scan: %w", err)
 		}
+		secrets.DecryptInPlace(&p.Password)
 		proxies = append(proxies, &p)
 	}
 

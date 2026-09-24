@@ -11,6 +11,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/secrets"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/gammazero/workerpool"
 )
@@ -179,6 +180,7 @@ func (ps *PoolService) checkProxiesByIDs(ctx context.Context, checkURL string, p
 		if err := rows.Scan(&p.ID, &p.Address, &p.Protocol, &p.Username, &p.Password, &p.Status); err != nil {
 			return err
 		}
+		secrets.DecryptInPlace(&p.Password)
 		proxies = append(proxies, &p)
 	}
 	if len(proxies) == 0 {

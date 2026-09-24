@@ -9,6 +9,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/secrets"
 )
 
 // ProxySelector defines the interface for proxy selection strategies
@@ -279,6 +280,7 @@ func (b *BaseSelector) loadActiveProxiesWithSettings(ctx context.Context, settin
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan proxy: %w", err)
 		}
+		secrets.DecryptInPlace(&p.Password)
 
 		// Apply filters if settings provided
 		if settings != nil {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/secrets"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/gammazero/workerpool"
 )
@@ -274,6 +275,7 @@ func (h *HealthChecker) CheckAllProxiesWithProgress(
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan proxy: %w", err)
 		}
+		secrets.DecryptInPlace(&p.Password)
 		proxies = append(proxies, &p)
 	}
 
