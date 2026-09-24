@@ -46,9 +46,13 @@ type APIKey struct {
 
 // CreateAPIKeyRequest is the payload for POST /api/v1/api-keys.
 type CreateAPIKeyRequest struct {
-	Name          string `json:"name"`
-	Role          string `json:"role"`            // defaults to the caller's role
-	ExpiresInDays int    `json:"expires_in_days"` // 0 = never expires
+	// CurrentPassword re-confirms the caller: a stolen session token alone
+	// must not be able to mint a long-lived credential that outlives
+	// "sign out everywhere".
+	CurrentPassword string `json:"current_password"`
+	Name            string `json:"name"`
+	Role            string `json:"role"`            // defaults to the caller's role
+	ExpiresInDays   int    `json:"expires_in_days"` // 0 = never expires
 }
 
 // CreateAPIKeyResponse returns the new key's secret exactly once.

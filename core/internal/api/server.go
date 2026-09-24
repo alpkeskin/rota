@@ -320,8 +320,10 @@ func (s *Server) setupRoutes() {
 	//   operator — also change proxies, sources, pools and proxy users
 	//   admin    — also change settings, manage accounts, read the audit log
 	s.router.Route("/api/v1", func(r chi.Router) {
-		r.Use(s.authn.Middleware())
+		// Audit runs outside the authenticator so rejected credentials
+		// (revoked or leaked keys still in use) are recorded too.
 		r.Use(AuditMiddleware(s.auditRepo, s.logger))
+		r.Use(s.authn.Middleware())
 
 		// Own account — any role, dashboard sessions only.
 		r.Group(func(r chi.Router) {
@@ -423,9 +425,11 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
-	// WebSocket routes — authenticated via the token query param.
-	s.router.With(s.authn.Middleware(), RequireRole(auth.RoleViewer)).Get("/ws/dashboard", s.websocketHandler.DashboardWebSocket)
-	s.router.With(s.authn.Middleware(), RequireRole(auth.RoleViewer)).Get("/ws/logs", s.websocketHandler.LogsWebSocket)
+	// WebSocket routes — authenticated via the token query param and
+	// re-checked while open, so revoking the session ends the stream.
+	live := s.authn.LiveMiddleware(auth.RoleViewer, wsRecheckInterval)
+	s.router.With(live, RequireRole(auth.RoleViewer)).Get("/ws/dashboard", s.websocketHandler.DashboardWebSocket)
+	s.router.With(live, RequireRole(auth.RoleViewer)).Get("/ws/logs", s.websocketHandler.LogsWebSocket)
 }
 
 // exportLimited applies the per-IP brute-force limiter to password-based
@@ -443,6 +447,9 @@ func (s *Server) exportLimited(next http.Handler) http.Handler {
 		limited.ServeHTTP(w, r)
 	})
 }
+
+// wsRecheckInterval is how often an open WebSocket re-validates its credential.
+var wsRecheckInterval = 15 * time.Second
 
 // pruneAuditLog deletes audit entries older than the retention period once a
 // day (and once at startup). A zero retention keeps entries forever.

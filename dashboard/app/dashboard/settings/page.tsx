@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { PageHeader, Section, LoadingLine } from "@/components/page-header"
 import { api } from "@/lib/api"
-import { useCan, useSession } from "@/lib/session"
+import { useCan, useRefreshSession, useSession } from "@/lib/session"
 import { Settings } from "@/lib/types"
 import { formatDateTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
@@ -84,6 +84,7 @@ const grid = "grid gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-3"
 export default function SettingsPage() {
   const me = useSession()
   const isAdmin = useCan("admin")
+  const refreshSession = useRefreshSession()
   const [settings, setSettings] = React.useState<Settings | null>(null)
   const [isLoading, setIsLoading] = React.useState(true)
   const [isSaving, setIsSaving] = React.useState(false)
@@ -140,6 +141,7 @@ export default function SettingsPage() {
       setNewPass("")
       setConfirmPass("")
       toast.success("Credentials updated", "Your other sessions were signed out")
+      refreshSession()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to change password")
     } finally {

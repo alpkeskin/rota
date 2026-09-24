@@ -374,3 +374,67 @@ func TestAuditLog(t *testing.T) {
 		t.Fatalf("DeleteOlderThan = %d, %v; want 1", n, err)
 	}
 }
+
+// Concurrent demotions of *different* admins, with a third admin left, are
+// both valid and must both succeed (no deadlock between their locks).
+func TestConcurrentDemotionsDoNotDeadlock(t *testing.T) {
+	db := openAccessDB(t, "rota_access_deadlock", nil)
+	r := NewAccountRepository(db)
+	ctx := context.Background()
+	for round := 0; round < 5; round++ {
+		if _, err := db.Pool.Exec(ctx, `DELETE FROM accounts`); err != nil {
+			t.Fatal(err)
+		}
+		a := mustCreate(t, r, "a", "admin")
+		b := mustCreate(t, r, "b", "admin")
+		mustCreate(t, r, "c", "admin")
+		viewer := "viewer"
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		for i, id := range []int{a.ID, b.ID} {
+			wg.Add(1)
+			go func(i, id int) {
+				defer wg.Done()
+				_, errs[i] = r.Update(ctx, id, models.UpdateAccountRequest{Role: &viewer})
+			}(i, id)
+		}
+		wg.Wait()
+		if errs[0] != nil || errs[1] != nil {
+			t.Fatalf("round %d: concurrent valid demotions failed: %v", round, errs)
+		}
+	}
+}
+
+func TestAccountRoleDefaultsToViewer(t *testing.T) {
+	db := openAccessDB(t, "rota_access_default", nil)
+	ctx := context.Background()
+	var role string
+	if err := db.Pool.QueryRow(ctx,
+		`INSERT INTO accounts (username, password_hash) VALUES ('raw', 'x') RETURNING role`).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if role != "viewer" {
+		t.Fatalf("account inserted without a role got %q, want viewer", role)
+	}
+}
+
+func TestVerifyPassword(t *testing.T) {
+	db := openAccessDB(t, "rota_access_verify", nil)
+	r := NewAccountRepository(db)
+	ctx := context.Background()
+	a := mustCreate(t, r, "v", "viewer")
+	if err := r.VerifyPassword(ctx, a.ID, "password-123"); err != nil {
+		t.Fatalf("right password: %v", err)
+	}
+	if err := r.VerifyPassword(ctx, a.ID, "nope"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("wrong password err = %v", err)
+	}
+	off := false
+	mustCreate(t, r, "boss", "admin")
+	if _, err := r.Update(ctx, a.ID, models.UpdateAccountRequest{Enabled: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.VerifyPassword(ctx, a.ID, "password-123"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("disabled account err = %v", err)
+	}
+}

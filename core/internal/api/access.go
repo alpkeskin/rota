@@ -47,6 +47,9 @@ func (a *authenticator) Middleware() func(next http.Handler) http.Handler {
 				return
 			}
 			p, err := a.resolve(r.Context(), tokenStr)
+			if h := principalHolderFrom(r.Context()); h != nil {
+				h.p, h.credential = p, credentialHint(tokenStr)
+			}
 			if err != nil {
 				if errors.Is(err, repository.ErrInvalidCredentials) || errors.Is(err, auth.ErrInvalidToken) {
 					writeJSONError(w, http.StatusUnauthorized, "invalid or expired token")
@@ -82,6 +85,65 @@ func (a *authenticator) resolve(ctx context.Context, tokenStr string) (*auth.Pri
 		Username:  acct.Username,
 		Role:      auth.Role(acct.Role),
 	}, nil
+}
+
+// LiveMiddleware is Middleware for long-lived connections (WebSockets): it
+// re-checks the credential every interval and cancels the request context —
+// which ends the stream — once the session or key is revoked, expired or
+// demoted below min. Transient lookup failures don't end the stream.
+func (a *authenticator) LiveMiddleware(min auth.Role, interval time.Duration) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return a.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenStr := extractToken(r)
+			ctx, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			go func() {
+				t := time.NewTicker(interval)
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+						p, err := a.resolve(ctx, tokenStr)
+						if err != nil && !errors.Is(err, repository.ErrInvalidCredentials) && !errors.Is(err, auth.ErrInvalidToken) {
+							continue // infrastructure hiccup: keep the stream
+						}
+						if err != nil || !p.Role.AtLeast(min) {
+							cancel()
+							return
+						}
+					}
+				}
+			}()
+			next.ServeHTTP(w, r.WithContext(ctx))
+		}))
+	}
+}
+
+// credentialHint identifies an API key in the audit log without storing it:
+// its public prefix (the same one the dashboard shows). Session tokens get no
+// hint — they carry no stable public identifier.
+func credentialHint(tokenStr string) string {
+	if strings.HasPrefix(tokenStr, repository.APIKeyPrefix) && len(tokenStr) >= len(repository.APIKeyPrefix)+6 {
+		return tokenStr[:len(repository.APIKeyPrefix)+6]
+	}
+	return ""
+}
+
+// principalHolder lets AuditMiddleware, which runs outside the
+// authenticator (so it also sees requests rejected with 401), learn who the
+// authenticator resolved.
+type principalHolder struct {
+	p          *auth.Principal
+	credential string
+}
+
+type principalHolderKey struct{}
+
+func principalHolderFrom(ctx context.Context) *principalHolder {
+	h, _ := ctx.Value(principalHolderKey{}).(*principalHolder)
+	return h
 }
 
 // RequireRole rejects callers whose effective role is below min with 403.
@@ -136,12 +198,14 @@ var auditedReads = map[string]bool{
 func AuditMiddleware(rec auditRecorder, log *logger.Logger) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			holder := &principalHolder{}
+			r = r.WithContext(context.WithValue(r.Context(), principalHolderKey{}, holder))
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			// Record in a defer so a handler that panics (recovered further
 			// out as a 500) is still audited; the panic is then re-raised.
 			defer func() {
 				p := recover()
-				recordAudit(r, ww.Status(), p != nil, rec, log)
+				recordAudit(r, holder, ww.Status(), p != nil, rec, log)
 				if p != nil {
 					panic(p)
 				}
@@ -151,7 +215,7 @@ func AuditMiddleware(rec auditRecorder, log *logger.Logger) func(next http.Handl
 	}
 }
 
-func recordAudit(r *http.Request, status int, panicked bool, rec auditRecorder, log *logger.Logger) {
+func recordAudit(r *http.Request, holder *principalHolder, status int, panicked bool, rec auditRecorder, log *logger.Logger) {
 	rctx := chi.RouteContext(r.Context())
 	route := ""
 	if rctx != nil {
@@ -176,13 +240,22 @@ func recordAudit(r *http.Request, status int, panicked bool, rec auditRecorder, 
 		Status:   status,
 		IP:       clientIP(r),
 	}
-	if p := auth.FromContext(r.Context()); p != nil {
+	if p := holder.p; p != nil {
 		entry.ActorType = string(p.Type)
 		id := p.AccountID
 		entry.ActorID = &id
 		entry.ActorName = p.ActorName()
+		if p.Type == auth.PrincipalAPIKey {
+			// Key names aren't unique; the id pins down which key acted.
+			entry.Details = map[string]any{"api_key_id": p.APIKeyID}
+		}
 	} else {
+		// Rejected by the authenticator (missing, invalid, revoked or
+		// expired credential). A key's public prefix shows which one.
 		entry.ActorType = "anonymous"
+		if holder.credential != "" {
+			entry.Details = map[string]any{"credential": holder.credential + "…"}
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

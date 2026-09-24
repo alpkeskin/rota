@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alpkeskin/rota/core/internal/auth"
 	"github.com/alpkeskin/rota/core/internal/models"
@@ -89,7 +91,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) recordLogin(r *http.Request, acct *models.Account, username string, status int) {
 	e := models.AuditEntry{
 		ActorType: "anonymous",
-		ActorName: username,
+		ActorName: auditName(username),
 		Action:    "auth.login",
 		Status:    status,
 		IP:        requestIP(r),
@@ -103,6 +105,17 @@ func (h *AuthHandler) recordLogin(r *http.Request, acct *models.Account, usernam
 	if err := h.audit.Record(ctx, e); err != nil {
 		h.logger.Error("failed to write audit entry", "action", e.Action, "error", err)
 	}
+}
+
+// auditName makes an attacker-supplied username safe to store as an actor
+// name: valid UTF-8, at most 255 characters (the column size), so an
+// oversized or malformed name can't make the audit insert fail.
+func auditName(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if utf8.RuneCountInString(s) > 255 {
+		s = string([]rune(s)[:254]) + "…"
+	}
+	return s
 }
 
 func requestIP(r *http.Request) string {

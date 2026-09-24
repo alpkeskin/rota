@@ -223,6 +223,9 @@ func (r *AccountRepository) Update(ctx context.Context, id int, req models.Updat
 
 	var out *models.Account
 	err := pgx.BeginFunc(ctx, r.db.Pool, func(tx pgx.Tx) error {
+		if err := lockAccountChanges(ctx, tx); err != nil {
+			return err
+		}
 		current, err := scanAccount(tx.QueryRow(ctx, `SELECT `+accountColumns+` FROM accounts WHERE id = $1 FOR UPDATE`, id))
 		if err != nil {
 			return err
@@ -263,11 +266,25 @@ func (r *AccountRepository) Update(ctx context.Context, id int, req models.Updat
 	return out, nil
 }
 
-// ensureAnotherAdmin locks the enabled admins and checks that one other than
-// exceptID remains. The row locks serialise concurrent demotions, so two
-// admins can't demote each other at the same time and leave none.
+// accountChangesLock is the advisory lock key serialising role/enabled
+// changes and deletions ("rota" + "acct" as bytes).
+const accountChangesLock int64 = 0x726f74616163_6374
+
+// lockAccountChanges serialises account role/enabled changes and deletions
+// for the rest of the transaction. One global lock (these are rare admin
+// actions) makes the last-admin check race-free without row locks taken in
+// different orders, which could deadlock two valid concurrent demotions.
+func lockAccountChanges(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, accountChangesLock); err != nil {
+		return fmt.Errorf("lock account changes: %w", err)
+	}
+	return nil
+}
+
+// ensureAnotherAdmin checks that an enabled admin other than exceptID
+// remains. Callers hold lockAccountChanges.
 func ensureAnotherAdmin(ctx context.Context, tx pgx.Tx, exceptID int) error {
-	rows, err := tx.Query(ctx, `SELECT id FROM accounts WHERE role = 'admin' AND enabled ORDER BY id FOR UPDATE`)
+	rows, err := tx.Query(ctx, `SELECT id FROM accounts WHERE role = 'admin' AND enabled ORDER BY id`)
 	if err != nil {
 		return fmt.Errorf("lock admins: %w", err)
 	}
@@ -296,6 +313,9 @@ func ensureAnotherAdmin(ctx context.Context, tx pgx.Tx, exceptID int) error {
 // the last enabled admin.
 func (r *AccountRepository) Delete(ctx context.Context, id int) error {
 	return pgx.BeginFunc(ctx, r.db.Pool, func(tx pgx.Tx) error {
+		if err := lockAccountChanges(ctx, tx); err != nil {
+			return err
+		}
 		current, err := scanAccount(tx.QueryRow(ctx, `SELECT `+accountColumns+` FROM accounts WHERE id = $1 FOR UPDATE`, id))
 		if err != nil {
 			return err
@@ -325,6 +345,23 @@ func (r *AccountRepository) RevokeSessions(ctx context.Context, id int) (*models
 		return nil, ErrAccountNotFound
 	}
 	return a, nil
+}
+
+// VerifyPassword checks an account's current password. It returns
+// ErrInvalidCredentials when it doesn't match (or the account is gone).
+func (r *AccountRepository) VerifyPassword(ctx context.Context, id int, password string) error {
+	var hash string
+	err := r.db.Pool.QueryRow(ctx, `SELECT password_hash FROM accounts WHERE id = $1 AND enabled`, id).Scan(&hash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrInvalidCredentials
+	}
+	if err != nil {
+		return fmt.Errorf("load account: %w", err)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		return ErrInvalidCredentials
+	}
+	return nil
 }
 
 // ChangeOwnCredentials lets an account change its own password (and

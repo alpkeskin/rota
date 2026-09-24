@@ -106,6 +106,7 @@ function ApiKeysTab() {
   const [showAll, setShowAll] = React.useState(false)
   const [createOpen, setCreateOpen] = React.useState(false)
   const [name, setName] = React.useState("")
+  const [password, setPassword] = React.useState("")
   const [role, setRole] = React.useState<Role>(me.role)
   const [expiry, setExpiry] = React.useState("90")
   const [saving, setSaving] = React.useState(false)
@@ -128,6 +129,7 @@ function ApiKeysTab() {
 
   const openCreate = () => {
     setName("")
+    setPassword("")
     setRole(me.role)
     setExpiry("90")
     setCreated(null)
@@ -138,7 +140,8 @@ function ApiKeysTab() {
     e.preventDefault()
     setSaving(true)
     try {
-      const res = await api.createApiKey({ name, role, expires_in_days: parseInt(expiry) || 0 })
+      const res = await api.createApiKey({ current_password: password, name, role, expires_in_days: parseInt(expiry) || 0 })
+      setPassword("")
       setCreated(res.key)
       load()
     } catch (err) {
@@ -267,6 +270,11 @@ function ApiKeysTab() {
                 </div>
               </div>
               <p className="text-muted-foreground text-[0.6875rem] leading-4">{ROLES.find((r) => r.value === role)?.hint}.</p>
+              <div className="space-y-1.5">
+                <Label htmlFor="key-password">Your password</Label>
+                <Input id="key-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+                <p className="text-muted-foreground text-[0.6875rem] leading-4">Confirms it&apos;s you: a key outlives sign-outs, so a stolen session alone can&apos;t create one.</p>
+              </div>
             </form>
           )}
           <DialogFooter>
@@ -277,7 +285,7 @@ function ApiKeysTab() {
                 <Button variant="outline" onClick={() => setCreateOpen(false)}>
                   Cancel
                 </Button>
-                <Button type="submit" form="create-key" disabled={saving || !name.trim()}>
+                <Button type="submit" form="create-key" disabled={saving || !name.trim() || !password}>
                   {saving ? "Creating…" : "Create key"}
                 </Button>
               </>
@@ -510,7 +518,7 @@ function AccountsTab() {
         <DialogContent className="sm:max-w-[26rem]">
           <DialogHeader>
             <DialogTitle>Reset password for {resetTarget?.username}</DialogTitle>
-            <DialogDescription>Their open sessions are signed out. API keys keep working.</DialogDescription>
+            <DialogDescription>Their open sessions are signed out. Their API keys keep working — revoke them under API keys (All accounts) if the account may be compromised.</DialogDescription>
           </DialogHeader>
           <form id="reset-password" onSubmit={resetPassword} className="space-y-1.5">
             <Label htmlFor="reset-pass">New password</Label>

@@ -177,12 +177,12 @@ func (r *APIKeyRepository) Authenticate(ctx context.Context, key string) (*auth.
 	if revokedAt != nil || !enabled || (expiresAt != nil && !time.Now().Before(*expiresAt)) {
 		return nil, ErrInvalidCredentials
 	}
-	// Record use at most once a minute per key to keep this off the write path.
-	if _, err := r.db.Pool.Exec(ctx, `
+	// Record use at most once a minute per key. Best effort: usage tracking
+	// failing (lock or statement timeout, read-only failover) must not turn
+	// into an authentication failure.
+	_, _ = r.db.Pool.Exec(ctx, `
 		UPDATE api_keys SET last_used_at = NOW()
-		WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < NOW() - INTERVAL '1 minute')`, keyID); err != nil {
-		return nil, fmt.Errorf("touch api key: %w", err)
-	}
+		WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < NOW() - INTERVAL '1 minute')`, keyID)
 	return &auth.Principal{
 		Type:       auth.PrincipalAPIKey,
 		AccountID:  accountID,

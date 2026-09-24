@@ -200,6 +200,7 @@ export interface ApiKey {
 }
 
 export interface CreateApiKeyRequest {
+  current_password: string
   name: string
   role?: Role
   expires_in_days?: number

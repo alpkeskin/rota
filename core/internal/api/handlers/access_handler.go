@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -148,6 +149,14 @@ func (h *AccessHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	p := auth.FromContext(r.Context())
 	var req models.CreateAPIKeyRequest
 	if !decodeBody(w, r, &req) {
+		return
+	}
+	if err := h.accounts.VerifyPassword(r.Context(), p.AccountID, req.CurrentPassword); err != nil {
+		if errors.Is(err, repository.ErrInvalidCredentials) {
+			writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "current password is incorrect"})
+			return
+		}
+		writeAccountError(w, h.logger, err)
 		return
 	}
 	key, k, err := h.keys.Create(r.Context(), p.AccountID, p.Role, req)

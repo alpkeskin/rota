@@ -581,10 +581,13 @@ var migrations = []Migration{
 			ALTER TABLE admin_credentials RENAME TO accounts;
 			ALTER TABLE accounts ADD COLUMN IF NOT EXISTS role VARCHAR(16) NOT NULL DEFAULT 'admin'
 				CHECK (role IN ('viewer', 'operator', 'admin'));
+			-- 'admin' only backfills the existing login; any later insert that
+			-- omits the role must get the least privilege.
+			ALTER TABLE accounts ALTER COLUMN role SET DEFAULT 'viewer';
 			ALTER TABLE accounts ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT true;
 			-- Bumped to revoke every session token issued before.
 			ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
-			ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP;
+			ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
 
 			CREATE TABLE IF NOT EXISTS api_keys (
 				id           SERIAL PRIMARY KEY,
@@ -593,10 +596,10 @@ var migrations = []Migration{
 				key_hash     TEXT NOT NULL UNIQUE,
 				key_prefix   VARCHAR(32) NOT NULL,
 				role         VARCHAR(16) NOT NULL CHECK (role IN ('viewer', 'operator', 'admin')),
-				created_at   TIMESTAMP NOT NULL DEFAULT NOW(),
-				expires_at   TIMESTAMP,
-				last_used_at TIMESTAMP,
-				revoked_at   TIMESTAMP
+				created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				expires_at   TIMESTAMPTZ,
+				last_used_at TIMESTAMPTZ,
+				revoked_at   TIMESTAMPTZ
 			);
 			CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);
 

@@ -44,6 +44,27 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
   }, [router])
 
+  // Re-read the account when the tab regains focus, so a role another admin
+  // changed (or a revoked session) shows up without a manual reload.
+  const refresh = React.useCallback(async () => {
+    try {
+      setMe(await api.getMe())
+    } catch {
+      // A 401 already redirects to the login page inside the API client.
+    }
+  }, [])
+  React.useEffect(() => {
+    const onFocus = () => {
+      if (document.visibilityState === "visible") refresh()
+    }
+    window.addEventListener("focus", onFocus)
+    document.addEventListener("visibilitychange", onFocus)
+    return () => {
+      window.removeEventListener("focus", onFocus)
+      document.removeEventListener("visibilitychange", onFocus)
+    }
+  }, [refresh])
+
   if (isLoading) {
     return <p className="text-muted-foreground grid min-h-svh place-items-center">Checking session…</p>
   }
@@ -51,7 +72,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   if (me === null) return null
 
   return (
-    <SessionProvider me={me}>
+    <SessionProvider me={me} refresh={refresh}>
       <div className="md:grid md:min-h-svh md:grid-cols-[14.5rem_1fr]">
         {/* Column carries the background so it spans pages taller than the viewport. */}
         <div className="bg-sidebar border-border relative md:border-r">

@@ -525,10 +525,11 @@ Everyone who signs in to the dashboard or API has an **account** with one role
 | `operator` | …and change proxies, sources, pools and proxy users (including export tokens) |
 | `admin` | …and change settings, manage accounts and API keys of others, read the audit log |
 
-Role changes apply to open sessions immediately. Disabling an account or
-resetting its password signs it out everywhere, and anyone can **Sign out
-everywhere** from the account menu. At least one enabled admin always remains:
-the last one can't be demoted, disabled or deleted.
+Role changes apply to open sessions immediately — including open live views
+(WebSockets), which re-check their credentials every 15 seconds. Disabling an
+account or resetting its password signs it out everywhere, and anyone can
+**Sign out everywhere** from the account menu. At least one enabled admin
+always remains: the last one can't be demoted, disabled or deleted.
 
 > Upgrading from a version without accounts: the existing admin login becomes
 > an `admin` account, and open dashboard sessions must sign in once more.
@@ -548,7 +549,11 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost/api/v1/proxies
 Scripts and integrations should use an **API key** instead (**Access → API
 keys**). A key is shown once, can expire, can be revoked, and acts with its own
 role capped by its owner's current role. Keys can't manage accounts, keys or
-passwords, so a leaked key can't mint new credentials.
+passwords, so a leaked key can't mint new credentials, and creating a key asks
+for your password, so a stolen session token can't either. Keys are separate
+from sessions: signing out (everywhere) or a password reset doesn't revoke
+them — revoke them explicitly if an account may be compromised; disabling or
+deleting the account stops its keys at once.
 
 ```bash
 curl -H "Authorization: Bearer rota_key_..." http://localhost/api/v1/proxies
@@ -557,8 +562,10 @@ curl -H "Authorization: Bearer rota_key_..." http://localhost/api/v1/proxies
 ### Audit log
 
 Every change made through the API — who, what route, which ids, the result and
-the client IP — is recorded, including requests refused for lack of a role,
-sign-in attempts and bulk exports. Admins browse it under **Access → Audit
+the client IP — is recorded, including requests refused for lack of a role or
+with a revoked/invalid credential (API keys are identified by their public
+prefix), sign-in attempts and bulk exports. Attempts the login rate limiter
+turns away before they reach the check are logged by the core, not audited. Admins browse it under **Access → Audit
 log** or `GET /api/v1/audit-log?actor=&action=&from=&to=&page=`. Request bodies
 are never stored. Entries are kept for `AUDIT_LOG_RETENTION_DAYS` (365).
 

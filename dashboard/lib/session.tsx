@@ -10,17 +10,33 @@ export function roleAtLeast(role: Role | undefined, min: Role): boolean {
   return !!role && RANK[role] >= RANK[min]
 }
 
-const SessionContext = React.createContext<Me | null>(null)
+interface SessionValue {
+  me: Me
+  /** Re-reads the account (after renaming it, or when a role may have changed). */
+  refresh: () => Promise<void>
+}
 
-export function SessionProvider({ me, children }: { me: Me; children: React.ReactNode }) {
-  return <SessionContext.Provider value={me}>{children}</SessionContext.Provider>
+const SessionContext = React.createContext<SessionValue | null>(null)
+
+export function SessionProvider({ me, refresh, children }: SessionValue & { children: React.ReactNode }) {
+  const value = React.useMemo(() => ({ me, refresh }), [me, refresh])
+  return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
+}
+
+function useSessionValue(): SessionValue {
+  const v = React.useContext(SessionContext)
+  if (!v) throw new Error("useSession must be used inside SessionProvider")
+  return v
 }
 
 /** The signed-in account. Only valid inside the dashboard layout. */
 export function useSession(): Me {
-  const me = React.useContext(SessionContext)
-  if (!me) throw new Error("useSession must be used inside SessionProvider")
-  return me
+  return useSessionValue().me
+}
+
+/** Re-fetches the signed-in account into the session. */
+export function useRefreshSession(): () => Promise<void> {
+  return useSessionValue().refresh
 }
 
 /** Whether the signed-in account has at least the given role. */

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/alpkeskin/rota/core/internal/auth"
 	"github.com/alpkeskin/rota/core/internal/database"
@@ -128,5 +129,46 @@ func TestLoginChangePasswordAndSignOut(t *testing.T) {
 	db.Pool.Close()
 	if code, _ := login("admin", "second-pass-2"); code != http.StatusServiceUnavailable {
 		t.Fatalf("login with DB down = %d, want 503", code)
+	}
+}
+
+func TestCreateAPIKeyRequiresCurrentPassword(t *testing.T) {
+	db := openAuthDB(t)
+	ctx := context.Background()
+	accounts := repository.NewAccountRepository(db)
+	h := NewAccessHandler(accounts, repository.NewAPIKeyRepository(db), repository.NewAuditRepository(db), logger.New("error"))
+	a, err := accounts.Create(ctx, models.CreateAccountRequest{Username: "op", Password: "password-123", Role: "operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &auth.Principal{Type: auth.PrincipalSession, AccountID: a.ID, Username: "op", Role: auth.RoleOperator}
+	create := func(body string) (int, string) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", strings.NewReader(body))
+		h.CreateAPIKey(w, r.WithContext(auth.WithPrincipal(r.Context(), p)))
+		return w.Code, w.Body.String()
+	}
+	if code, _ := create(`{"name":"ci"}`); code != http.StatusBadRequest {
+		t.Fatalf("no password = %d, want 400", code)
+	}
+	if code, _ := create(`{"name":"ci","current_password":"wrong"}`); code != http.StatusBadRequest {
+		t.Fatalf("wrong password = %d, want 400", code)
+	}
+	code, body := create(`{"name":"ci","current_password":"password-123"}`)
+	if code != http.StatusCreated || !strings.Contains(body, repository.APIKeyPrefix) {
+		t.Fatalf("right password = %d %s", code, body)
+	}
+	if strings.Contains(body, "password-123") {
+		t.Fatal("response echoes the password")
+	}
+}
+
+func TestAuditNameSanitises(t *testing.T) {
+	long := strings.Repeat("a", 300)
+	if got := auditName(long); len([]rune(got)) != 255 {
+		t.Fatalf("auditName(300 chars) has %d runes, want 255", len([]rune(got)))
+	}
+	if got := auditName("bad\xffname"); !utf8.ValidString(got) {
+		t.Fatalf("auditName kept invalid UTF-8: %q", got)
 	}
 }

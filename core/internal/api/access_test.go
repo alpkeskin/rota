@@ -271,3 +271,70 @@ func TestAuditMiddlewareRecordsWritesAndDenials(t *testing.T) {
 		t.Error("sensitive export read not audited")
 	}
 }
+
+func TestRejectedCredentialsAreAuditedWithKeyHint(t *testing.T) {
+	f := newAccessFixture(t)
+	ctx := context.Background()
+	keys := repository.NewAPIKeyRepository(f.db)
+
+	// A key request records which key acted.
+	f.do("POST", "/api/v1/proxies", "operator-key")
+	// A revoked key still in use is recorded, identified by its prefix.
+	p, err := keys.Authenticate(ctx, f.tokens["operator-key"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keys.Revoke(ctx, p.APIKeyID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.do("DELETE", "/api/v1/proxies", "operator-key"); code != http.StatusUnauthorized {
+		t.Fatalf("revoked key = %d, want 401", code)
+	}
+
+	entries, _, err := repository.NewAuditRepository(f.db).List(ctx, repository.AuditFilter{})
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("entries = %+v, %v", entries, err)
+	}
+	rejected, accepted := entries[0], entries[1]
+	if rejected.Status != http.StatusUnauthorized || rejected.ActorType != "anonymous" ||
+		rejected.Details["credential"] != f.tokens["operator-key"][:len(repository.APIKeyPrefix)+6]+"…" {
+		t.Errorf("rejected-key entry = %+v", rejected)
+	}
+	if id, _ := accepted.Details["api_key_id"].(float64); int(id) != p.APIKeyID {
+		t.Errorf("key entry details = %+v, want api_key_id %d", accepted.Details, p.APIKeyID)
+	}
+	if strings.Contains(rejected.Details["credential"].(string), f.tokens["operator-key"][len(repository.APIKeyPrefix)+6:]) {
+		t.Error("audit entry stores the secret part of the key")
+	}
+}
+
+// An open WebSocket must end once its session is revoked.
+func TestLiveMiddlewareEndsRevokedStreams(t *testing.T) {
+	f := newAccessFixture(t)
+	ctx := context.Background()
+	accounts := repository.NewAccountRepository(f.db)
+
+	ended := make(chan struct{})
+	h := f.server.authn.LiveMiddleware(auth.RoleViewer, 20*time.Millisecond)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // a stream runs until its context ends
+		close(ended)
+	}))
+
+	r := httptest.NewRequest("GET", "/ws/logs?token="+f.tokens["viewer"], nil)
+	go h.ServeHTTP(httptest.NewRecorder(), r)
+
+	select {
+	case <-ended:
+		t.Fatal("stream ended while the session was still valid")
+	case <-time.After(100 * time.Millisecond):
+	}
+	id, _, _ := auth.ParseSession(f.secret, f.tokens["viewer"])
+	if _, err := accounts.RevokeSessions(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream kept running after the session was revoked")
+	}
+}
