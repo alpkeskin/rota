@@ -84,6 +84,12 @@ func (l *Logger) hookWorker() {
 	}
 }
 
+// DroppedHookEvents returns how many hook events were dropped because the
+// hook queue was full.
+func (l *Logger) DroppedHookEvents() int64 {
+	return l.dropped.Load()
+}
+
 // AddHook adds a hook that will be called for each log message
 func (l *Logger) AddHook(hook LogHook) {
 	l.mu.Lock()

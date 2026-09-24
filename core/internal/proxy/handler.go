@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/google/uuid"
@@ -73,6 +74,18 @@ func NewUpstreamProxyHandler(
 	}
 }
 
+// RequestIDHeader carries the proxy's request ID on error responses so a
+// client-side failure can be matched to the server log entry.
+const RequestIDHeader = "X-Rota-Request-Id"
+
+// writeUpstreamError answers a failed upstream attempt with a generic 502.
+// The underlying error names upstream proxy addresses, pools and dial
+// details, so it is logged server-side and never sent to the client.
+func writeUpstreamError(w http.ResponseWriter, requestID string) {
+	w.Header().Set(RequestIDHeader, requestID)
+	http.Error(w, "upstream proxy request failed (request id "+requestID+")", http.StatusBadGateway)
+}
+
 // HandleHTTPRequest handles HTTP requests (non-CONNECT) with upstream proxy rotation.
 // It writes the proxied response directly to w.
 func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.Request) {
@@ -99,9 +112,11 @@ func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.
 		}
 		if err != nil {
 			h.logger.Error("pool-chain request failed", "request_id", requestID, "error", err)
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			metrics.ObserveProxyRequest("http", "upstream_error", time.Since(startTime))
+			writeUpstreamError(w, requestID)
 			return
 		}
+		metrics.ObserveProxyRequest("http", "success", time.Since(startTime))
 		copyResponse(w, resp)
 		return
 	}
@@ -147,9 +162,11 @@ func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.
 			"error", err,
 			"duration_ms", duration,
 		)
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		metrics.ObserveProxyRequest("http", "upstream_error", time.Since(startTime))
+		writeUpstreamError(w, requestID)
 		return
 	}
+	metrics.ObserveProxyRequest("http", "success", time.Since(startTime))
 
 	h.logger.Debug("proxy request completed",
 		"source", "proxy",
@@ -167,9 +184,11 @@ func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.
 func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 	host := r.Host
+	requestID := uuid.New().String()
 
 	h.logger.Debug("handling CONNECT request",
 		"source", "proxy",
+		"request_id", requestID,
 		"host", host,
 	)
 
@@ -188,10 +207,12 @@ func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *ht
 	if err != nil {
 		h.logger.Error("CONNECT upstream failed",
 			"source", "proxy",
+			"request_id", requestID,
 			"host", host,
 			"error", err,
 		)
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		metrics.ObserveProxyRequest("connect", "upstream_error", time.Since(startTime))
+		writeUpstreamError(w, requestID)
 		return
 	}
 	defer upstreamConn.Close()
@@ -200,6 +221,7 @@ func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *ht
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		h.logger.Error("ResponseWriter does not support Hijack")
+		metrics.ObserveProxyRequest("connect", "internal_error", time.Since(startTime))
 		http.Error(w, "hijack not supported", http.StatusInternalServerError)
 		return
 	}
@@ -207,6 +229,7 @@ func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *ht
 	clientConn, clientBuf, err := hijacker.Hijack()
 	if err != nil {
 		h.logger.Error("hijack failed", "error", err)
+		metrics.ObserveProxyRequest("connect", "internal_error", time.Since(startTime))
 		return
 	}
 	defer clientConn.Close()
@@ -214,6 +237,7 @@ func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *ht
 	// Send 200 Connection Established to the client.
 	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		h.logger.Error("failed to write CONNECT response", "error", err)
+		metrics.ObserveProxyRequest("connect", "internal_error", time.Since(startTime))
 		return
 	}
 
@@ -226,11 +250,20 @@ func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *ht
 	}
 
 	// Measure time-to-establish before the (long-lived) tunnel copy.
-	duration := int(time.Since(startTime).Milliseconds())
+	establish := time.Since(startTime)
+	duration := int(establish.Milliseconds())
+	// Counted at establishment so rates and latency aren't delayed by the
+	// tunnel's lifetime; how the tunnel ended is tracked separately below.
+	metrics.ObserveProxyRequest("connect", "success", establish)
 
 	// Bidirectional copy — uses splice(2) on Linux for zero-copy. This blocks
 	// until either direction closes or errors.
-	copyErr := BidirectionalCopy(clientConn, upstreamConn)
+	copyErr := h.runTunnel(clientConn, upstreamConn)
+	closeResult := "clean"
+	if copyErr != nil {
+		closeResult = "error"
+	}
+	metrics.TunnelsClosed.WithLabelValues(closeResult).Inc()
 
 	// Record the CONNECT outcome based on the copy result: a tunnel that fails
 	// immediately must not be logged as a success (AUD-37). A healthy tunnel
@@ -255,6 +288,14 @@ func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *ht
 			h.tracker.RecordRequest(recordCtx, record) //nolint:errcheck
 		}()
 	}
+}
+
+// runTunnel copies between client and upstream while tracking the open
+// tunnel in the active-tunnels gauge (decremented even if the copy panics).
+func (h *UpstreamProxyHandler) runTunnel(clientConn, upstreamConn net.Conn) error {
+	metrics.ActiveTunnels.Inc()
+	defer metrics.ActiveTunnels.Dec()
+	return BidirectionalCopy(clientConn, upstreamConn)
 }
 
 // hopHeaders are hop-by-hop headers that must not be forwarded from the

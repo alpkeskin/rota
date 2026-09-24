@@ -11,6 +11,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/api/handlers"
 	"github.com/alpkeskin/rota/core/internal/config"
 	"github.com/alpkeskin/rota/core/internal/database"
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/internal/services"
@@ -39,8 +40,10 @@ type Server struct {
 	port              int
 	jwtSecret         string
 	authRL            *authRateLimiter
+	exportRL          *authRateLimiter
 	corsOrigins       []string
 	trustProxyHeaders bool
+	metricsToken      string
 
 	// Proxy server reference for reloading
 	proxyServer ProxyServer
@@ -150,14 +153,26 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	)
 
 	s := &Server{
-		router:               chi.NewRouter(),
-		logger:               log,
-		db:                   db,
-		port:                 cfg.APIPort,
-		jwtSecret:            jwtSecret,
-		authRL:               authRL,
+		router:    chi.NewRouter(),
+		logger:    log,
+		db:        db,
+		port:      cfg.APIPort,
+		jwtSecret: jwtSecret,
+		authRL:    authRL,
+		// Per-IP failure blocking only: no global lockout (globalMax 0), so
+		// anonymous floods can't deny the export to every legitimate user.
+		exportRL: newAuthRateLimiter(
+			cfg.AuthIPMaxAttempts,
+			cfg.AuthIPWindowMinutes,
+			cfg.AuthIPBlockMinutes,
+			0,
+			0,
+			cfg.TrustProxyHeaders,
+			log,
+		),
 		corsOrigins:          cfg.CORSAllowedOrigins,
 		trustProxyHeaders:    cfg.TrustProxyHeaders,
+		metricsToken:         cfg.MetricsToken,
 		authHandler:          authHandler,
 		healthHandler:        healthHandler,
 		dashboardHandler:     dashboardHandler,
@@ -248,6 +263,7 @@ func (s *Server) setupMiddleware() {
 		s.router.Use(middleware.RealIP)
 	}
 	s.router.Use(LoggerMiddleware(s.logger))
+	s.router.Use(MetricsMiddleware())
 	s.router.Use(middleware.Recoverer)
 	// No global timeout — health-check routes need minutes; individual routes handle their own timeouts
 }
@@ -256,14 +272,24 @@ func (s *Server) setupMiddleware() {
 func (s *Server) setupRoutes() {
 	// ── Fully public routes ────────────────────────────────────────────────
 	s.router.Get("/health", s.healthHandler.Health)
+	s.router.Get("/livez", s.healthHandler.Livez)
+	s.router.Get("/readyz", s.healthHandler.Readyz)
+
+	// Prometheus metrics. Not routed by the bundled Caddy (internal network
+	// only); set METRICS_TOKEN to require a bearer token when the API port
+	// is reachable from outside.
+	s.router.Method(http.MethodGet, "/metrics", metrics.Handler(s.metricsToken))
 
 	// API Documentation (public — read-only reference)
 	s.router.Get("/docs", s.documentationHandler.ServeDocumentation)
 	s.router.Get("/api/v1/swagger.json", s.serveSwaggerJSON)
 
-	// Working Proxy Pool Export (public endpoint authenticated via URL query params)
-	s.router.Get("/api/v1/proxy-users/export-working-proxies", s.userHandler.ExportWorkingProxies)
-	s.router.Get("/api/v1/users/working-proxies", s.userHandler.ExportWorkingProxies)
+	// Working Proxy Pool Export (public; authenticated per request with an
+	// export token or the proxy user's credentials). It has its own
+	// brute-force limiter so export traffic can never trip the login lockout.
+	export := s.exportLimited(http.HandlerFunc(s.userHandler.ExportWorkingProxies))
+	s.router.Method(http.MethodGet, "/api/v1/proxy-users/export-working-proxies", export)
+	s.router.Method(http.MethodGet, "/api/v1/users/working-proxies", export)
 
 	// Auth: only login is public; everything else requires a valid JWT
 	// Auth rate limiter wraps the login handler — per-IP block + global lockout
@@ -327,6 +353,8 @@ func (s *Server) setupRoutes() {
 		r.Get("/proxy-users/{id}", s.userHandler.Get)
 		r.Put("/proxy-users/{id}", s.userHandler.Update)
 		r.Delete("/proxy-users/{id}", s.userHandler.Delete)
+		r.Post("/proxy-users/{id}/export-token", s.userHandler.RotateExportToken)
+		r.Delete("/proxy-users/{id}/export-token", s.userHandler.RevokeExportToken)
 
 		// Proxy Pools
 		r.Get("/pools", s.poolHandler.List)
@@ -357,6 +385,22 @@ func (s *Server) setupRoutes() {
 	// WebSocket routes — protected via token query param
 	s.router.With(JWTMiddleware(s.jwtSecret)).Get("/ws/dashboard", s.websocketHandler.DashboardWebSocket)
 	s.router.With(JWTMiddleware(s.jwtSecret)).Get("/ws/logs", s.websocketHandler.LogsWebSocket)
+}
+
+// exportLimited applies the per-IP brute-force limiter to password-based
+// export requests only. Export tokens carry 256 random bits and can't be
+// guessed, so token requests skip it: otherwise one client polling with a
+// revoked token would get the whole IP (a NAT, a shared host) blocked for
+// every other user with a valid token.
+func (s *Server) exportLimited(next http.Handler) http.Handler {
+	limited := s.exportRL.Middleware()(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handlers.ExportRequestUsesToken(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		limited.ServeHTTP(w, r)
+	})
 }
 
 // Start starts the API server

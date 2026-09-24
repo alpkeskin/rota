@@ -28,14 +28,17 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/api"
 	"github.com/alpkeskin/rota/core/internal/config"
 	"github.com/alpkeskin/rota/core/internal/database"
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/secrets"
 	"github.com/alpkeskin/rota/core/internal/services"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 )
@@ -72,6 +75,12 @@ func run() error {
 	// Run database migrations
 	if err := db.Migrate(ctx); err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	// Configure at-rest encryption for sensitive columns before anything reads
+	// them, then seal any legacy plaintext passwords.
+	if err := setupEncryption(ctx, cfg, db, log); err != nil {
+		return err
 	}
 
 	// Create repositories
@@ -128,6 +137,15 @@ func run() error {
 			fmt.Fprintf(os.Stderr, "failed to write log to database: %v\n", err)
 		}
 	})
+
+	// Metrics backed by state owned by other packages.
+	metrics.RegisterCounterFunc("log_hook_dropped_total",
+		"Log events dropped because the database log hook queue was full.",
+		func() float64 { return float64(log.DroppedHookEvents()) })
+	metrics.RegisterCounterFunc("secrets_decrypt_failures_total",
+		"Stored secrets that could not be decrypted with any configured key.",
+		func() float64 { return float64(secrets.DecryptFailures()) })
+	metrics.RegisterUpstreamInventory(proxyRepo.CountByStatus)
 
 	// Create and start log cleanup service
 	logCleanupService := services.NewLogCleanupService(db, settingsRepo, log)
@@ -217,5 +235,76 @@ func run() error {
 	}
 
 	log.Info("shutdown completed successfully")
+	return nil
+}
+
+// setupEncryption builds the keyring used to seal upstream proxy passwords and
+// re-encrypts rows that are still plaintext or sealed with a retired key.
+//
+// Key precedence: ROTA_ENCRYPTION_KEY is the primary when set; otherwise a key
+// generated once and stored in the database is used. Retired keys from
+// ROTA_ENCRYPTION_KEYS_PREVIOUS and, when an explicit key is set, any stored
+// database key remain valid for decryption so switching keys never strands data.
+func setupEncryption(ctx context.Context, cfg *config.Config, db *database.DB, log *logger.Logger) error {
+	secretRepo := repository.NewSecretRepository(db)
+
+	var primary []byte
+	var fallback [][]byte
+	if cfg.EncryptionKey != "" {
+		primary = secrets.DeriveKey(cfg.EncryptionKey)
+		stored, err := secretRepo.GetEncryptionKey(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read stored encryption key: %w", err)
+		}
+		if stored != "" {
+			fallback = append(fallback, secrets.DeriveKey(stored))
+		}
+	} else {
+		stored, created, err := secretRepo.EnsureEncryptionKey(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to load encryption key: %w", err)
+		}
+		if created {
+			log.Info("generated and stored a new data-encryption key")
+		}
+		log.Warn("ROTA_ENCRYPTION_KEY is not set; proxy passwords are encrypted with a key stored in the database. " +
+			"Set ROTA_ENCRYPTION_KEY (e.g. `openssl rand -base64 32`) to protect them against a full database leak")
+		primary = secrets.DeriveKey(stored)
+	}
+	for _, k := range cfg.EncryptionKeysPrevious {
+		fallback = append(fallback, secrets.DeriveKey(k))
+	}
+	if err := secrets.SetKeys(primary, fallback...); err != nil {
+		return fmt.Errorf("failed to configure encryption keys: %w", err)
+	}
+
+	// Decrypt failures happen on hot read paths (selector refreshes every 30s),
+	// so report them at most once a minute.
+	var lastReport atomic.Int64
+	secrets.OnDecryptError(func(err error) {
+		now := time.Now().Unix()
+		if last := lastReport.Load(); now-last >= 60 && lastReport.CompareAndSwap(last, now) {
+			log.Error("failed to decrypt a stored proxy password; the proxy will be used without credentials. "+
+				"Was ROTA_ENCRYPTION_KEY changed without listing the old key in ROTA_ENCRYPTION_KEYS_PREVIOUS?",
+				"error", err, "total_failures", secrets.DecryptFailures())
+		}
+	})
+
+	res, err := repository.NewProxyRepository(db).ReencryptPasswords(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt stored proxy passwords: %w", err)
+	}
+	if res.Updated > 0 {
+		log.Info("encrypted stored proxy passwords with the current key", "count", res.Updated)
+	}
+	if res.Undecryptable > 0 {
+		// Starting anyway would dial those proxies without credentials and
+		// seal new writes under a key the old rows don't share — refuse, so a
+		// missing or changed key is fixed before any traffic flows.
+		return fmt.Errorf("%d stored proxy password(s) cannot be decrypted with the configured key(s): "+
+			"set ROTA_ENCRYPTION_KEY to the key they were written with, or list it in "+
+			"ROTA_ENCRYPTION_KEYS_PREVIOUS (if the key is lost, clear those passwords in the proxies table)",
+			res.Undecryptable)
+	}
 	return nil
 }

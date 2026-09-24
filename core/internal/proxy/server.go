@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/database"
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/alpkeskin/rota/core/pkg/safeworker"
@@ -30,6 +31,7 @@ func (p *proxyRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. User auth middleware (sets PoolChain in context or falls back to legacy)
 	r, reject := p.userAuthMw.HandleRequest(r)
 	if reject != nil {
+		metrics.ProxyRequests.WithLabelValues(requestKind(r), "rejected_auth").Inc()
 		writeHTTPResponse(w, reject)
 		return
 	}
@@ -37,6 +39,7 @@ func (p *proxyRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 2. Rate limit middleware
 	r, reject = p.rateLimitMw.HandleRequest(r)
 	if reject != nil {
+		metrics.ProxyRequests.WithLabelValues(requestKind(r), "rejected_rate_limit").Inc()
 		writeHTTPResponse(w, reject)
 		return
 	}
@@ -47,6 +50,14 @@ func (p *proxyRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		p.upstream.HandleHTTPRequest(w, r)
 	}
+}
+
+// requestKind is the metrics label for a proxy request.
+func requestKind(r *http.Request) string {
+	if r.Method == http.MethodConnect {
+		return "connect"
+	}
+	return "http"
 }
 
 // writeHTTPResponse translates a middleware-returned *http.Response into

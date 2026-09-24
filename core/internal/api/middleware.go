@@ -2,10 +2,13 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -30,6 +33,43 @@ func LoggerMiddleware(log *logger.Logger) func(next http.Handler) http.Handler {
 				"remote_addr", r.RemoteAddr,
 				"request_id", middleware.GetReqID(r.Context()),
 			)
+		})
+	}
+}
+
+// MetricsMiddleware records per-route request counts and latency. It labels
+// by chi route pattern (e.g. /api/v1/proxies/{id}), never the raw path, so
+// label cardinality stays bounded; unmatched paths share one label.
+func MetricsMiddleware() func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			next.ServeHTTP(ww, r)
+
+			route := "unmatched"
+			if rctx := chi.RouteContext(r.Context()); rctx != nil {
+				if p := rctx.RoutePattern(); p != "" {
+					route = p
+				}
+			}
+			status := ww.Status()
+			if status == 0 {
+				// Nothing was written through w: either the connection was
+				// hijacked for a WebSocket upgrade, or the handler returned
+				// without writing, which net/http answers with an empty 200.
+				if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+					status = http.StatusSwitchingProtocols
+				} else {
+					status = http.StatusOK
+				}
+			}
+			statusLabel := strconv.Itoa(status)
+			metrics.APIRequests.WithLabelValues(route, r.Method, statusLabel).Inc()
+			// Long-lived WebSocket streams would swamp the latency histogram.
+			if !strings.HasPrefix(route, "/ws/") {
+				metrics.APIRequestDuration.WithLabelValues(route, r.Method).Observe(time.Since(start).Seconds())
+			}
 		})
 	}
 }
