@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/alpkeskin/rota/core/internal/auth"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/internal/services"
@@ -58,6 +59,11 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	// Never expose proxy authentication password in response
 	settings.Authentication.Password = ""
+	// The MaxMind license key is a credential; only admins (who can change
+	// settings) see it.
+	if p := auth.FromContext(r.Context()); p == nil || !p.Role.AtLeast(auth.RoleAdmin) {
+		settings.GeoIP.MaxMindLicenseKey = ""
+	}
 
 	h.jsonResponse(w, http.StatusOK, settings)
 }

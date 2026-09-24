@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/api/handlers"
+	"github.com/alpkeskin/rota/core/internal/auth"
 	"github.com/alpkeskin/rota/core/internal/config"
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/metrics"
@@ -44,6 +45,9 @@ type Server struct {
 	corsOrigins       []string
 	trustProxyHeaders bool
 	metricsToken      string
+	authn             *authenticator
+	auditRepo         *repository.AuditRepository
+	auditRetention    time.Duration
 
 	// Proxy server reference for reloading
 	proxyServer ProxyServer
@@ -65,6 +69,7 @@ type Server struct {
 	sourceHandler        *handlers.SourceHandler
 	poolHandler          *handlers.PoolHandler
 	userHandler          *handlers.UserHandler
+	accessHandler        *handlers.AccessHandler
 }
 
 // New creates a new API server instance
@@ -77,12 +82,14 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	sourceRepo := repository.NewSourceRepository(db)
 	poolRepo := repository.NewPoolRepository(db)
 	userRepo := repository.NewUserRepository(db)
-	adminRepo := repository.NewAdminRepository(db)
+	accountRepo := repository.NewAccountRepository(db)
+	apiKeyRepo := repository.NewAPIKeyRepository(db)
+	auditRepo := repository.NewAuditRepository(db)
 
-	// Seed admin credentials from env on first start (no-op if already seeded).
-	// If the password was auto-generated (ROTA_ADMIN_PASSWORD unset), surface it
-	// loudly in the logs — it's the only time it's ever shown.
-	if seeded, err := adminRepo.Seed(context.Background(), cfg.AdminUser, cfg.AdminPass); err != nil {
+	// Seed the first admin account from env on first start (no-op once any
+	// account exists). If the password was auto-generated (ROTA_ADMIN_PASSWORD
+	// unset), surface it loudly in the logs — it's the only time it's shown.
+	if seeded, err := accountRepo.Seed(context.Background(), cfg.AdminUser, cfg.AdminPass); err != nil {
 		log.Warn("failed to seed admin credentials", "error", err)
 	} else if seeded && cfg.AdminPassGenerated {
 		log.Warn("======================================================")
@@ -124,7 +131,8 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	poolSvc := services.NewPoolService(poolRepo, proxyRepo, log)
 
 	// Initialize handlers
-	authHandler := handlers.NewAuthHandler(settingsRepo, adminRepo, log, jwtSecret, cfg.AdminUser, cfg.AdminPass)
+	authHandler := handlers.NewAuthHandler(accountRepo, auditRepo, log, jwtSecret)
+	accessHandler := handlers.NewAccessHandler(accountRepo, apiKeyRepo, auditRepo, log)
 	healthHandler := handlers.NewHealthHandler(db, proxyRepo, log)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardRepo, proxyRepo, log)
 	proxyHandler := handlers.NewProxyHandler(proxyRepo, healthChecker, log)
@@ -170,9 +178,18 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 			cfg.TrustProxyHeaders,
 			log,
 		),
-		corsOrigins:          cfg.CORSAllowedOrigins,
-		trustProxyHeaders:    cfg.TrustProxyHeaders,
-		metricsToken:         cfg.MetricsToken,
+		corsOrigins:       cfg.CORSAllowedOrigins,
+		trustProxyHeaders: cfg.TrustProxyHeaders,
+		metricsToken:      cfg.MetricsToken,
+		authn: &authenticator{
+			secret:   []byte(jwtSecret),
+			accounts: accountRepo,
+			keys:     apiKeyRepo,
+			logger:   log,
+		},
+		auditRepo:            auditRepo,
+		auditRetention:       time.Duration(cfg.AuditLogRetentionDays) * 24 * time.Hour,
+		accessHandler:        accessHandler,
 		authHandler:          authHandler,
 		healthHandler:        healthHandler,
 		dashboardHandler:     dashboardHandler,
@@ -221,6 +238,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// Pool-level health checks (PoolService cron) are authoritative.
 
 	cleanupSvc.Start(svcCtx)
+	go s.pruneAuditLog(svcCtx)
 
 	s.setupMiddleware()
 	s.setupRoutes()
@@ -295,96 +313,119 @@ func (s *Server) setupRoutes() {
 	// Auth rate limiter wraps the login handler — per-IP block + global lockout
 	s.router.With(s.authRL.Middleware()).Post("/api/v1/auth/login", s.authHandler.Login)
 
-	// ── Protected routes (JWT required) ────────────────────────────────────
+	// ── Protected routes ───────────────────────────────────────────────────
+	// Every route below authenticates (session token or API key), is audited
+	// when it changes state, and is gated by role:
+	//   viewer   — read everything except accounts, the audit log and secrets
+	//   operator — also change proxies, sources, pools and proxy users
+	//   admin    — also change settings, manage accounts, read the audit log
 	s.router.Route("/api/v1", func(r chi.Router) {
-		r.Use(JWTMiddleware(s.jwtSecret))
+		r.Use(s.authn.Middleware())
+		r.Use(AuditMiddleware(s.auditRepo, s.logger))
 
-		// Auth (require token — change-password, whoami)
-		r.Post("/auth/change-password", s.authHandler.ChangePassword)
-		r.Get("/auth/me", s.authHandler.GetAdminInfo)
+		// Own account — any role, dashboard sessions only.
+		r.Group(func(r chi.Router) {
+			r.Use(RequireSession())
+			r.Post("/auth/change-password", s.authHandler.ChangePassword)
+			r.Post("/auth/sign-out-everywhere", s.authHandler.SignOutEverywhere)
+			r.Get("/api-keys", s.accessHandler.ListAPIKeys)
+			r.Post("/api-keys", s.accessHandler.CreateAPIKey)
+			r.Delete("/api-keys/{id}", s.accessHandler.RevokeAPIKey)
+		})
 
-		// Health & Status
-		r.Get("/status", s.healthHandler.Status)
-		r.Get("/database/health", s.healthHandler.DatabaseHealth)
-		r.Get("/database/stats", s.healthHandler.DatabaseStats)
+		// Read-only — viewer and up.
+		r.Group(func(r chi.Router) {
+			r.Use(RequireRole(auth.RoleViewer))
+			r.Get("/auth/me", s.authHandler.GetAdminInfo)
+			r.Get("/status", s.healthHandler.Status)
+			r.Get("/database/health", s.healthHandler.DatabaseHealth)
+			r.Get("/database/stats", s.healthHandler.DatabaseStats)
+			r.Get("/metrics/system", s.metricsHandler.GetSystemMetrics)
+			r.Get("/dashboard/stats", s.dashboardHandler.GetStats)
+			r.Get("/dashboard/charts/response-time", s.dashboardHandler.GetResponseTimeChart)
+			r.Get("/dashboard/charts/success-rate", s.dashboardHandler.GetSuccessRateChart)
+			r.Get("/proxies", s.proxyHandler.List)
+			r.Get("/proxies/export", s.proxyHandler.Export)
+			r.Get("/logs", s.logsHandler.List)
+			r.Get("/logs/export", s.logsHandler.Export)
+			r.Get("/settings", s.settingsHandler.Get)
+			r.Get("/sources", s.sourceHandler.List)
+			r.Get("/proxy-users", s.userHandler.List)
+			r.Get("/proxy-users/{id}", s.userHandler.Get)
+			r.Get("/pools", s.poolHandler.List)
+			r.Get("/pools/geo-summary", s.poolHandler.GeoSummary)
+			r.Get("/pools/geo-countries", s.poolHandler.GeoByCountry)
+			r.Get("/pools/geo-cities/{country_code}", s.poolHandler.GeoCitiesByCountry)
+			r.Get("/pools/isp-list", s.poolHandler.GetISPList)
+			r.Get("/pools/tag-list", s.poolHandler.GetTagList)
+			r.Get("/pools/{id}", s.poolHandler.Get)
+			r.Get("/pools/{id}/proxies", s.poolHandler.GetProxies)
+			r.Get("/pools/{id}/export", s.poolHandler.Export)
+			r.Get("/pools/{id}/health-check/jobs", s.poolHandler.HealthCheckJobs)
+			r.Get("/pools/{id}/health-check/{job_id}", s.poolHandler.HealthCheckStatus)
+			r.Get("/pools/{id}/alert-rules", s.poolHandler.ListAlertRules)
+		})
 
-		// System Metrics
-		r.Get("/metrics/system", s.metricsHandler.GetSystemMetrics)
+		// Inventory changes — operator and up.
+		r.Group(func(r chi.Router) {
+			r.Use(RequireRole(auth.RoleOperator))
+			r.Post("/proxies", s.proxyHandler.Create)
+			r.Post("/proxies/bulk", s.proxyHandler.BulkCreate)
+			r.Post("/proxies/bulk-delete", s.proxyHandler.BulkDelete)
+			r.Post("/proxies/bulk-tags", s.proxyHandler.BulkTag)
+			r.Delete("/proxies", s.proxyHandler.DeleteAll)
+			r.Put("/proxies/{id}", s.proxyHandler.Update)
+			r.Delete("/proxies/{id}", s.proxyHandler.Delete)
+			r.Post("/proxies/{id}/test", s.proxyHandler.Test)
+			r.Post("/proxies/reload", s.ReloadProxyPool)
 
-		// Dashboard endpoints
-		r.Get("/dashboard/stats", s.dashboardHandler.GetStats)
-		r.Get("/dashboard/charts/response-time", s.dashboardHandler.GetResponseTimeChart)
-		r.Get("/dashboard/charts/success-rate", s.dashboardHandler.GetSuccessRateChart)
+			r.Post("/sources", s.sourceHandler.Create)
+			r.Put("/sources/{id}", s.sourceHandler.Update)
+			r.Delete("/sources/{id}", s.sourceHandler.Delete)
+			r.Post("/sources/{id}/fetch", s.sourceHandler.FetchNow)
+			r.Post("/sources/enrich-geo", s.sourceHandler.EnrichGeo)
 
-		// Proxy management
-		r.Get("/proxies", s.proxyHandler.List)
-		r.Post("/proxies", s.proxyHandler.Create)
-		r.Post("/proxies/bulk", s.proxyHandler.BulkCreate)
-		r.Post("/proxies/bulk-delete", s.proxyHandler.BulkDelete)
-		r.Post("/proxies/bulk-tags", s.proxyHandler.BulkTag)
-		r.Delete("/proxies", s.proxyHandler.DeleteAll)
-		r.Get("/proxies/export", s.proxyHandler.Export)
-		r.Put("/proxies/{id}", s.proxyHandler.Update)
-		r.Delete("/proxies/{id}", s.proxyHandler.Delete)
-		r.Post("/proxies/{id}/test", s.proxyHandler.Test)
-		r.Post("/proxies/reload", s.ReloadProxyPool)
+			r.Post("/proxy-users", s.userHandler.Create)
+			r.Put("/proxy-users/{id}", s.userHandler.Update)
+			r.Delete("/proxy-users/{id}", s.userHandler.Delete)
+			r.Post("/proxy-users/{id}/export-token", s.userHandler.RotateExportToken)
+			r.Delete("/proxy-users/{id}/export-token", s.userHandler.RevokeExportToken)
 
-		// System logs
-		r.Get("/logs", s.logsHandler.List)
-		r.Get("/logs/export", s.logsHandler.Export)
+			r.Post("/pools", s.poolHandler.Create)
+			r.Put("/pools/{id}", s.poolHandler.Update)
+			r.Delete("/pools/{id}", s.poolHandler.Delete)
+			r.Post("/pools/{id}/proxies", s.poolHandler.AddProxies)
+			r.Delete("/pools/{id}/proxies", s.poolHandler.RemoveProxies)
+			r.Post("/pools/{id}/sync", s.poolHandler.Sync)
+			r.Post("/pools/{id}/health-check", s.poolHandler.HealthCheck)
+			r.Post("/pools/{id}/alert-rules", s.poolHandler.CreateAlertRule)
+			r.Put("/pools/{id}/alert-rules/{rule_id}", s.poolHandler.UpdateAlertRule)
+			r.Delete("/pools/{id}/alert-rules/{rule_id}", s.poolHandler.DeleteAlertRule)
+		})
 
-		// Settings
-		r.Get("/settings", s.settingsHandler.Get)
-		r.Put("/settings", s.settingsHandler.Update)
-		r.Post("/settings/reset", s.settingsHandler.Reset)
-		r.Post("/settings/geoip/update-db", s.settingsHandler.UpdateGeoIPDB)
+		// Settings and the audit log — admin.
+		r.Group(func(r chi.Router) {
+			r.Use(RequireRole(auth.RoleAdmin))
+			r.Put("/settings", s.settingsHandler.Update)
+			r.Post("/settings/reset", s.settingsHandler.Reset)
+			r.Post("/settings/geoip/update-db", s.settingsHandler.UpdateGeoIPDB)
+			r.Get("/audit-log", s.accessHandler.ListAuditLog)
+		})
 
-		// Proxy Sources
-		r.Get("/sources", s.sourceHandler.List)
-		r.Post("/sources", s.sourceHandler.Create)
-		r.Put("/sources/{id}", s.sourceHandler.Update)
-		r.Delete("/sources/{id}", s.sourceHandler.Delete)
-		r.Post("/sources/{id}/fetch", s.sourceHandler.FetchNow)
-		r.Post("/sources/enrich-geo", s.sourceHandler.EnrichGeo)
-
-		// Proxy Users (per-user pool authentication)
-		r.Get("/proxy-users", s.userHandler.List)
-		r.Post("/proxy-users", s.userHandler.Create)
-		r.Get("/proxy-users/{id}", s.userHandler.Get)
-		r.Put("/proxy-users/{id}", s.userHandler.Update)
-		r.Delete("/proxy-users/{id}", s.userHandler.Delete)
-		r.Post("/proxy-users/{id}/export-token", s.userHandler.RotateExportToken)
-		r.Delete("/proxy-users/{id}/export-token", s.userHandler.RevokeExportToken)
-
-		// Proxy Pools
-		r.Get("/pools", s.poolHandler.List)
-		r.Post("/pools", s.poolHandler.Create)
-		r.Get("/pools/geo-summary", s.poolHandler.GeoSummary)
-		r.Get("/pools/geo-countries", s.poolHandler.GeoByCountry)
-		r.Get("/pools/geo-cities/{country_code}", s.poolHandler.GeoCitiesByCountry)
-		r.Get("/pools/isp-list", s.poolHandler.GetISPList)
-		r.Get("/pools/tag-list", s.poolHandler.GetTagList)
-		r.Get("/pools/{id}", s.poolHandler.Get)
-		r.Put("/pools/{id}", s.poolHandler.Update)
-		r.Delete("/pools/{id}", s.poolHandler.Delete)
-		r.Get("/pools/{id}/proxies", s.poolHandler.GetProxies)
-		r.Post("/pools/{id}/proxies", s.poolHandler.AddProxies)
-		r.Delete("/pools/{id}/proxies", s.poolHandler.RemoveProxies)
-		r.Post("/pools/{id}/sync", s.poolHandler.Sync)
-		r.Get("/pools/{id}/export", s.poolHandler.Export)
-		r.Post("/pools/{id}/health-check", s.poolHandler.HealthCheck)
-		r.Get("/pools/{id}/health-check/jobs", s.poolHandler.HealthCheckJobs)
-		r.Get("/pools/{id}/health-check/{job_id}", s.poolHandler.HealthCheckStatus)
-		// Alert rules
-		r.Get("/pools/{id}/alert-rules", s.poolHandler.ListAlertRules)
-		r.Post("/pools/{id}/alert-rules", s.poolHandler.CreateAlertRule)
-		r.Put("/pools/{id}/alert-rules/{rule_id}", s.poolHandler.UpdateAlertRule)
-		r.Delete("/pools/{id}/alert-rules/{rule_id}", s.poolHandler.DeleteAlertRule)
+		// Account management — admin, dashboard sessions only.
+		r.Group(func(r chi.Router) {
+			r.Use(RequireRole(auth.RoleAdmin), RequireSession())
+			r.Get("/accounts", s.accessHandler.ListAccounts)
+			r.Post("/accounts", s.accessHandler.CreateAccount)
+			r.Put("/accounts/{id}", s.accessHandler.UpdateAccount)
+			r.Delete("/accounts/{id}", s.accessHandler.DeleteAccount)
+			r.Post("/accounts/{id}/revoke-sessions", s.accessHandler.RevokeAccountSessions)
+		})
 	})
 
-	// WebSocket routes — protected via token query param
-	s.router.With(JWTMiddleware(s.jwtSecret)).Get("/ws/dashboard", s.websocketHandler.DashboardWebSocket)
-	s.router.With(JWTMiddleware(s.jwtSecret)).Get("/ws/logs", s.websocketHandler.LogsWebSocket)
+	// WebSocket routes — authenticated via the token query param.
+	s.router.With(s.authn.Middleware(), RequireRole(auth.RoleViewer)).Get("/ws/dashboard", s.websocketHandler.DashboardWebSocket)
+	s.router.With(s.authn.Middleware(), RequireRole(auth.RoleViewer)).Get("/ws/logs", s.websocketHandler.LogsWebSocket)
 }
 
 // exportLimited applies the per-IP brute-force limiter to password-based
@@ -401,6 +442,39 @@ func (s *Server) exportLimited(next http.Handler) http.Handler {
 		}
 		limited.ServeHTTP(w, r)
 	})
+}
+
+// pruneAuditLog deletes audit entries older than the retention period once a
+// day (and once at startup). A zero retention keeps entries forever.
+func (s *Server) pruneAuditLog(ctx context.Context) {
+	if s.auditRetention <= 0 {
+		return
+	}
+	prune := func() {
+		pctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		n, err := s.auditRepo.DeleteOlderThan(pctx, time.Now().Add(-s.auditRetention))
+		if err != nil {
+			if ctx.Err() == nil {
+				s.logger.Error("failed to prune audit log", "error", err)
+			}
+			return
+		}
+		if n > 0 {
+			s.logger.Info("pruned audit log", "deleted", n)
+		}
+	}
+	prune()
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			prune()
+		}
+	}
 }
 
 // Start starts the API server

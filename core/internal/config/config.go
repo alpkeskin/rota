@@ -36,6 +36,10 @@ type Config struct {
 	// startup. (ROTA_ENCRYPTION_KEYS_PREVIOUS, comma-separated)
 	EncryptionKeysPrevious []string
 
+	// AuditLogRetentionDays is how long audit entries are kept; 0 keeps them
+	// forever. (AUDIT_LOG_RETENTION_DAYS, default 365)
+	AuditLogRetentionDays int
+
 	// MetricsToken, when set, requires "Authorization: Bearer <token>" on the
 	// Prometheus /metrics endpoint. (METRICS_TOKEN)
 	MetricsToken string
@@ -117,6 +121,7 @@ func Load() (*Config, error) {
 		EncryptionKey:          strings.TrimSpace(os.Getenv("ROTA_ENCRYPTION_KEY")),
 		EncryptionKeysPrevious: splitList(os.Getenv("ROTA_ENCRYPTION_KEYS_PREVIOUS")),
 		MetricsToken:           strings.TrimSpace(os.Getenv("METRICS_TOKEN")),
+		AuditLogRetentionDays:  getEnvAsInt("AUDIT_LOG_RETENTION_DAYS", 365),
 		CORSAllowedOrigins:     splitAndTrim(getEnv("CORS_ALLOWED_ORIGINS", "*")),
 
 		TrustProxyHeaders: getEnvAsBool("TRUST_PROXY_HEADERS", false),
