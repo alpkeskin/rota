@@ -35,6 +35,8 @@ services:
       - "${PROXY_PORT:-8000}:${PROXY_PORT:-8000}"
     environment:
       - PROXY_PORT=${PROXY_PORT:-8000}
+      # Optional SOCKS5 listener; publish the port in docker-compose.override.yml.
+      - SOCKS_PORT=${SOCKS_PORT:-0}
       - API_PORT=8001
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - DB_HOST=${DB_HOST:-timescaledb}

@@ -71,7 +71,9 @@
 **👤 Users & routing**
 - `http://user:pass@host:8000` — each user gets a main pool + ordered fallbacks
 - Automatic failover across the chain, fresh proxy on every retry
-- Per-user `requests_per_minute` cap and working-proxy export API
+- Per-user limits: requests per minute, concurrent connections, monthly bandwidth quota
+- Exit country, city and sticky sessions chosen in the username (`alice-country-de-session-x`)
+- HTTP and optional SOCKS5 inbound, working-proxy export API
 - All requests, success rates and response times tracked per proxy
 
 </td>
@@ -153,6 +155,7 @@ only to change something. The common knobs:
 | `CORS_ALLOWED_ORIGINS` | `*` | API CORS allowlist (irrelevant behind the proxy) |
 | `TRUST_PROXY_HEADERS` | `true` | Trust `X-Forwarded-For`/`X-Real-IP` for the login rate limiter. Keep `true` behind the bundled Caddy; set `false` if the API is exposed directly |
 | `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `SOCKS_PORT` | _(off)_ | Also serve the proxy over SOCKS5 on this port (see [SOCKS5](#socks5)) |
 | `ROTA_ENCRYPTION_KEY` | _(generated, stored in DB)_ | Key that encrypts upstream proxy passwords at rest. Set it (e.g. `openssl rand -base64 32`) so a database leak alone doesn't expose them — see [Encryption at rest](#encryption-at-rest) |
 | `ROTA_ENCRYPTION_KEYS_PREVIOUS` | _(empty)_ | Comma-separated retired keys, still accepted for decryption during key rotation |
 | `METRICS_TOKEN` | _(empty)_ | Require `Authorization: Bearer <token>` on `/metrics` |
@@ -478,7 +481,8 @@ Threshold: 9
 1. Create pools for each location/use-case
 2. Go to **Users**, click **Add user**
 3. Set a main pool and optional fallback pools (in priority order)
-4. Configure max retries across the chain and an optional `requests_per_minute` cap
+4. Configure max retries and, optionally, limits: requests per minute, a
+   monthly bandwidth quota and a cap on concurrent connections
 
 Users connect as:
 ```
@@ -490,7 +494,74 @@ http://username:password@your-proxy-host:8000
   <img src="static/routing.png" alt="Flowchart: request on :8000 → with credentials use the user's main pool, fall back to the next pool when none is alive, forward via a proxy, retry with a fresh proxy until it answers; without credentials use global rotation" width="640">
 </picture>
 
-If the main pool has no live IPs the request automatically cascades to the next fallback pool; each retry picks a fresh proxy and skips the ones that already failed.
+If the main pool has no live IPs the request automatically cascades to the next fallback pool; each retry picks a fresh proxy and skips the ones that already failed. A user without any pool uses the global rotation.
+
+#### Choosing the exit: country, city and sticky sessions
+
+Routing options ride in the username, the convention commercial proxy
+networks use — no client changes needed:
+
+```bash
+# Exit from Germany
+curl -x http://alice-country-de:password@proxy-host:8000 https://api.ipify.org
+
+# Exit from New York (use _ for spaces)
+curl -x http://alice-country-us-city-new_york:password@proxy-host:8000 https://api.ipify.org
+
+# Sticky session: the same id keeps the same exit IP for 10 minutes
+# (sesstime sets 1-1440 minutes)
+curl -x http://alice-session-a1b2c3-sesstime-30:password@proxy-host:8000 https://api.ipify.org
+```
+
+| Option | Value | Effect |
+|---|---|---|
+| `country` | ISO 3166-1 alpha-2 (`us`, `de`) | Only proxies geolocated in that country |
+| `city` | city name, `_` for spaces | Only proxies in that city |
+| `session` | 1-64 letters/digits | Pin the exit proxy for the session's lifetime; if it stops working the session moves to another matching proxy and stays there |
+| `sesstime` | minutes, 1-1440 (default 10) | Session lifetime, counted from its first request |
+
+Options apply within the user's pools (main, then fallbacks), so the user
+needs a pool. No match gives `502` with a message saying so; malformed
+options give `400`. Usernames of new accounts can't contain `-country-`,
+`-city-`, `-session-` or `-sesstime-`.
+
+#### Limits and usage
+
+| Limit | Over the limit |
+|---|---|
+| Requests per minute | `429` with `Retry-After` |
+| Concurrent connections (requests + tunnels) | `429` |
+| Monthly bandwidth (up + down, calendar month in UTC) | `429`; open tunnels are closed within ~10 s |
+
+Usage this month shows in **Users**; it is counted in memory and written to
+the database every 10 seconds (`rota_proxy_bytes_total` has the totals).
+
+#### Circuit breaker
+
+Independently of scheduled health checks, a proxy that fails 5 requests in a
+row on live traffic is skipped for 30 s (doubling on repeated failures, up to
+5 min), then gets one trial request. This applies to every user and the
+global rotation; if every candidate is tripped, Rota still tries one rather
+than failing outright. `rota_proxy_circuit_open` shows how many are out.
+
+#### SOCKS5
+
+Set `SOCKS_PORT` (e.g. `1080`) to also serve the proxy over SOCKS5 with the
+same users, routing options, limits and accounting (username/password auth;
+CONNECT only — no UDP):
+
+```bash
+curl -x socks5h://alice-country-de:password@proxy-host:1080 https://api.ipify.org
+```
+
+With Docker Compose, publish the port in a `docker-compose.override.yml`:
+
+```yaml
+services:
+  rota-core:
+    ports:
+      - "1080:1080"
+```
 
 #### Exporting a user's working proxies
 
@@ -599,7 +670,10 @@ Useful series:
 | `rota_proxy_requests_total{kind,outcome}` | Proxy traffic by `http`/`connect` and `success`, `upstream_error`, `internal_error`, `rejected_auth`, `rejected_rate_limit` (a CONNECT counts as `success` once the tunnel is established) |
 | `rota_proxy_tunnels_closed_total{result}` | CONNECT tunnels by how they ended: `clean` or `error` (includes resets during normal teardown — watch the ratio) |
 | `rota_proxy_request_duration_seconds` | Time to upstream response (HTTP) or tunnel establishment (CONNECT) |
-| `rota_proxy_active_tunnels` | Open CONNECT tunnels |
+| `rota_proxy_active_tunnels` | Open CONNECT and SOCKS5 tunnels |
+| `rota_proxy_bytes_total{direction}` | Proxied payload bytes, `up` (client→upstream) and `down` |
+| `rota_proxy_limit_rejections_total{reason}` | Requests refused by per-user limits: `rate_limit`, `concurrency`, `quota` |
+| `rota_proxy_circuit_open` / `rota_proxy_circuit_transitions_total{to}` | Proxies skipped by the circuit breaker, and its state changes |
 | `rota_upstream_proxies{status}` | Upstream inventory by status (read from the DB at scrape time) |
 | `rota_api_requests_total{route,method,status}` / `rota_api_request_duration_seconds` | REST API traffic by route pattern |
 | `rota_log_hook_dropped_total` | Log events dropped because the DB log queue was full |

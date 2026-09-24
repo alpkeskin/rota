@@ -34,7 +34,9 @@ import {
 import { PageHeader, Content, Section, EmptyLine, LoadingLine } from "@/components/page-header"
 import { StatStrip } from "@/components/stat-strip"
 import { Tag } from "@/components/status"
-import { count } from "@/lib/format"
+import { bytes, count } from "@/lib/format"
+
+const GiB = 1024 ** 3
 
 const DEFAULT_FORM: CreateProxyUserRequest = {
   username: "",
@@ -45,6 +47,8 @@ const DEFAULT_FORM: CreateProxyUserRequest = {
   fallback_pool_ids: [],
   max_retries: 5,
   requests_per_minute: 0,
+  monthly_bandwidth_limit_bytes: 0,
+  max_concurrent_connections: 0,
 }
 
 export default function UsersPage() {
@@ -109,6 +113,8 @@ export default function UsersPage() {
       fallback_pool_ids: u.fallback_pool_ids ?? [],
       max_retries: u.max_retries,
       requests_per_minute: u.requests_per_minute ?? 0,
+      monthly_bandwidth_limit_bytes: u.monthly_bandwidth_limit_bytes ?? 0,
+      max_concurrent_connections: u.max_concurrent_connections ?? 0,
     })
     setShowPass(false)
     setDialogOpen(true)
@@ -134,6 +140,8 @@ export default function UsersPage() {
           fallback_pool_ids: form.fallback_pool_ids,
           max_retries: form.max_retries,
           requests_per_minute: form.requests_per_minute,
+          monthly_bandwidth_limit_bytes: form.monthly_bandwidth_limit_bytes,
+          max_concurrent_connections: form.max_concurrent_connections,
         }
         if (form.password) upd.password = form.password
         await api.updateProxyUser(editUser.id, upd)
@@ -277,7 +285,7 @@ export default function UsersPage() {
         title="Users"
         description={
           <>
-            Credentials clients use on port <span className="font-mono">{PROXY_PORT}</span>. A user is routed through its main pool, then its fallbacks in order; without a pool it rotates over the whole inventory.
+            Credentials clients use on port <span className="font-mono">{PROXY_PORT}</span>. A user is routed through its main pool, then its fallbacks in order; without a pool it rotates over the whole inventory. Append <span className="font-mono">-country-us</span>, <span className="font-mono">-city-new_york</span> or <span className="font-mono">-session-&lt;id&gt;</span> to the username to pick the exit country, city or a sticky IP.
           </>
         }
       >
@@ -308,6 +316,7 @@ export default function UsersPage() {
                 <TableHead>Fallbacks</TableHead>
                 <TableHead className="text-right">Max retries</TableHead>
                 <TableHead className="text-right">Rate limit</TableHead>
+                <TableHead className="text-right">This month</TableHead>
                 <TableHead>Enabled</TableHead>
                 <TableHead>Export API</TableHead>
                 <TableHead className="w-8" />
@@ -340,6 +349,16 @@ export default function UsersPage() {
                   <TableCell className="num text-right">{u.max_retries}</TableCell>
                   <TableCell className="num text-muted-foreground text-right">
                     {u.requests_per_minute > 0 ? `${count(u.requests_per_minute)}/min` : "unlimited"}
+                  </TableCell>
+                  <TableCell
+                    className={
+                      "num text-right " +
+                      (u.monthly_bandwidth_limit_bytes > 0 && (u.bandwidth_used_bytes ?? 0) >= u.monthly_bandwidth_limit_bytes ? "text-critical" : "text-muted-foreground")
+                    }
+                    title={u.max_concurrent_connections > 0 ? `Up to ${count(u.max_concurrent_connections)} connections at once` : undefined}
+                  >
+                    {bytes(u.bandwidth_used_bytes ?? 0)}
+                    {u.monthly_bandwidth_limit_bytes > 0 && <> / {bytes(u.monthly_bandwidth_limit_bytes)}</>}
                   </TableCell>
                   <TableCell>
                     <Switch checked={u.enabled} onCheckedChange={() => toggleEnabled(u)} aria-label={`${u.username} enabled`} />
@@ -486,6 +505,26 @@ export default function UsersPage() {
                 <Label htmlFor="user-rpm">Rate limit, requests/min</Label>
                 <Input id="user-rpm" type="number" min={0} value={form.requests_per_minute ?? 0} onChange={(e) => setForm({ ...form, requests_per_minute: parseInt(e.target.value) || 0 })} />
                 <p className="text-muted-foreground text-[0.6875rem] leading-4">0 = unlimited. Over the limit the proxy answers 429.</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="user-quota">Monthly bandwidth, GB</Label>
+                <Input
+                  id="user-quota"
+                  type="number"
+                  min={0}
+                  step="any"
+                  value={form.monthly_bandwidth_limit_bytes ? +(form.monthly_bandwidth_limit_bytes / GiB).toFixed(3) : 0}
+                  onChange={(e) => setForm({ ...form, monthly_bandwidth_limit_bytes: Math.max(0, Math.round((parseFloat(e.target.value) || 0) * GiB)) })}
+                />
+                <p className="text-muted-foreground text-[0.6875rem] leading-4">Up + down, per calendar month (UTC). 0 = unlimited. Open tunnels close when it runs out.</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="user-conns">Max concurrent connections</Label>
+                <Input id="user-conns" type="number" min={0} value={form.max_concurrent_connections ?? 0} onChange={(e) => setForm({ ...form, max_concurrent_connections: Math.max(0, parseInt(e.target.value) || 0) })} />
+                <p className="text-muted-foreground text-[0.6875rem] leading-4">Open requests and tunnels at once. 0 = unlimited.</p>
               </div>
             </div>
 

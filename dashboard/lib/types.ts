@@ -445,6 +445,12 @@ export interface ProxyUser {
   fallback_pool_ids: number[]
   max_retries: number
   requests_per_minute: number
+  /** 0 = unlimited. Proxied bytes (up + down) per calendar month, UTC. */
+  monthly_bandwidth_limit_bytes: number
+  /** 0 = unlimited. Open requests and tunnels at once. */
+  max_concurrent_connections: number
+  /** This month's usage (list responses). */
+  bandwidth_used_bytes?: number
   has_export_token?: boolean
   export_token_created_at?: string
   created_at: string
@@ -465,6 +471,8 @@ export interface CreateProxyUserRequest {
   fallback_pool_ids: number[]
   max_retries: number
   requests_per_minute?: number
+  monthly_bandwidth_limit_bytes?: number
+  max_concurrent_connections?: number
 }
 
 export interface UpdateProxyUserRequest {
@@ -475,6 +483,8 @@ export interface UpdateProxyUserRequest {
   fallback_pool_ids?: number[]
   max_retries?: number
   requests_per_minute?: number
+  monthly_bandwidth_limit_bytes?: number
+  max_concurrent_connections?: number
 }
 
 export interface CreatePoolRequest {
