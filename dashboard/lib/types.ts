@@ -149,11 +149,84 @@ export interface Settings {
   }
 }
 
+export type Role = "viewer" | "operator" | "admin"
+
+/** The signed-in principal (GET /auth/me). */
+export interface Me {
+  id: number
+  username: string
+  role: Role
+  via: "session" | "api_key"
+}
+
 export interface AuthResponse {
   token: string
-  user: {
-    username: string
-  }
+  user: Me
+}
+
+export interface Account {
+  id: number
+  username: string
+  role: Role
+  enabled: boolean
+  last_login_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateAccountRequest {
+  username: string
+  password: string
+  role: Role
+}
+
+export interface UpdateAccountRequest {
+  role?: Role
+  enabled?: boolean
+  password?: string
+}
+
+export interface ApiKey {
+  id: number
+  account_id: number
+  username: string
+  name: string
+  prefix: string
+  role: Role
+  created_at: string
+  expires_at?: string
+  last_used_at?: string
+  revoked_at?: string
+}
+
+export interface CreateApiKeyRequest {
+  name: string
+  role?: Role
+  expires_in_days?: number
+}
+
+export interface CreateApiKeyResponse extends ApiKey {
+  key: string
+}
+
+export interface AuditEntry {
+  id: number
+  at: string
+  actor_type: "session" | "api_key" | "anonymous"
+  actor_id?: number
+  actor_name: string
+  action: string
+  resource: string
+  status: number
+  ip: string
+  details?: Record<string, unknown>
+}
+
+export interface AuditLogResponse {
+  entries: AuditEntry[]
+  total: number
+  page: number
+  limit: number
 }
 
 export interface ApiError {

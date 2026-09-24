@@ -26,6 +26,16 @@ export function AccountMenu({ username, compact }: { username: string; compact?:
     router.push("/login")
   }
 
+  // Revokes every session of this account (other browsers, stolen tokens).
+  const signOutEverywhere = async () => {
+    try {
+      await api.signOutEverywhere()
+    } catch {
+      api.clearToken()
+    }
+    router.push("/login")
+  }
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -58,6 +68,10 @@ export function AccountMenu({ username, compact }: { username: string; compact?:
         <DropdownMenuItem onClick={signOut}>
           <LogOut aria-hidden />
           Sign out
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={signOutEverywhere}>
+          <LogOut aria-hidden />
+          Sign out everywhere
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

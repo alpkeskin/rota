@@ -7,6 +7,7 @@ import {
   Activity,
   FileText,
   Gauge,
+  KeyRound,
   Layers,
   Network,
   Rss,
@@ -32,10 +33,11 @@ const NAV: {
   { href: "/dashboard/users", label: "Users", icon: Users },
   { href: "/dashboard/logs", label: "Logs", icon: FileText },
   { href: "/dashboard/metrics", label: "System", icon: Activity },
+  { href: "/dashboard/access", label: "Access", icon: KeyRound },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
 
-export function AppNav({ username }: { username: string }) {
+export function AppNav({ username, role }: { username: string; role: string }) {
   const pathname = usePathname();
   const tz = React.useMemo(() => {
     try {
@@ -71,8 +73,8 @@ export function AppNav({ username }: { username: string }) {
             }}
           />
           <span className="font-semibold tracking-tight">Rota</span>
-          <span className="label border-border ml-auto rounded border px-1.5 leading-4">
-            Admin
+          <span className="label border-border ml-auto rounded border px-1.5 leading-4 capitalize">
+            {role}
           </span>
         </Link>
         <div className="md:hidden">

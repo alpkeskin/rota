@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { PageHeader, Section, LoadingLine } from "@/components/page-header"
 import { api } from "@/lib/api"
+import { useCan, useSession } from "@/lib/session"
 import { Settings } from "@/lib/types"
 import { formatDateTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
@@ -81,6 +82,8 @@ function SwitchRow({
 const grid = "grid gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-3"
 
 export default function SettingsPage() {
+  const me = useSession()
+  const isAdmin = useCan("admin")
   const [settings, setSettings] = React.useState<Settings | null>(null)
   const [isLoading, setIsLoading] = React.useState(true)
   const [isSaving, setIsSaving] = React.useState(false)
@@ -101,10 +104,9 @@ export default function SettingsPage() {
   React.useEffect(() => {
     const fetchSettings = async () => {
       try {
-        const [data, adminInfo] = await Promise.all([api.getSettings(), api.getAdminInfo()])
-        setSettings(data)
-        setAdminUsername(adminInfo.username)
-        setNewUsername(adminInfo.username)
+        setSettings(await api.getSettings())
+        setAdminUsername(me.username)
+        setNewUsername(me.username)
       } catch (error) {
         console.error("Failed to fetch settings:", error)
       } finally {
@@ -112,7 +114,7 @@ export default function SettingsPage() {
       }
     }
     fetchSettings()
-  }, [])
+  }, [me.username])
 
   const patch = <K extends keyof Settings>(key: K, value: Partial<Settings[K]>) =>
     setSettings((s) => (s ? { ...s, [key]: { ...s[key], ...value } } : s))
@@ -121,7 +123,7 @@ export default function SettingsPage() {
     e.preventDefault()
     if (!currentPass) return toast.error("Enter your current password")
     if (!newPass) return toast.error("Enter a new password")
-    if (newPass.length < 6) return toast.error("New password must be at least 6 characters")
+    if (newPass.length < 8) return toast.error("New password must be at least 8 characters")
     if (newPass !== confirmPass) return toast.error("Passwords don't match")
 
     setChangingPass(true)
@@ -137,7 +139,7 @@ export default function SettingsPage() {
       setCurrentPass("")
       setNewPass("")
       setConfirmPass("")
-      toast.success("Credentials updated")
+      toast.success("Credentials updated", "Your other sessions were signed out")
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to change password")
     } finally {
@@ -195,17 +197,35 @@ export default function SettingsPage() {
 
   return (
     <>
-      <PageHeader title="Settings" description="Runtime configuration of the core. Saving applies everything below at once; the admin account section saves on its own.">
-        <Button variant="outline" onClick={() => setResetOpen(true)} disabled={isSaving}>
-          Reset to defaults
-        </Button>
-        <Button onClick={handleSave} disabled={isSaving}>
-          {isSaving ? "Saving…" : "Save settings"}
-        </Button>
+      <PageHeader
+        title="Settings"
+        description={
+          isAdmin
+            ? "Runtime configuration of the core. Saving applies everything below at once; your account section saves on its own."
+            : "Runtime configuration of the core. Only admins can change it; you can still update your own account below."
+        }
+      >
+        {isAdmin && (
+          <>
+            <Button variant="outline" onClick={() => setResetOpen(true)} disabled={isSaving}>
+              Reset to defaults
+            </Button>
+            <Button onClick={handleSave} disabled={isSaving}>
+              {isSaving ? "Saving…" : "Save settings"}
+            </Button>
+          </>
+        )}
       </PageHeader>
 
-      {/* Admin account */}
-      <Section title="Admin account" description={<>Dashboard sign-in. Signed in as <span className="font-mono">{adminUsername}</span>.</>}>
+      {/* Own account */}
+      <Section
+        title="Your account"
+        description={
+          <>
+            Signed in as <span className="font-mono">{adminUsername}</span> with the <span className="font-medium">{me.role}</span> role. Changing the password signs your other sessions out.
+          </>
+        }
+      >
         <form onSubmit={handleChangePassword} className="max-w-2xl">
           <div className={grid}>
             <Field id="admin-username" label="Username" hint="Leave unchanged to keep the current one.">
@@ -225,7 +245,7 @@ export default function SettingsPage() {
               </div>
             </Field>
             <div className="hidden lg:block" />
-            <Field id="admin-new" label="New password" hint="At least 6 characters.">
+            <Field id="admin-new" label="New password" hint="At least 8 characters.">
               <Input id="admin-new" type={showPass ? "text" : "password"} value={newPass} onChange={(e) => setNewPass(e.target.value)} autoComplete="new-password" />
             </Field>
             <Field id="admin-confirm" label="Confirm new password">
@@ -456,7 +476,7 @@ export default function SettingsPage() {
         className="border-b-0"
         actions={
           settings.geoip?.provider === "maxmind" && (
-            <Button variant="outline" size="sm" onClick={handleUpdateGeoDB} disabled={isUpdatingGeoDB || isSaving}>
+            <Button variant="outline" size="sm" onClick={handleUpdateGeoDB} disabled={!isAdmin || isUpdatingGeoDB || isSaving}>
               {isUpdatingGeoDB ? "Downloading…" : "Download database now"}
             </Button>
           )
