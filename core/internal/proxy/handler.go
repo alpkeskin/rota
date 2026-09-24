@@ -649,7 +649,7 @@ func (h *UpstreamProxyHandler) sendWithRetry(req *http.Request, ctx context.Cont
 		)
 
 		resp, err := h.tryProxyWithRetries(req, ctx, selectedProxy, perProxyRetries)
-		reportOutcome(selectedProxy.ID, err)
+		reportOutcome(selectedProxy.ID, responseFault(resp, err))
 		if err != nil {
 			lastErr = fmt.Errorf("proxy %s failed after %d retries: %w", selectedProxy.Address, perProxyRetries, err)
 			h.logger.Warn("proxy failed after all retries",
@@ -832,9 +832,9 @@ func (h *UpstreamProxyHandler) connectViaProxy(proxy *models.Proxy, host string)
 				User:     *proxy.Username,
 				Password: password,
 			}
-			dialer, err = proxyDialer.SOCKS5("tcp", proxy.Address, auth, proxyDialer.Direct)
+			dialer, err = proxyDialer.SOCKS5("tcp", proxy.Address, auth, socksForward)
 		} else {
-			dialer, err = proxyDialer.SOCKS5("tcp", proxy.Address, nil, proxyDialer.Direct)
+			dialer, err = proxyDialer.SOCKS5("tcp", proxy.Address, nil, socksForward)
 		}
 
 		if err != nil {
@@ -909,6 +909,9 @@ func (h *UpstreamProxyHandler) connectViaHTTPProxy(proxy *models.Proxy, host str
 	parts := strings.SplitN(strings.TrimSpace(statusLine), " ", 3)
 	if len(parts) < 2 || parts[1] != "200" {
 		conn.Close()
+		if len(parts) >= 2 && parts[1] == "407" {
+			return nil, fmt.Errorf("CONNECT request failed: %s: %w", strings.TrimSpace(statusLine), errProxyAuth)
+		}
 		return nil, fmt.Errorf("CONNECT request failed: %s", strings.TrimSpace(statusLine))
 	}
 

@@ -284,7 +284,11 @@ func (c *PoolChain) SendWithRetry(
 			continue
 		}
 
-		c.markSucceeded(selectedProxy.ID)
+		if fault := responseFault(resp, nil); fault != nil {
+			c.markFailed(selIdx, selectedProxy.ID, fault)
+		} else {
+			c.markSucceeded(selectedProxy.ID)
+		}
 		log.Info("pool chain: success",
 			"proxy", selectedProxy.Address,
 			"status", resp.StatusCode,

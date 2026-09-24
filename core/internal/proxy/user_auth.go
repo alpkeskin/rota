@@ -129,6 +129,15 @@ func (m *UserAuthMiddleware) Authorize(ctx context.Context, username, password s
 		return nil, AuthBadOptions, optErr
 	}
 
+	// An existing account literally named like "team-session-a" (created
+	// before routing options) is tried verbatim first when it is cached, so
+	// its requests don't pay for a failed lookup of "team" every time.
+	if opts.Username != username && m.isCached(username) {
+		if user, chain, err := m.resolve(ctx, username, password); err == nil {
+			return &ProxyRequest{User: user, Chain: chain, Opts: UsernameOptions{Username: username, SessionTTL: defaultSessionTTL}}, AuthAllowed, nil
+		}
+	}
+
 	user, chain, err := m.resolve(ctx, opts.Username, password)
 	if err != nil && opts.Username != username {
 		// An account created before routing options existed may itself be
@@ -148,6 +157,14 @@ func (m *UserAuthMiddleware) Authorize(ctx context.Context, username, password s
 		return nil, AuthRejected, nil
 	}
 	return &ProxyRequest{User: user, Chain: chain, Opts: opts}, AuthAllowed, nil
+}
+
+// isCached reports whether username has a live cache entry.
+func (m *UserAuthMiddleware) isCached(username string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.cache[username]
+	return ok && time.Now().Before(e.expiresAt)
 }
 
 // HandleRequest is called for every HTTP proxy request. It authorises the

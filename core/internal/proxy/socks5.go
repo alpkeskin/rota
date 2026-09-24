@@ -54,10 +54,19 @@ type socksServer struct {
 	conns    map[net.Conn]struct{}
 	closed   bool
 	wg       sync.WaitGroup
+
+	// ctx is cancelled by Close, ending handlers still negotiating.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
+// socksCloseWait caps how long Close waits for handlers, so a client stuck
+// in an upstream dial can't use up the whole shutdown deadline.
+const socksCloseWait = 2 * time.Second
+
 func newSOCKSServer(auth *UserAuthMiddleware, rl *RateLimitMiddleware, upstream *UpstreamProxyHandler, log *logger.Logger) *socksServer {
-	return &socksServer{auth: auth, rateLimit: rl, upstream: upstream, logger: log, conns: make(map[net.Conn]struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &socksServer{auth: auth, rateLimit: rl, upstream: upstream, logger: log, conns: make(map[net.Conn]struct{}), ctx: ctx, cancel: cancel}
 }
 
 // Serve accepts connections until Close.
@@ -65,6 +74,7 @@ func (s *socksServer) Serve(l net.Listener) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		l.Close() //nolint:errcheck // closed before serving: don't leak the socket
 		return net.ErrClosed
 	}
 	s.listener = l
@@ -125,6 +135,7 @@ func (s *socksServer) track(c net.Conn, add bool) bool {
 // Close stops accepting and closes every open SOCKS connection. Tunnels are
 // cut: unlike HTTP keep-alive, they have no request boundary to drain at.
 func (s *socksServer) Close(ctx context.Context) error {
+	s.cancel()
 	s.mu.Lock()
 	s.closed = true
 	var err error
@@ -138,9 +149,12 @@ func (s *socksServer) Close(ctx context.Context) error {
 
 	done := make(chan struct{})
 	go func() { s.wg.Wait(); close(done) }()
+	wait := time.NewTimer(socksCloseWait)
+	defer wait.Stop()
 	select {
 	case <-done:
 	case <-ctx.Done():
+	case <-wait.C:
 	}
 	return err
 }
@@ -158,7 +172,7 @@ func (s *socksServer) handle(conn net.Conn) {
 	}
 
 	r := bufio.NewReader(conn)
-	ctx := context.Background()
+	ctx := s.ctx
 
 	// 1. Method negotiation.
 	methods, err := readGreeting(r)
@@ -177,6 +191,13 @@ func (s *socksServer) handle(conn net.Conn) {
 		}
 		hasCreds = true
 	case methods[socksAuthNone]:
+		// Only select "no auth" if this proxy lets unauthenticated clients
+		// through; otherwise refuse at method selection (RFC 1928).
+		if _, result, _ := s.auth.Authorize(ctx, "", "", false); result != AuthAllowed {
+			conn.Write([]byte{socksVersion, socksAuthNoAccept}) //nolint:errcheck // best-effort close/write
+			metrics.ProxyRequests.WithLabelValues("socks5", "rejected_auth").Inc()
+			return
+		}
 		if _, err := conn.Write([]byte{socksVersion, socksAuthNone}); err != nil {
 			return
 		}

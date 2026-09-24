@@ -163,34 +163,52 @@ func (a *UsageAccountant) Begin(ctx context.Context, user *models.ProxyUser) (*L
 	now := a.now()
 	month := monthStart(now)
 
-	a.mu.Lock()
-	u := a.users[user.ID]
-	if u == nil {
-		u = &userUsage{month: month}
-		a.users[user.ID] = u
-	}
-	u.lastSeen = now // keep Flush from evicting it while we reload
-	stale := !u.month.Equal(month) || now.Sub(u.loadedAt) > accountingReloadInterval
-	a.mu.Unlock()
+	var u *userUsage
+	for attempt := 0; ; attempt++ {
+		a.mu.Lock()
+		u = a.users[user.ID]
+		if u == nil {
+			u = &userUsage{month: month}
+			a.users[user.ID] = u
+		}
+		u.lastSeen = now // keep Flush from evicting it while we reload
+		stale := !u.month.Equal(month) || now.Sub(u.loadedAt) > accountingReloadInterval
+		a.mu.Unlock()
 
-	// (Re)load the month's stored total when missing or stale, outside the
-	// global lock so a slow store only delays this user.
-	if stale {
-		a.reload(ctx, u, user.ID, month, now)
-	}
+		// (Re)load the month's stored total when missing or stale, outside
+		// the global lock so a slow store only delays this user.
+		if stale {
+			a.reload(ctx, u, user.ID, month, now)
+		}
 
-	a.mu.Lock()
+		a.mu.Lock()
+		cur, ok := a.users[user.ID]
+		if !ok {
+			a.users[user.ID] = u // evicted meanwhile: re-register ours
+		}
+		if !ok || cur == u || attempt > 0 {
+			if ok && cur != u {
+				u = cur
+			}
+			break // a.mu stays locked
+		}
+		// Replaced by a fresh (possibly never loaded) entry: load that one.
+		a.mu.Unlock()
+	}
 	defer a.mu.Unlock()
-	// Evicted meanwhile: adopt whichever entry is registered now, so the
-	// lease never counts into an entry Flush no longer sees.
-	if cur, ok := a.users[user.ID]; !ok {
-		a.users[user.ID] = u
-	} else if cur != u {
-		u = cur
-	}
 	u.limit = user.MonthlyBandwidthLimitBytes
 	u.lastSeen = now
 
+	// Rate budget is spent last, only on requests that are otherwise
+	// admitted, so retries refused for other reasons don't burn it.
+	if user.MaxConcurrentConnections > 0 && u.active >= user.MaxConcurrentConnections {
+		metrics.LimitRejections.WithLabelValues("concurrency").Inc()
+		return nil, ErrTooManyConnections
+	}
+	if u.limit > 0 && u.total() >= u.limit {
+		metrics.LimitRejections.WithLabelValues("quota").Inc()
+		return nil, ErrQuotaExceeded
+	}
 	if user.RequestsPerMinute > 0 {
 		if u.limiter == nil || u.rpm != user.RequestsPerMinute {
 			u.limiter = rate.NewLimiter(rate.Limit(float64(user.RequestsPerMinute)/60), user.RequestsPerMinute)
@@ -202,14 +220,6 @@ func (a *UsageAccountant) Begin(ctx context.Context, user *models.ProxyUser) (*L
 		}
 	} else {
 		u.limiter, u.rpm = nil, 0
-	}
-	if user.MaxConcurrentConnections > 0 && u.active >= user.MaxConcurrentConnections {
-		metrics.LimitRejections.WithLabelValues("concurrency").Inc()
-		return nil, ErrTooManyConnections
-	}
-	if u.limit > 0 && u.total() >= u.limit {
-		metrics.LimitRejections.WithLabelValues("quota").Inc()
-		return nil, ErrQuotaExceeded
 	}
 	u.active++
 	a.nextID++
@@ -235,7 +245,12 @@ func (a *UsageAccountant) reload(ctx context.Context, u *userUsage, userID int, 
 	if fresh {
 		return
 	}
-	loaded, err := a.store.MonthBandwidth(ctx, userID, month)
+	// Own deadline, detached from the caller: a client hanging up must not
+	// count as a store failure (which would back off and fail open), and a
+	// hung store must not hold u.io — and so the flush loop — forever.
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	loaded, err := a.store.MonthBandwidth(lctx, userID, month)
+	cancel()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
@@ -316,9 +331,13 @@ func (a *UsageAccountant) Flush(ctx context.Context) {
 			continue
 		}
 		a.mu.Lock()
-		if p.u.month.Equal(month) {
-			p.u.stored += p.up + p.down
+		if !p.u.month.Equal(month) {
+			// Month rolled over with no new request (a long-lived tunnel):
+			// start the new month's total from what was just written, and
+			// reload the exact figure at the next Begin.
+			p.u.month, p.u.stored, p.u.loadedAt = month, 0, time.Time{}
 		}
+		p.u.stored += p.up + p.down
 		a.mu.Unlock()
 		p.u.io.Unlock()
 	}

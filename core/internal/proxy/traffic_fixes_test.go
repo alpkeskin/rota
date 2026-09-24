@@ -222,6 +222,7 @@ func TestQuotaCutsOpenTunnelWithoutBlockingFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close() //nolint:errcheck
+
 	fmt.Fprintf(conn, "CONNECT t:443 HTTP/1.1\r\nHost: t:443\r\nProxy-Authorization: Basic Z2luYTpwdw==\r\n\r\n") //nolint:errcheck
 	buf := make([]byte, 4096)
 	if _, err := conn.Read(buf); err != nil {

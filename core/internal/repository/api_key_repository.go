@@ -159,11 +159,11 @@ func (r *APIKeyRepository) Authenticate(ctx context.Context, key string) (*auth.
 		return nil, ErrInvalidCredentials
 	}
 	var (
-		keyID, accountID          int
-		name, keyRole, username   string
-		accountRole               string
-		enabled                   bool
-		expiresAt, revokedAt      *time.Time
+		keyID, accountID        int
+		name, keyRole, username string
+		accountRole             string
+		enabled                 bool
+		expiresAt, revokedAt    *time.Time
 	)
 	err := r.db.Pool.QueryRow(ctx, `
 		SELECT k.id, k.name, k.role, k.expires_at, k.revoked_at, a.id, a.username, a.role, a.enabled

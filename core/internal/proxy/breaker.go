@@ -3,6 +3,8 @@ package proxy
 import (
 	"errors"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -178,6 +180,9 @@ func (b *CircuitBreaker) Retain(keep func(proxyID int) bool) {
 	}
 }
 
+// errProxyAuth marks an upstream proxy refusing Rota's credentials (407).
+var errProxyAuth = errors.New("upstream proxy rejected credentials")
+
 // errTransportBuild marks a local failure to build a proxy's transport.
 var errTransportBuild = errors.New("failed to create transport")
 
@@ -187,12 +192,28 @@ var errTransportBuild = errors.New("failed to create transport")
 // is unreachable, the destination timed out) can be caused by the client's
 // choice of target, and must not let one user take proxies away from others.
 func isProxyFault(err error) bool {
+	if err == nil {
+		return false
+	}
+	// The proxy rejected our own credentials: nothing a client can cause.
+	if errors.Is(err, errProxyAuth) || strings.Contains(err.Error(), "authentication failed") {
+		return true
+	}
 	for e := err; e != nil; e = errors.Unwrap(e) {
 		if op, ok := e.(*net.OpError); ok && (op.Op == "dial" || op.Op == "proxyconnect") {
 			return true
 		}
 	}
 	return false
+}
+
+// responseFault turns a plain-HTTP response the upstream proxy itself
+// refused with 407 into a proxy fault; other responses come from the target.
+func responseFault(resp *http.Response, err error) error {
+	if err == nil && resp != nil && resp.StatusCode == http.StatusProxyAuthRequired {
+		return errProxyAuth
+	}
+	return err
 }
 
 // reportOutcome feeds an attempt's result to the breaker: proxy faults count
