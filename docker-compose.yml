@@ -49,6 +49,10 @@ services:
       - ROTA_ADMIN_PASSWORD=${ROTA_ADMIN_PASSWORD:-}
       # Optional; unset = generated once and persisted in the DB.
       - JWT_SECRET=${JWT_SECRET:-}
+      # Encrypts upstream proxy passwords at rest; unset = key stored in the DB.
+      - ROTA_ENCRYPTION_KEY=${ROTA_ENCRYPTION_KEY:-}
+      - ROTA_ENCRYPTION_KEYS_PREVIOUS=${ROTA_ENCRYPTION_KEYS_PREVIOUS:-}
+      - METRICS_TOKEN=${METRICS_TOKEN:-}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-*}
       # The core sits behind Caddy, so trust its X-Forwarded-For for the login
       # rate limiter's per-IP tracking. Set to false only if you expose the API

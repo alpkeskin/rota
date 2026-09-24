@@ -151,11 +151,48 @@ only to change something. The common knobs:
 | `CORS_ALLOWED_ORIGINS` | `*` | API CORS allowlist (irrelevant behind the proxy) |
 | `TRUST_PROXY_HEADERS` | `true` | Trust `X-Forwarded-For`/`X-Real-IP` for the login rate limiter. Keep `true` behind the bundled Caddy; set `false` if the API is exposed directly |
 | `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `ROTA_ENCRYPTION_KEY` | _(generated, stored in DB)_ | Key that encrypts upstream proxy passwords at rest. Set it (e.g. `openssl rand -base64 32`) so a database leak alone doesn't expose them — see [Encryption at rest](#encryption-at-rest) |
+| `ROTA_ENCRYPTION_KEYS_PREVIOUS` | _(empty)_ | Comma-separated retired keys, still accepted for decryption during key rotation |
+| `METRICS_TOKEN` | _(empty)_ | Require `Authorization: Bearer <token>` on `/metrics` |
 
 See `.env.example` for the full list including auth brute-force protection.
 
 > **Note**: `ROTA_ADMIN_USER` / `ROTA_ADMIN_PASSWORD` are only used when the
 > database is empty (first start). Afterwards, use **Settings → Admin account**.
+
+### Encryption at rest
+
+Upstream proxy passwords are stored encrypted (AES-256-GCM). The key comes from
+`ROTA_ENCRYPTION_KEY`; when it is unset, a key is generated on first boot and
+stored in the database. That default still keeps passwords out of table dumps
+and exports, but only a key kept **outside** the database protects them if the
+whole database leaks — set `ROTA_ENCRYPTION_KEY` in production and back it up:
+without it the stored passwords cannot be recovered.
+
+On startup Rota encrypts any plaintext passwords left from older versions and
+re-encrypts values sealed with a retired key. To rotate the key:
+
+```bash
+# .env
+ROTA_ENCRYPTION_KEY=new-key
+ROTA_ENCRYPTION_KEYS_PREVIOUS=old-key   # keep until one restart has completed
+```
+
+Switching from the generated database key to `ROTA_ENCRYPTION_KEY` needs no
+extra step — the stored key is used to read existing values automatically.
+
+If a stored password can't be decrypted with any configured key (for example
+`ROTA_ENCRYPTION_KEY` was removed or mistyped), the core **refuses to start**
+and writes nothing, rather than dialing upstreams without credentials.
+
+**Several core replicas?** Startup re-encrypts immediately, so roll a new key
+out in two deploys: first give every replica the new key as
+`ROTA_ENCRYPTION_KEYS_PREVIOUS` (primary unchanged), then make it the primary
+and move the old key to `ROTA_ENCRYPTION_KEYS_PREVIOUS`.
+
+> **Downgrading** below the release that introduced encryption is not supported
+> without first clearing the passwords: older versions would send the encrypted
+> value to your upstream proxies as the password.
 
 ### Production Deployment (HTTPS)
 
@@ -167,6 +204,7 @@ TLS certificate automatically:
 SITE_ADDRESS=rota.example.com
 DB_PASSWORD=a-strong-random-password
 ROTA_ADMIN_PASSWORD=a-strong-password
+ROTA_ENCRYPTION_KEY=output-of-openssl-rand-base64-32
 ```
 
 ```bash
@@ -454,17 +492,21 @@ If the main pool has no live IPs the request automatically cascades to the next 
 
 #### Exporting a user's working proxies
 
-Turn on **Export API** for the user, then fetch the alive proxies of their main pool (or any pool) with the user's own credentials — handy for tools that want a raw list instead of routing through Rota:
+Turn on **Export API** for the user and generate an **export token** (**Users → ⌄ → Export link… → Generate token**). The token is shown once; regenerating it revokes the old one, and **Revoke** disables it. Then fetch the alive proxies of the user's main pool, or of one of its fallback pools — handy for tools that want a raw list instead of routing through Rota:
 
 ```bash
 # One proxy per line; default = the user's main pool, raw address[:user:pass]
-curl "http://localhost/api/v1/proxy-users/export-working-proxies?username=myuser&password=mypassword"
+curl -H "Authorization: Bearer rota_exp_..." \
+  "http://localhost/api/v1/proxy-users/export-working-proxies"
 
-# A specific pool, capped, as protocol://[user:pass@]address
-curl "http://localhost/api/v1/proxy-users/export-working-proxies?username=myuser&password=mypassword&pool=US%20Residential&count=50&format=url"
+# A fallback pool, capped, as protocol://[user:pass@]address
+curl -H "Authorization: Bearer rota_exp_..." \
+  "http://localhost/api/v1/proxy-users/export-working-proxies?pool=US%20Residential&count=50&format=url"
+
+# Tools that only take a URL can pass the token as ?token=rota_exp_...
 ```
 
-The dashboard builds this link for you from the row menu (**Users → ⌄ → Export link**). The password travels in the query string, so keep such links private.
+A user can only export its own pools (main + fallbacks); any other pool returns `404`. The endpoint also accepts the user's proxy credentials via HTTP Basic auth (`curl -u myuser:mypassword ...`). The old `?username=&password=` form still works but is **deprecated** — it puts the password in URLs and access logs — and responses to it carry a `Deprecation: true` header. Failed password attempts are throttled per IP with the same thresholds as the login endpoint (token requests aren't — tokens can't be guessed).
 
 ---
 
@@ -483,8 +525,41 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost/api/v1/proxies
 ```
 
 Public endpoints (no token required):
-- `GET /health`
+- `GET /health`, `GET /livez`, `GET /readyz`
 - `POST /api/v1/auth/login`
+- `GET /api/v1/proxy-users/export-working-proxies` (authenticated with an export token, see above)
+
+---
+
+## 📈 Monitoring
+
+The core exposes probes and Prometheus metrics on the API port (`:8001`):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /livez` | Liveness — `200` while the process serves HTTP; never checks dependencies |
+| `GET /readyz` | Readiness — `200` when the database answers a ping, `503` otherwise |
+| `GET /metrics` | Prometheus metrics |
+
+The bundled Caddy does **not** route `/metrics`, `/livez` or `/readyz`, so they are
+only reachable on the internal Docker network (e.g. `http://rota-core:8001/metrics`).
+If you expose `:8001` directly, set `METRICS_TOKEN` and scrape with
+`Authorization: Bearer <token>`.
+
+Useful series:
+
+| Metric | What it tells you |
+|---|---|
+| `rota_proxy_requests_total{kind,outcome}` | Proxy traffic by `http`/`connect` and `success`, `upstream_error`, `internal_error`, `rejected_auth`, `rejected_rate_limit` (a CONNECT counts as `success` once the tunnel is established) |
+| `rota_proxy_tunnels_closed_total{result}` | CONNECT tunnels by how they ended: `clean` or `error` (includes resets during normal teardown — watch the ratio) |
+| `rota_proxy_request_duration_seconds` | Time to upstream response (HTTP) or tunnel establishment (CONNECT) |
+| `rota_proxy_active_tunnels` | Open CONNECT tunnels |
+| `rota_upstream_proxies{status}` | Upstream inventory by status (read from the DB at scrape time) |
+| `rota_api_requests_total{route,method,status}` / `rota_api_request_duration_seconds` | REST API traffic by route pattern |
+| `rota_log_hook_dropped_total` | Log events dropped because the DB log queue was full |
+| `rota_secrets_decrypt_failures_total` | Stored proxy passwords no configured key could decrypt |
+
+Plus the standard `go_*` and `process_*` series and `rota_build_info{version}`.
 
 ### Brute-Force Protection
 
