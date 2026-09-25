@@ -4,11 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 
 	"github.com/alpkeskin/rota/core/internal/cluster"
+	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type fakeProxyServer struct {
@@ -80,5 +83,54 @@ func TestPublishesAppliesAndNotifiesOnSuccessOnly(t *testing.T) {
 	s.ApplyChange(context.Background(), cluster.TopicSettings)
 	if ps.reloads != 1 {
 		t.Fatalf("remote settings change reloaded %d times", ps.reloads)
+	}
+}
+
+func TestWatchSettingsCatchesMissedChanges(t *testing.T) {
+	dsn := os.Getenv("ROTA_TEST_DSN")
+	if dsn == "" {
+		t.Skip("ROTA_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = admin.Exec(ctx, `DROP SCHEMA IF EXISTS rota_api_watch CASCADE; CREATE SCHEMA rota_api_watch`)
+	admin.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := pgxpool.ParseConfig(dsn)
+	cfg.ConnConfig.RuntimeParams["search_path"] = "rota_api_watch"
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `
+		CREATE TABLE settings (key VARCHAR(255) PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMP NOT NULL DEFAULT NOW());
+		INSERT INTO settings (key, value) VALUES ('rate_limit', '{"enabled": false}')`); err != nil {
+		t.Fatal(err)
+	}
+
+	ps := &fakeProxyServer{}
+	s := &Server{logger: logger.New("error"), proxyServer: ps, db: &database.DB{Pool: pool}}
+	s.checkSettings(ctx) // first look records the current settings
+	s.checkSettings(ctx)
+	if ps.reloads != 0 {
+		t.Fatalf("reloaded %d times without a change", ps.reloads)
+	}
+	// A change on another instance whose notification never arrived.
+	if _, err := pool.Exec(ctx, `UPDATE settings SET value = '{"enabled": true}', updated_at = NOW()`); err != nil {
+		t.Fatal(err)
+	}
+	s.checkSettings(ctx)
+	if ps.reloads != 1 {
+		t.Fatalf("missed change reloaded %d times, want 1", ps.reloads)
+	}
+	s.checkSettings(ctx)
+	if ps.reloads != 1 {
+		t.Fatal("reloaded again without a further change")
 	}
 }

@@ -29,9 +29,10 @@ const (
 // Notifier tells the other instances that shared configuration changed, so
 // they reload it at once instead of on their next periodic refresh.
 //
-// Delivery is best effort (Postgres NOTIFY). After its listening connection
-// drops, an instance runs every handler once, since it may have missed
-// events while disconnected; the periodic refreshes remain as the backstop.
+// Delivery is best effort (Postgres NOTIFY). Each time it starts listening
+// (at startup and after a dropped connection) an instance runs every handler
+// once, since it may have missed events; periodic refreshes of proxies,
+// users and settings remain as the backstop.
 type Notifier struct {
 	pool *pgxpool.Pool
 	log  *logger.Logger
@@ -111,10 +112,8 @@ func (n *Notifier) Stop() {
 
 func (n *Notifier) run(ctx context.Context, done chan struct{}) {
 	defer close(done)
-	first := true
 	for {
-		n.listen(ctx, first)
-		first = false
+		n.listen(ctx)
 		if !sleepCtx(ctx, n.retry) {
 			return
 		}
@@ -122,7 +121,7 @@ func (n *Notifier) run(ctx context.Context, done chan struct{}) {
 }
 
 // listen holds a LISTEN connection until it fails or ctx is cancelled.
-func (n *Notifier) listen(ctx context.Context, first bool) {
+func (n *Notifier) listen(ctx context.Context) {
 	conn, err := dedicatedConn(ctx, n.pool, "rota-notify")
 	if err != nil {
 		if ctx.Err() == nil {
@@ -137,10 +136,9 @@ func (n *Notifier) listen(ctx context.Context, first bool) {
 		}
 		return
 	}
-	if !first {
-		// Changes made while we were disconnected were not delivered.
-		n.dispatchAll(ctx)
-	}
+	// Changes made before we were listening (at startup, or while
+	// disconnected) were not delivered: catch up once.
+	n.dispatchAll(ctx)
 	for {
 		note, err := conn.WaitForNotification(ctx)
 		if err != nil {

@@ -50,14 +50,16 @@ func (p *proxyRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Trace admitted requests. For CONNECT the span covers the tunnel's
 	// lifetime.
-	host := r.URL.Host
-	if r.Method == http.MethodConnect || host == "" {
-		host = r.Host
+	if tracing.Enabled() {
+		host := r.URL.Host
+		if r.Method == http.MethodConnect || host == "" {
+			host = r.Host
+		}
+		ctx, span := tracing.StartProxy(r.Context(), "proxy "+r.Method,
+			proxySpanAttrs(requestKind(r), host, ProxyRequestFrom(r.Context()))...)
+		defer span.End()
+		r = r.WithContext(ctx)
 	}
-	ctx, span := tracing.StartProxy(r.Context(), "proxy "+r.Method,
-		proxySpanAttrs(requestKind(r), host, ProxyRequestFrom(r.Context()))...)
-	defer span.End()
-	r = r.WithContext(ctx)
 
 	// 4. Dispatch based on method
 	if r.Method == http.MethodConnect {

@@ -43,6 +43,8 @@ func dedicatedConn(ctx context.Context, pool *pgxpool.Pool, appName string) (*pg
 		"SET tcp_keepalives_idle = 10",
 		"SET tcp_keepalives_interval = 5",
 		"SET tcp_keepalives_count = 3",
+		// Also when a reply is unacknowledged (keepalives don't run then).
+		"SET tcp_user_timeout = 25000",
 	} {
 		conn.Exec(ctx, stmt) //nolint:errcheck
 	}

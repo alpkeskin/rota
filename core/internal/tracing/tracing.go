@@ -16,7 +16,10 @@ package tracing
 
 import (
 	"context"
+	"errors"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/alpkeskin/rota/core/internal/version"
@@ -89,8 +92,15 @@ func tracer() trace.Tracer {
 	return otel.Tracer(instrumentation, trace.WithInstrumentationVersion(version.Version))
 }
 
+// noopSpan is returned while tracing is off, so the proxy hot path doesn't
+// pay for spans nobody exports.
+var noopSpan = trace.SpanFromContext(context.Background())
+
 // StartProxy starts the root span of one proxied request or tunnel.
 func StartProxy(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if !enabled {
+		return ctx, noopSpan
+	}
 	return tracer().Start(ctx, name,
 		trace.WithNewRoot(),
 		trace.WithSpanKind(trace.SpanKindServer),
@@ -99,6 +109,9 @@ func StartProxy(ctx context.Context, name string, attrs ...attribute.KeyValue) (
 
 // StartAttempt starts the span of one attempt through an upstream proxy.
 func StartAttempt(ctx context.Context, proxyID, attempt int) (context.Context, trace.Span) {
+	if !enabled {
+		return ctx, noopSpan
+	}
 	return tracer().Start(ctx, "proxy.upstream_attempt",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
@@ -110,8 +123,7 @@ func StartAttempt(ctx context.Context, proxyID, attempt int) (context.Context, t
 // End ends span, recording err (if any) as its error.
 func End(span trace.Span, err error) {
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		recordError(span, err)
 	}
 	span.End()
 }
@@ -123,10 +135,44 @@ func SetAttributes(ctx context.Context, attrs ...attribute.KeyValue) {
 
 // Fail marks the current span in ctx as failed.
 func Fail(ctx context.Context, err error) {
-	span := trace.SpanFromContext(ctx)
+	recordError(trace.SpanFromContext(ctx), err)
+}
+
+func recordError(span trace.Span, err error) {
+	if !span.IsRecording() {
+		return
+	}
+	err = redactURLs(err)
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
 }
+
+// redactURLs removes request URLs from an error's text. Errors from
+// net/http quote the full URL (Get "http://host/path?query": ...), and a
+// proxied request's path and query must never reach a trace.
+func redactURLs(err error) error {
+	msg := err.Error()
+	changed := false
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		var ue *url.Error
+		if !errors.As(e, &ue) {
+			break
+		}
+		if q := strconv.Quote(ue.URL); strings.Contains(msg, q) {
+			msg = strings.ReplaceAll(msg, q, `"[redacted]"`)
+			changed = true
+		}
+		e = ue
+	}
+	if !changed {
+		return err
+	}
+	return errors.New(msg)
+}
+
+// SetEnabled turns span creation on or off without touching the exporter.
+// For tests that install their own tracer provider.
+func SetEnabled(on bool) { enabled = on }
 
 // TraceID returns the trace id of ctx's span, or "".
 func TraceID(ctx context.Context) string {

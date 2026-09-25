@@ -108,7 +108,9 @@ func (ps *PoolService) runAutoSync(ctx context.Context) {
 					"pool_id", poolCopy.ID, "added", len(newIDs), "total", total)
 				newCopy := append([]int(nil), newIDs...)
 				go func(p models.ProxyPool, ids []int) {
-					hcCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+					// Bound to the job: stops when this instance loses
+					// leadership, so it can't overlap with the new leader.
+					hcCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 					defer cancel()
 					if err := ps.checkProxiesByIDs(hcCtx, p.HealthCheckURL, ids, 20); err != nil {
 						ps.logger.Warn("auto-HC on new pool members failed",
@@ -191,6 +193,9 @@ func (ps *PoolService) checkProxiesByIDs(ctx context.Context, checkURL string, p
 	for _, p := range proxies {
 		p := p
 		wp.Submit(func() {
+			if ctx.Err() != nil {
+				return
+			}
 			ps.checkOneProxy(ctx, p, checkURL)
 		})
 	}
@@ -232,11 +237,19 @@ func (ps *PoolService) HealthCheckPool(ctx context.Context, poolID int, checkURL
 		i := i
 		pp := pp
 		wp.Submit(func() {
+			// Queued checks are dropped once the job stops (leadership
+			// lost, shutdown): the new leader checks the pool itself.
+			if ctx.Err() != nil {
+				return
+			}
 			res := ps.checkOneProxy(ctx, pp.ToProxy(), url)
 			slots[i].result = res
 		})
 	}
 	wp.StopWait()
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("health check of pool %d stopped: %w", poolID, err)
+	}
 
 	result := &models.PoolHealthCheckResult{
 		PoolID:     poolID,

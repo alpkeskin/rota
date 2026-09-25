@@ -303,6 +303,7 @@ func (m *UserAuthMiddleware) hasProxyUsers(ctx context.Context) bool {
 	m.mu.RLock()
 	fresh := time.Now().Before(m.usersCheckedUntil)
 	cached := m.usersConfigured
+	gen := m.gen
 	m.mu.RUnlock()
 	if fresh {
 		return cached
@@ -316,8 +317,12 @@ func (m *UserAuthMiddleware) hasProxyUsers(ctx context.Context) bool {
 	has := len(users) > 0
 
 	m.mu.Lock()
-	m.usersConfigured = has
-	m.usersCheckedUntil = time.Now().Add(30 * time.Second)
+	// A lookup that started before InvalidateAll may have missed a user
+	// created since: answer with it, but don't cache it.
+	if m.gen == gen {
+		m.usersConfigured = has
+		m.usersCheckedUntil = time.Now().Add(30 * time.Second)
+	}
 	m.mu.Unlock()
 	return has
 }

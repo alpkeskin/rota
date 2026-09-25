@@ -59,10 +59,15 @@ type SharedSticky interface {
 func (s *StickySessions) Lookup(ctx context.Context, userID int, session string) (int, bool) {
 	if s.shared != nil {
 		id, ok, err := s.shared.StickyGet(ctx, userID, session)
-		if err == nil {
-			return id, ok
+		if err == nil && ok {
+			return id, true
 		}
-		metrics.SharedStateErrors.WithLabelValues("sticky").Inc()
+		if err != nil {
+			metrics.SharedStateErrors.WithLabelValues("sticky").Inc()
+		}
+		// Not in the shared store: it may have been pinned locally while
+		// the store was unreachable. Keep that pin rather than moving the
+		// session to a new exit IP when the store comes back.
 	}
 	return s.Get(userID, session)
 }

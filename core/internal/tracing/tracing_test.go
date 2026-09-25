@@ -2,9 +2,13 @@ package tracing
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,4 +150,20 @@ func TestSetupOnlyWhenConfigured(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	shutdown(ctx) //nolint:errcheck // nothing listens; only checks it returns
+}
+
+func TestRedactURLs(t *testing.T) {
+	inner := &url.Error{Op: "Get", URL: "http://t.example/secret?token=x", Err: errors.New("proxyconnect tcp: refused")}
+	err := fmt.Errorf("proxy 1.2.3.4:80 attempt 1: %w", inner)
+	got := redactURLs(err).Error()
+	if strings.Contains(got, "secret") || strings.Contains(got, "token") {
+		t.Fatalf("URL survived: %s", got)
+	}
+	if !strings.Contains(got, "proxyconnect tcp: refused") || !strings.Contains(got, "attempt 1") {
+		t.Fatalf("lost the useful part: %s", got)
+	}
+	plain := errors.New("no proxy available")
+	if redactURLs(plain) != plain {
+		t.Fatal("rewrote an error without URLs")
+	}
 }

@@ -77,19 +77,17 @@ func TestSharedLimitsAcrossInstances(t *testing.T) {
 	if _, err := a2.Begin(ctx, user); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("5th request across instances: %v, want ErrRateLimited", err)
 	}
-	// The rate refusal gave its connection slot back.
-	if ok, err := st[0].AcquireConn(ctx, 11, 2); err != nil || !ok {
+	// The rate refusal gave its connection slot back: both instances are
+	// at 0, so a third instance can take both slots.
+	if ok, err := st[0].AcquireConn(ctx, 11, 2, 2); err != nil || !ok {
 		t.Fatalf("slot leaked by a rate refusal: ok=%v err=%v", ok, err)
-	}
-	if ok, _ := st[0].AcquireConn(ctx, 11, 2); !ok {
-		t.Fatal("slot leaked by a rate refusal")
 	}
 }
 
 // failingShared is a shared store that is down.
 type failingShared struct {
-	mu       sync.Mutex
-	releases int
+	mu   sync.Mutex
+	sets int
 }
 
 var errDown = errors.New("redis down")
@@ -97,14 +95,15 @@ var errDown = errors.New("redis down")
 func (f *failingShared) AllowRate(context.Context, string, int, time.Duration) (bool, time.Duration, error) {
 	return false, 0, errDown
 }
-func (f *failingShared) AcquireConn(context.Context, int, int) (bool, error) { return false, errDown }
-func (f *failingShared) ReleaseConn(context.Context, int) error {
+func (f *failingShared) AcquireConn(context.Context, int, int, int) (bool, error) {
+	return false, errDown
+}
+func (f *failingShared) SetConn(context.Context, int, int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.releases++
+	f.sets++
 	return errDown
 }
-func (f *failingShared) HeartbeatConns(context.Context, map[int]int) error { return errDown }
 func (f *failingShared) StickyGet(context.Context, int, string) (int, bool, error) {
 	return 0, false, errDown
 }
@@ -127,9 +126,6 @@ func TestSharedLimitsFallBackToLocal(t *testing.T) {
 		t.Fatalf("local cap not enforced during an outage: %v", err)
 	}
 	l.Release()
-	if f.releases != 0 {
-		t.Fatal("released a slot the store never granted")
-	}
 	l, _ = a.Begin(ctx, user)
 	l.Release()
 	if _, err := a.Begin(ctx, user); !errors.Is(err, ErrRateLimited) {
@@ -145,54 +141,103 @@ func TestSharedLimitsFallBackToLocal(t *testing.T) {
 	}
 }
 
-// recordingShared records heartbeats and grants everything.
+// recordingShared grants everything and records the counts written.
 type recordingShared struct {
-	mu    sync.Mutex
-	beats []map[int]int
+	mu        sync.Mutex
+	sets      []int // counts written by AcquireConn and SetConn, in order
+	failSets  int   // fail this many SetConn calls
+	onAcquire func()
 }
 
 func (r *recordingShared) AllowRate(context.Context, string, int, time.Duration) (bool, time.Duration, error) {
 	return true, 0, nil
 }
-func (r *recordingShared) AcquireConn(context.Context, int, int) (bool, error) { return true, nil }
-func (r *recordingShared) ReleaseConn(context.Context, int) error              { return nil }
-func (r *recordingShared) HeartbeatConns(_ context.Context, c map[int]int) error {
+func (r *recordingShared) AcquireConn(_ context.Context, _, _, mine int) (bool, error) {
+	if r.onAcquire != nil {
+		r.onAcquire()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	cp := make(map[int]int, len(c))
-	for k, v := range c {
-		cp[k] = v
+	r.sets = append(r.sets, mine)
+	return true, nil
+}
+func (r *recordingShared) SetConn(_ context.Context, _, count int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.failSets > 0 {
+		r.failSets--
+		return errDown
 	}
-	r.beats = append(r.beats, cp)
+	r.sets = append(r.sets, count)
 	return nil
 }
+func (r *recordingShared) last() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sets[len(r.sets)-1]
+}
 
-func TestHeartbeatReportsAndWithdrawsCounts(t *testing.T) {
+func TestFailedReleaseIsCorrectedByHeartbeat(t *testing.T) {
 	r := &recordingShared{}
 	a := NewUsageAccountant(&fakeBandwidthStore{totals: map[int]int64{}}, logger.New("error"))
 	a.SetShared(r)
-	ctx := context.Background()
-	capped := &models.ProxyUser{ID: 13, MaxConcurrentConnections: 5}
-	free := &models.ProxyUser{ID: 14}
+	capped := &models.ProxyUser{ID: 13, MaxConcurrentConnections: 1}
 
-	l1, _ := a.Begin(ctx, capped)
-	l2, _ := a.Begin(ctx, capped)
-	lf, _ := a.Begin(ctx, free)
-	defer lf.Release()
-	a.heartbeat(ctx)
+	l, err := a.Begin(context.Background(), capped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.failSets = 1 // the release's write is lost (e.g. Redis back-off)
+	l.Release()
+	if r.last() != 1 {
+		t.Fatalf("store holds %d before the heartbeat", r.last())
+	}
+	a.heartbeat()
+	if r.last() != 0 {
+		t.Fatalf("heartbeat left %d connections in the store, want 0", r.last())
+	}
+	n := len(r.sets)
+	a.heartbeat() // nothing left to renew
+	if len(r.sets) != n {
+		t.Fatal("heartbeat kept writing an idle user")
+	}
+}
+
+func TestHeartbeatDuringAcquireKeepsTheNewConnection(t *testing.T) {
+	r := &recordingShared{}
+	a := NewUsageAccountant(&fakeBandwidthStore{totals: map[int]int64{}}, logger.New("error"))
+	a.SetShared(r)
+	capped := &models.ProxyUser{ID: 14, MaxConcurrentConnections: 5}
+
+	// Make the user tracked, then run a heartbeat while the next acquire is
+	// in flight; it must not overwrite the new count with a stale one.
+	l1, _ := a.Begin(context.Background(), capped)
 	l1.Release()
-	l2.Release()
-	a.heartbeat(ctx) // withdraws: reports 0 once
-	a.heartbeat(ctx) // nothing left to report
+	var wg sync.WaitGroup
+	r.onAcquire = func() {
+		wg.Go(a.heartbeat)
+		time.Sleep(20 * time.Millisecond)
+	}
+	l2, err := a.Begin(context.Background(), capped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Release()
+	wg.Wait()
+	if got := r.last(); got != 1 {
+		t.Fatalf("store holds %d after a racing heartbeat, want 1 (history %v)", got, r.sets)
+	}
+}
 
-	if len(r.beats) != 2 {
-		t.Fatalf("heartbeats sent: %v", r.beats)
-	}
-	if r.beats[0][13] != 2 || len(r.beats[0]) != 1 {
-		t.Fatalf("first heartbeat %v, want only user 13 with 2", r.beats[0])
-	}
-	if c, ok := r.beats[1][13]; !ok || c != 0 {
-		t.Fatalf("second heartbeat %v, want user 13 withdrawn", r.beats[1])
+func TestStickyKeepsLocalPinAfterRecovery(t *testing.T) {
+	st := sharedStores(t, 1)[0]
+	s := NewStickySessions()
+	s.shared = &failingShared{}
+	ctx := context.Background()
+	s.Pin(ctx, 5, "sess", 42, time.Minute) // store down: pinned locally
+	s.shared = st                          // store back, without the pin
+	if id, ok := s.Lookup(ctx, 5, "sess"); !ok || id != 42 {
+		t.Fatalf("session moved after the store recovered: %d, %v", id, ok)
 	}
 }
 

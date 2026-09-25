@@ -15,6 +15,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/tracing"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // SOCKS5 constants (RFC 1928, RFC 1929).
@@ -240,8 +241,11 @@ func (s *socksServer) handle(conn net.Conn) {
 	// The upstream connect has its own timeouts; the handshake deadline must
 	// not cut the reply we send after it.
 	conn.SetDeadline(time.Time{}) //nolint:errcheck
-	ctx, span := tracing.StartProxy(ctx, "proxy SOCKS5", proxySpanAttrs("socks5", host, preq)...)
-	defer span.End()
+	if tracing.Enabled() {
+		var span trace.Span
+		ctx, span = tracing.StartProxy(ctx, "proxy SOCKS5", proxySpanAttrs("socks5", host, preq)...)
+		defer span.End()
+	}
 	upstreamConn, proxyID, lease, err := s.upstream.OpenTunnel(ctx, host, preq)
 	if err != nil {
 		tracing.Fail(ctx, err)

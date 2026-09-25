@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/tracing"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -23,7 +24,11 @@ func recordSpans(t *testing.T) *tracetest.SpanRecorder {
 	sr := tracetest.NewSpanRecorder()
 	old := otel.GetTracerProvider()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
-	t.Cleanup(func() { otel.SetTracerProvider(old) })
+	tracing.SetEnabled(true)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(old)
+		tracing.SetEnabled(false)
+	})
 	return sr
 }
 
@@ -105,9 +110,22 @@ func TestProxyTracingIsTransparent(t *testing.T) {
 	if v, _ := spanAttr(root, "rota.user_id"); v.AsInt64() != 21 {
 		t.Fatalf("rota.user_id = %v", v.AsInt64())
 	}
-	for _, kv := range root.Attributes() {
-		if strings.Contains(kv.Value.String(), "secret") {
-			t.Fatalf("span recorded the request path: %s=%s", kv.Key, kv.Value.String())
+	// Neither attributes, statuses nor error events may carry the path or
+	// query (net/http errors quote the full URL).
+	for _, s := range sr.Ended() {
+		texts := []string{s.Status().Description}
+		for _, kv := range s.Attributes() {
+			texts = append(texts, kv.Value.String())
+		}
+		for _, ev := range s.Events() {
+			for _, kv := range ev.Attributes {
+				texts = append(texts, kv.Value.String())
+			}
+		}
+		for _, txt := range texts {
+			if strings.Contains(txt, "secret") || strings.Contains(txt, "q=1") {
+				t.Fatalf("span %q recorded the request path: %s", s.Name(), txt)
+			}
 		}
 	}
 	if len(attempts) != 2 {
@@ -120,5 +138,20 @@ func TestProxyTracingIsTransparent(t *testing.T) {
 		if a.Parent().SpanID() != root.SpanContext().SpanID() {
 			t.Fatal("attempt span not a child of the request span")
 		}
+	}
+}
+
+func TestNoSpansWhenTracingDisabled(t *testing.T) {
+	sr := recordSpans(t)
+	tracing.SetEnabled(false)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") })) //nolint:errcheck
+	defer up.Close()
+	user := &models.ProxyUser{ID: 22, Username: "quiet", Enabled: true}
+	f := newTrafficFixture(t, user, testChain([]*models.Proxy{{ID: 1, Address: strings.TrimPrefix(up.URL, "http://"), Protocol: "http"}}))
+	if code, _ := f.get(t, "quiet"); code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	if n := len(sr.Ended()); n != 0 {
+		t.Fatalf("%d spans recorded with tracing off", n)
 	}
 }

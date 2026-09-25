@@ -137,6 +137,10 @@ dashboard:
   affinity: {}
   podSecurityContext:
     runAsNonRoot: true
+    # The image's user (nextjs) is a name; Kubernetes needs the numeric id
+    # to verify runAsNonRoot.
+    runAsUser: 1001
+    runAsGroup: 1001
     seccompProfile:
       type: RuntimeDefault
   securityContext:

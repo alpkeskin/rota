@@ -175,8 +175,17 @@ func (g *GeoIPService) StartAutoUpdate(ctx context.Context) {
 					intervalHours = 168
 				}
 
-				_, err := os.Stat(dbPath)
+				if dbPath == "" {
+					dbPath = "data/GeoLite2-City.mmdb"
+				}
+				// The file is per instance while last_updated_at is shared
+				// by all of them: go by this instance's copy, so an update
+				// on another instance doesn't make this one skip its own.
+				fi, err := os.Stat(dbPath)
 				dbMissing := os.IsNotExist(err)
+				if err == nil {
+					lastUpdated = fi.ModTime()
+				}
 
 				if dbMissing || time.Since(lastUpdated) >= time.Duration(intervalHours)*time.Hour {
 					g.logger.Info("triggering scheduled maxmind db auto-update")

@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/api/handlers"
@@ -65,6 +67,11 @@ type Server struct {
 	changes ChangePublisher
 	// reloadGeoIP reloads GeoIP settings after a settings change.
 	reloadGeoIP func(ctx context.Context) error
+	// settingsMu serialises settings reloads, so an older read can't be
+	// applied after a newer one; settingsSeen fingerprints the settings the
+	// last reload read (see WatchSettings).
+	settingsMu   sync.Mutex
+	settingsSeen string
 
 	// cancelServices stops all background services (source/pool/alert/cleanup)
 	// on shutdown, before the DB connection is closed (see AUD-6).
@@ -553,6 +560,12 @@ func (s *Server) SetChangePublisher(p ChangePublisher) {
 func (s *Server) ApplyChange(ctx context.Context, topic string) {
 	switch topic {
 	case cluster.TopicSettings:
+		s.settingsMu.Lock()
+		defer s.settingsMu.Unlock()
+		// Fingerprint before reading, so a change landing during the reload
+		// is still seen as new by WatchSettings.
+		fp, fpErr := s.settingsFingerprint(ctx)
+		reloaded := true
 		if s.reloadGeoIP != nil {
 			if err := s.reloadGeoIP(ctx); err != nil {
 				s.logger.Error("failed to reload geoip settings after update", "error", err)
@@ -560,10 +573,14 @@ func (s *Server) ApplyChange(ctx context.Context, topic string) {
 		}
 		if s.proxyServer != nil {
 			if err := s.proxyServer.ReloadSettings(ctx); err != nil {
+				reloaded = false
 				s.logger.Error("failed to reload proxy settings after update", "error", err)
 			} else {
 				s.logger.Info("proxy settings reloaded after update")
 			}
+		}
+		if reloaded && fpErr == nil {
+			s.settingsSeen = fp
 		}
 	case cluster.TopicProxies:
 		if s.proxyServer != nil {
@@ -573,6 +590,56 @@ func (s *Server) ApplyChange(ctx context.Context, topic string) {
 		if s.proxyServer != nil {
 			s.proxyServer.UsersChanged()
 		}
+	}
+}
+
+// settingsFingerprint identifies the current contents of the settings table.
+func (s *Server) settingsFingerprint(ctx context.Context) (string, error) {
+	if s.db == nil {
+		return "", errors.New("no database")
+	}
+	var fp *string
+	err := s.db.Pool.QueryRow(ctx,
+		`SELECT md5(string_agg(key || '=' || value::text || '@' || updated_at::text, ',' ORDER BY key)) FROM settings`).Scan(&fp)
+	if err != nil || fp == nil {
+		return "", err
+	}
+	return *fp, nil
+}
+
+// WatchSettings reloads the settings when they changed without this
+// instance being told (a lost notification, or a change whose notification
+// failed to send), checking once a minute until ctx ends.
+func (s *Server) WatchSettings(ctx context.Context) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.checkSettings(ctx)
+		}
+	}
+}
+
+// checkSettings reloads the settings if they differ from the last reload.
+func (s *Server) checkSettings(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	fp, err := s.settingsFingerprint(ctx)
+	if err != nil {
+		return
+	}
+	s.settingsMu.Lock()
+	seen := s.settingsSeen
+	if seen == "" {
+		s.settingsSeen = fp // first look: what we loaded at startup
+	}
+	s.settingsMu.Unlock()
+	if seen != "" && fp != seen {
+		s.logger.Info("settings changed without a notification; reloading")
+		s.ApplyChange(ctx, cluster.TopicSettings)
 	}
 }
 

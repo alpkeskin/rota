@@ -66,28 +66,34 @@ func TestConnSlotsSharedAndExpire(t *testing.T) {
 	st := testStores(t, 2)
 	a, b := st[0], st[1]
 	ctx := context.Background()
-	for _, s := range []*Store{a, a, b} {
-		if ok, err := s.AcquireConn(ctx, 7, 3); err != nil || !ok {
-			t.Fatalf("acquire: ok=%v err=%v", ok, err)
-		}
+	// Counts are absolute per instance: a holds 2, b 1, cap 3.
+	if ok, err := a.AcquireConn(ctx, 7, 3, 1); err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
 	}
-	if ok, _ := b.AcquireConn(ctx, 7, 3); ok {
+	if ok, _ := a.AcquireConn(ctx, 7, 3, 2); !ok {
+		t.Fatal("a's 2nd")
+	}
+	if ok, _ := b.AcquireConn(ctx, 7, 3, 1); !ok {
+		t.Fatal("b's 1st")
+	}
+	if ok, _ := b.AcquireConn(ctx, 7, 3, 2); ok {
 		t.Fatal("4th slot granted with limit 3")
 	}
-	if err := a.ReleaseConn(ctx, 7); err != nil {
+	// A refused acquire writes nothing: b still counts 1.
+	if err := a.SetConn(ctx, 7, 1); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := b.AcquireConn(ctx, 7, 3); !ok {
+	if ok, _ := b.AcquireConn(ctx, 7, 3, 2); !ok {
 		t.Fatal("released slot not reusable")
 	}
-	// Now a holds 1 and b holds 2. a keeps heartbeating, b "crashes": its
-	// slots come back once its counts expire.
+	// Now a holds 1 and b holds 2. a keeps renewing, b "crashes": its slots
+	// come back once its count expires.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if err := a.HeartbeatConns(ctx, map[int]int{7: 1}); err != nil {
+		if err := a.SetConn(ctx, 7, 1); err != nil {
 			t.Fatal(err)
 		}
-		ok, err := a.AcquireConn(ctx, 7, 2)
+		ok, err := a.AcquireConn(ctx, 7, 2, 2)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,12 +105,12 @@ func TestConnSlotsSharedAndExpire(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	// Heartbeat with 0 drops our field.
-	if err := a.HeartbeatConns(ctx, map[int]int{7: 0}); err != nil {
+	// Setting 0 drops our field.
+	if err := a.SetConn(ctx, 7, 0); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := b.AcquireConn(ctx, 7, 1); !ok {
-		t.Fatal("zero heartbeat left slots taken")
+	if ok, _ := b.AcquireConn(ctx, 7, 1, 1); !ok {
+		t.Fatal("zero count left slots taken")
 	}
 }
 
@@ -177,7 +183,7 @@ func TestBacksOffWhenRedisIsDown(t *testing.T) {
 	}
 	// During the back-off calls fail fast with ErrUnavailable.
 	start := time.Now()
-	if _, err := s.AcquireConn(ctx, 1, 1); !errors.Is(err, ErrUnavailable) {
+	if _, err := s.AcquireConn(ctx, 1, 1, 1); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
 	}
 	if time.Since(start) > 10*time.Millisecond {
@@ -185,7 +191,7 @@ func TestBacksOffWhenRedisIsDown(t *testing.T) {
 	}
 	// After the back-off it tries again.
 	s.now = func() time.Time { return time.Now().Add(downBackoff) }
-	if _, err := s.AcquireConn(ctx, 1, 1); errors.Is(err, ErrUnavailable) {
+	if _, err := s.AcquireConn(ctx, 1, 1, 1); errors.Is(err, ErrUnavailable) {
 		t.Fatal("still backing off after the back-off period")
 	}
 }

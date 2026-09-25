@@ -76,7 +76,14 @@ type userUsage struct {
 	rpm      int
 
 	maxConns int // latest connection cap seen (0 = unlimited)
-	reported int // connection count last sent to the shared store
+
+	// connMu serialises this user's connection-count writes to the shared
+	// store, so they arrive in order and each carries the current count.
+	// Lock order: connMu before UsageAccountant.mu.
+	connMu sync.Mutex
+	// tracked: the shared store may hold a non-zero count for this user
+	// from this instance; the heartbeat keeps it current until it is 0.
+	tracked bool
 }
 
 func (u *userUsage) total() int64 {
@@ -101,6 +108,9 @@ type UsageAccountant struct {
 
 	stop chan struct{}
 	done chan struct{}
+	// heartbeatEvery is how often connection counts are renewed in the
+	// shared store (well within sharedstate.ConnTTL).
+	heartbeatEvery time.Duration
 }
 
 // SharedLimits enforces request rates and connection caps across all
@@ -108,9 +118,11 @@ type UsageAccountant struct {
 // instance.
 type SharedLimits interface {
 	AllowRate(ctx context.Context, key string, limit int, period time.Duration) (bool, time.Duration, error)
-	AcquireConn(ctx context.Context, userID, limit int) (bool, error)
-	ReleaseConn(ctx context.Context, userID int) error
-	HeartbeatConns(ctx context.Context, counts map[int]int) error
+	// AcquireConn raises this instance's count of the user's connections to
+	// mine if the total across instances stays within limit.
+	AcquireConn(ctx context.Context, userID, limit, mine int) (bool, error)
+	// SetConn sets this instance's count of the user's connections.
+	SetConn(ctx context.Context, userID, count int) error
 }
 
 // SetShared makes the per-user rate and connection limits cluster-wide.
@@ -126,6 +138,8 @@ func NewUsageAccountant(store BandwidthStore, log *logger.Logger) *UsageAccounta
 		users:  make(map[int]*userUsage),
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
+
+		heartbeatEvery: 10 * time.Second,
 	}
 }
 
@@ -137,8 +151,8 @@ type Lease struct {
 	userID   int
 	id       uint64
 	released atomic.Bool
-	// sharedSlot: the lease holds a connection slot in the shared store.
-	sharedSlot bool
+	// shared: the lease is counted in the shared store's connection count.
+	shared bool
 }
 
 // AddUp counts client→upstream bytes.
@@ -181,17 +195,37 @@ func (l *Lease) Release() {
 	if l == nil || !l.released.CompareAndSwap(false, true) {
 		return
 	}
-	l.a.mu.Lock()
-	l.u.active--
-	delete(l.u.closers, l.id)
-	l.u.lastSeen = l.a.now()
-	l.a.mu.Unlock()
-	if l.sharedSlot {
-		// On failure the slot is corrected by the next heartbeat.
-		if err := l.a.shared.ReleaseConn(context.Background(), l.userID); err != nil {
-			metrics.SharedStateErrors.WithLabelValues("concurrency").Inc()
-		}
+	a, u := l.a, l.u
+	if l.shared {
+		u.connMu.Lock()
+		defer u.connMu.Unlock()
 	}
+	a.mu.Lock()
+	u.active--
+	n := u.active
+	delete(u.closers, l.id)
+	u.lastSeen = a.now()
+	a.mu.Unlock()
+	if l.shared {
+		a.setSharedConnsLocked(u, l.userID, n)
+	}
+}
+
+// setSharedConnsLocked writes the user's connection count to the shared
+// store. On failure the heartbeat retries it. Caller holds u.connMu.
+func (a *UsageAccountant) setSharedConnsLocked(u *userUsage, userID, n int) {
+	err := a.shared.SetConn(context.Background(), userID, n)
+	if err != nil {
+		metrics.SharedStateErrors.WithLabelValues("concurrency").Inc()
+	}
+	a.mu.Lock()
+	switch {
+	case err != nil || n > 0:
+		u.tracked = true
+	case u.active == 0:
+		u.tracked = false
+	}
+	a.mu.Unlock()
 }
 
 // Begin admits a new request or tunnel for the user, or returns
@@ -266,22 +300,33 @@ func (a *UsageAccountant) Begin(ctx context.Context, user *models.ProxyUser) (*L
 	}
 	a.mu.Unlock()
 
-	slot := false
+	// The connection is counted before asking the store, so the heartbeat
+	// and concurrent releases always see it, and uncounted if refused.
+	shared := false
 	if max := user.MaxConcurrentConnections; max > 0 {
-		ok, err := a.shared.AcquireConn(ctx, user.ID, max)
-		switch {
-		case err != nil:
+		u.connMu.Lock()
+		a.mu.Lock()
+		u.active++
+		mine := u.active
+		u.tracked = true
+		a.mu.Unlock()
+		ok, err := a.shared.AcquireConn(ctx, user.ID, max, mine)
+		if err != nil {
+			// The store may or may not have applied it; tracked makes the
+			// heartbeat correct the count either way.
 			metrics.SharedStateErrors.WithLabelValues("concurrency").Inc()
-			a.mu.Lock()
-			ok = u.active < max
-			a.mu.Unlock()
-		default:
-			slot = ok
+			ok = mine <= max
 		}
 		if !ok {
+			a.mu.Lock()
+			u.active--
+			a.mu.Unlock()
+			u.connMu.Unlock()
 			metrics.LimitRejections.WithLabelValues("concurrency").Inc()
 			return nil, ErrTooManyConnections
 		}
+		u.connMu.Unlock()
+		shared = true
 	}
 	if rpm := user.RequestsPerMinute; rpm > 0 {
 		ok, _, err := a.shared.AllowRate(ctx, sharedstate.UserRateKey(user.ID), rpm, time.Minute)
@@ -292,10 +337,14 @@ func (a *UsageAccountant) Begin(ctx context.Context, user *models.ProxyUser) (*L
 			a.mu.Unlock()
 		}
 		if !ok {
-			if slot {
-				if err := a.shared.ReleaseConn(ctx, user.ID); err != nil {
-					metrics.SharedStateErrors.WithLabelValues("concurrency").Inc()
-				}
+			if shared {
+				u.connMu.Lock()
+				a.mu.Lock()
+				u.active--
+				n := u.active
+				a.mu.Unlock()
+				a.setSharedConnsLocked(u, user.ID, n)
+				u.connMu.Unlock()
 			}
 			metrics.LimitRejections.WithLabelValues("rate_limit").Inc()
 			return nil, ErrRateLimited
@@ -303,7 +352,11 @@ func (a *UsageAccountant) Begin(ctx context.Context, user *models.ProxyUser) (*L
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.newLeaseLocked(u, user.ID, slot), nil
+	if !shared {
+		return a.newLeaseLocked(u, user.ID, false), nil
+	}
+	a.nextID++
+	return &Lease{a: a, u: u, userID: user.ID, id: a.nextID, shared: true}, nil
 }
 
 // allowLocalRate spends one request of the user's per-instance rate budget.
@@ -321,44 +374,41 @@ func (a *UsageAccountant) allowLocalRate(u *userUsage, rpm int, now time.Time) b
 }
 
 // newLeaseLocked admits the request. Caller holds a.mu.
-func (a *UsageAccountant) newLeaseLocked(u *userUsage, userID int, sharedSlot bool) *Lease {
+func (a *UsageAccountant) newLeaseLocked(u *userUsage, userID int, shared bool) *Lease {
 	u.active++
 	a.nextID++
-	return &Lease{a: a, u: u, userID: userID, id: a.nextID, sharedSlot: sharedSlot}
+	return &Lease{a: a, u: u, userID: userID, id: a.nextID, shared: shared}
 }
 
-// heartbeat reports this instance's open connections of capped users to the
-// shared store, renewing them before they expire and correcting any drift.
-func (a *UsageAccountant) heartbeat(ctx context.Context) {
+// heartbeat renews this instance's connection counts in the shared store
+// before they expire, and corrects counts left behind by failed writes.
+func (a *UsageAccountant) heartbeat() {
 	if a.shared == nil {
 		return
 	}
+	type entry struct {
+		id int
+		u  *userUsage
+	}
 	a.mu.Lock()
-	counts := make(map[int]int)
+	var todo []entry
 	for id, u := range a.users {
-		if (u.maxConns > 0 && u.active > 0) || u.reported > 0 {
-			n := u.active
-			if u.maxConns <= 0 {
-				n = 0 // cap removed: withdraw what we reported
-			}
-			counts[id] = n
+		if u.tracked {
+			todo = append(todo, entry{id, u})
 		}
 	}
 	a.mu.Unlock()
-	if len(counts) == 0 {
-		return
-	}
-	if err := a.shared.HeartbeatConns(ctx, counts); err != nil {
-		metrics.SharedStateErrors.WithLabelValues("concurrency").Inc()
-		return
-	}
-	a.mu.Lock()
-	for id, n := range counts {
-		if u := a.users[id]; u != nil {
-			u.reported = n
+	for _, e := range todo {
+		e.u.connMu.Lock()
+		a.mu.Lock()
+		n := e.u.active
+		if e.u.maxConns <= 0 {
+			n = 0 // cap removed: withdraw our count
 		}
+		a.mu.Unlock()
+		a.setSharedConnsLocked(e.u, e.id, n)
+		e.u.connMu.Unlock()
 	}
-	a.mu.Unlock()
 }
 
 // accountingLoadRetry is how soon a failed reload is retried; until then the
@@ -401,8 +451,8 @@ func (a *UsageAccountant) reload(ctx context.Context, u *userUsage, userID int, 
 
 // Start runs the periodic flush until Stop.
 func (a *UsageAccountant) Start() {
-	go func() {
-		defer close(a.done)
+	var wg sync.WaitGroup
+	wg.Go(func() {
 		t := time.NewTicker(accountingFlushInterval)
 		defer t.Stop()
 		for {
@@ -412,9 +462,26 @@ func (a *UsageAccountant) Start() {
 				return
 			case <-t.C:
 				a.Flush(context.Background())
-				a.heartbeat(context.Background())
 			}
 		}
+	})
+	// Own loop: a slow database flush must not delay the renewals past
+	// their expiry on the other instances.
+	wg.Go(func() {
+		t := time.NewTicker(a.heartbeatEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-a.stop:
+				return
+			case <-t.C:
+				a.heartbeat()
+			}
+		}
+	})
+	go func() {
+		wg.Wait()
+		close(a.done)
 	}()
 }
 

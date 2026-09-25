@@ -24,14 +24,18 @@ func TestNotifierDeliversToOtherInstancesOnly(t *testing.T) {
 	defer a.Stop()
 	defer b.Stop()
 	waitListening(t, pool, 2)
+	// Each notifier catches up once when it starts listening.
+	waitFor(t, "startup catch-up", func() bool {
+		return aGot.Load() == 1 && bGot.Load() == 1 && bOther.Load() == 1
+	})
 
 	a.Publish(context.Background(), TopicUsers)
-	waitFor(t, "delivery to b", func() bool { return bGot.Load() == 1 })
+	waitFor(t, "delivery to b", func() bool { return bGot.Load() == 2 })
 	time.Sleep(100 * time.Millisecond)
-	if aGot.Load() != 0 {
+	if aGot.Load() != 1 {
 		t.Fatal("publisher ran its own handler")
 	}
-	if bOther.Load() != 0 {
+	if bOther.Load() != 1 {
 		t.Fatal("handler for another topic ran")
 	}
 
@@ -39,7 +43,7 @@ func TestNotifierDeliversToOtherInstancesOnly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	a.Publish(ctx, TopicUsers)
-	waitFor(t, "delivery despite canceled ctx", func() bool { return bGot.Load() == 2 })
+	waitFor(t, "delivery despite canceled ctx", func() bool { return bGot.Load() == 3 })
 }
 
 func TestNotifierCatchesUpAfterReconnect(t *testing.T) {
@@ -51,6 +55,7 @@ func TestNotifierCatchesUpAfterReconnect(t *testing.T) {
 	b.Start()
 	defer b.Stop()
 	waitListening(t, pool, 1)
+	waitFor(t, "startup catch-up", func() bool { return got.Load() == 1 })
 
 	// Events published while the listener is down are lost, so after
 	// reconnecting every handler runs once.
@@ -58,7 +63,7 @@ func TestNotifierCatchesUpAfterReconnect(t *testing.T) {
 		`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'rota-notify'`); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "catch-up after reconnect", func() bool { return got.Load() >= 1 })
+	waitFor(t, "catch-up after reconnect", func() bool { return got.Load() >= 2 })
 }
 
 // waitListening waits until n notifier sessions are listening.

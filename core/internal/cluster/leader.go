@@ -151,8 +151,8 @@ func (e *Elector) lead(ctx context.Context, conn *pgx.Conn) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Shutting down: stop the jobs before releasing the lock, so the
-			// next leader doesn't overlap with them.
+			// Shutting down: cancel the jobs before releasing the lock. Their
+			// in-flight work stops at its next context check.
 			cancelJobs()
 			uctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			conn.Exec(uctx, `SELECT pg_advisory_unlock($1)`, e.key) //nolint:errcheck

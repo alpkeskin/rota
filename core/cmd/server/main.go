@@ -227,6 +227,9 @@ func run() error {
 	}
 	notifier.Start()
 	defer notifier.Stop()
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+	go apiServer.WatchSettings(watchCtx)
 
 	// Start servers in goroutines
 	errChan := make(chan error, 2)

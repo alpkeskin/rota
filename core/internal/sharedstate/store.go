@@ -8,9 +8,9 @@
 // (instead of making each request wait for a timeout), and callers enforce the
 // limit with in-memory, per-instance state until it comes back.
 //
-// Keys that belong together use a hash tag, and every script touches only
-// keys of one tag, so Redis Cluster works as well as a single server.
-// Scripts read the server clock (TIME), which needs Redis 5 or newer.
+// It talks to one Redis endpoint (a standalone server or a managed service's
+// primary endpoint); Redis Cluster is not supported. Scripts read the server
+// clock (TIME), which needs Redis 5 or newer.
 package sharedstate
 
 import (
@@ -108,7 +108,7 @@ func (s *Store) key(parts ...string) string {
 	return k
 }
 
-// userTag is the Redis Cluster hash tag for keys of one user.
+// userTag groups the keys of one user.
 func userTag(userID int) string { return "{u" + strconv.Itoa(userID) + "}" }
 
 // ── Rate limiting (GCRA) ────────────────────────────────────────────────
@@ -160,45 +160,40 @@ func UserRateKey(userID int) string { return "user" + userTag(userID) }
 // ── Concurrency (per-instance counts with expiry) ───────────────────────
 
 // Each instance keeps its own count of a user's open connections in one hash
-// field, with an expiry field refreshed by Heartbeat. Counts of instances
-// that stopped heartbeating (crashed, partitioned) expire and are dropped, so
-// a lost instance can't hold a user's slots forever.
+// field, with an expiry field it renews. Counts of instances that stopped
+// renewing (crashed, partitioned) expire and are dropped, so a lost instance
+// can't hold a user's slots forever.
+//
+// An instance always writes its absolute count (never increments), and its
+// caller serialises the writes per user, so a lost or failed write is
+// corrected by the next one instead of leaving a phantom slot.
 var acquireScript = redis.NewScript(`
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-local inst, limit, ttl = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3])
+local inst, limit, ttl, mine = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
 local h = redis.call('HGETALL', KEYS[1])
 local counts, exps = {}, {}
 for i = 1, #h, 2 do
   local f, v = h[i], tonumber(h[i + 1])
   if string.sub(f, -4) == ':exp' then exps[string.sub(f, 1, -5)] = v else counts[f] = v end
 end
-local total = 0
+local others = 0
 for f, c in pairs(counts) do
-  if f == inst or (exps[f] and exps[f] > now) then
-    total = total + c
-  else
-    redis.call('HDEL', KEYS[1], f, f .. ':exp')
+  if f ~= inst then
+    if exps[f] and exps[f] > now then
+      others = others + c
+    else
+      redis.call('HDEL', KEYS[1], f, f .. ':exp')
+    end
   end
 end
-if total >= limit then return -1 end
-redis.call('HINCRBY', KEYS[1], inst, 1)
-redis.call('HSET', KEYS[1], inst .. ':exp', now + ttl)
+if others + mine > limit then return 0 end
+redis.call('HSET', KEYS[1], inst, mine, inst .. ':exp', now + ttl)
 redis.call('PEXPIRE', KEYS[1], ttl * 3)
-return total + 1
+return 1
 `)
 
-var releaseScript = redis.NewScript(`
-local c = tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0')
-if c > 1 then
-  redis.call('HINCRBY', KEYS[1], ARGV[1], -1)
-else
-  redis.call('HDEL', KEYS[1], ARGV[1], ARGV[1] .. ':exp')
-end
-return 0
-`)
-
-var heartbeatScript = redis.NewScript(`
+var setConnScript = redis.NewScript(`
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 local inst, count, ttl = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3])
@@ -211,8 +206,8 @@ end
 return 0
 `)
 
-// ConnTTL is how long an instance's connection counts survive without a
-// heartbeat. Heartbeat must run well within it.
+// ConnTTL is how long an instance's connection counts survive without being
+// renewed. Callers renew them well within it.
 const ConnTTL = 30 * time.Second
 
 // connTTL is ConnTTL, shortened in tests.
@@ -220,42 +215,29 @@ var connTTL = ConnTTL
 
 func (s *Store) connKey(userID int) string { return s.key("conn", userTag(userID)) }
 
-// AcquireConn takes one of a user's limit connection slots shared by all
-// instances; false means all are in use.
-func (s *Store) AcquireConn(ctx context.Context, userID, limit int) (bool, error) {
+// AcquireConn raises this instance's count of the user's open connections to
+// mine if, together with the live counts of the other instances, it stays
+// within limit; false means the cap is reached (and nothing was written).
+func (s *Store) AcquireConn(ctx context.Context, userID, limit, mine int) (bool, error) {
 	var n int64
 	err := s.call(ctx, func(ctx context.Context) error {
 		var err error
 		n, err = acquireScript.Run(ctx, s.rdb, []string{s.connKey(userID)},
-			s.instance, limit, connTTL.Milliseconds()).Int64()
+			s.instance, limit, connTTL.Milliseconds(), mine).Int64()
 		return err
 	})
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	return n == 1, nil
 }
 
-// ReleaseConn returns a slot taken with AcquireConn.
-func (s *Store) ReleaseConn(ctx context.Context, userID int) error {
+// SetConn sets this instance's count of the user's open connections (0
+// removes it) and renews its expiry.
+func (s *Store) SetConn(ctx context.Context, userID, count int) error {
 	return s.call(ctx, func(ctx context.Context) error {
-		return releaseScript.Run(ctx, s.rdb, []string{s.connKey(userID)}, s.instance).Err()
+		return setConnScript.Run(ctx, s.rdb, []string{s.connKey(userID)}, s.instance, count, connTTL.Milliseconds()).Err()
 	})
-}
-
-// HeartbeatConns sets this instance's connection count for each user (0
-// removes it) and renews their expiry. Counts are this instance's own, so a
-// heartbeat also corrects any drift from failed releases.
-func (s *Store) HeartbeatConns(ctx context.Context, counts map[int]int) error {
-	for id, c := range counts {
-		err := s.call(ctx, func(ctx context.Context) error {
-			return heartbeatScript.Run(ctx, s.rdb, []string{s.connKey(id)}, s.instance, c, connTTL.Milliseconds()).Err()
-		})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // ── Sticky sessions ─────────────────────────────────────────────────────

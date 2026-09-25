@@ -402,13 +402,17 @@ Any number of core instances can share one database:
   session, another instance takes over within seconds
   (`rota_cluster_leader` shows which one leads).
 - **Configuration changes** (settings, proxies, proxy users, pools) made on
-  one instance reach the others at once through Postgres `LISTEN/NOTIFY`.
+  one instance reach the others at once through Postgres `LISTEN/NOTIFY`. If
+  a notification is lost, proxies and users are refreshed within a minute
+  anyway, and each instance checks once a minute whether the settings changed.
 - **Limits and sticky sessions** need Redis (`REDIS_URL`): per-user requests
   per minute and connection caps, the per-IP proxy rate limit, sticky
   sessions and login throttling are then enforced across all instances.
   Without Redis each instance enforces them on its own (a cap of N allows N
   per instance). If Redis becomes unreachable, instances fall back to their
-  own limits until it's back (`rota_sharedstate_errors_total`).
+  own limits until it's back (`rota_sharedstate_errors_total`). Use a single
+  Redis endpoint (standalone, or a managed service's primary endpoint; Redis
+  Cluster is not supported), version 5 or newer.
 - **Bandwidth quotas** are always kept in the database; users with a quota
   reload their monthly total every 30 seconds, so usage on other instances
   counts against it within about half a minute.
