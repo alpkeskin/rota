@@ -50,6 +50,9 @@ type UserAuthMiddleware struct {
 	// cache: username -> userEntry (TTL 60s)
 	mu    sync.RWMutex
 	cache map[string]userEntry
+	// gen is bumped by InvalidateAll; a lookup that started before the bump
+	// doesn't cache its (possibly stale) result.
+	gen uint64
 
 	// usersConfigured caches whether any proxy_users exist (TTL 30s). Used by the
 	// no-credentials path to decide whether an unauthenticated request may pass.
@@ -230,6 +233,9 @@ func (m *UserAuthMiddleware) resolve(ctx context.Context, username, password str
 	}
 
 	// ── Slow path: full DB lookup + bcrypt (runs at most once per 60s per user) ──
+	m.mu.RLock()
+	gen := m.gen
+	m.mu.RUnlock()
 	if m.userRepo == nil { // legacy-only setups (and tests) have no user store
 		return nil, nil, fmt.Errorf("invalid credentials")
 	}
@@ -244,11 +250,13 @@ func (m *UserAuthMiddleware) resolve(ctx context.Context, username, password str
 	}
 
 	m.mu.Lock()
-	m.cache[username] = userEntry{
-		user:           user,
-		chain:          chain,
-		expiresAt:      now.Add(60 * time.Second),
-		verifiedPwHash: user.PasswordHash,
+	if m.gen == gen {
+		m.cache[username] = userEntry{
+			user:           user,
+			chain:          chain,
+			expiresAt:      now.Add(60 * time.Second),
+			verifiedPwHash: user.PasswordHash,
+		}
 	}
 	m.mu.Unlock()
 
@@ -354,6 +362,33 @@ func (m *UserAuthMiddleware) refreshLoop() {
 		}
 		cancel()
 	}
+}
+
+// RefreshChains reloads the pool chains of cached users, so proxy changes
+// reach their routing at once.
+func (m *UserAuthMiddleware) RefreshChains(ctx context.Context) {
+	m.mu.RLock()
+	chains := make([]*PoolChain, 0, len(m.cache))
+	for _, e := range m.cache {
+		chains = append(chains, e.chain)
+	}
+	m.mu.RUnlock()
+	for _, c := range chains {
+		if ctx.Err() != nil {
+			return
+		}
+		c.Refresh(ctx)
+	}
+}
+
+// InvalidateAll drops every cached user, so the next request of each user
+// reloads their account, limits and pools.
+func (m *UserAuthMiddleware) InvalidateAll() {
+	m.mu.Lock()
+	m.cache = make(map[string]userEntry)
+	m.gen++
+	m.usersCheckedUntil = time.Time{}
+	m.mu.Unlock()
 }
 
 // InvalidateUser removes a user's cached chain (call after user is updated/deleted).

@@ -171,6 +171,11 @@ func (h *SettingsHandler) Reset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply the defaults now, as Update does.
+	if h.onSettingsUpdate != nil {
+		h.onSettingsUpdate(r.Context())
+	}
+
 	response := map[string]interface{}{
 		"message": "Configuration reset to defaults",
 		"config":  settings,

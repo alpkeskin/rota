@@ -304,3 +304,18 @@ func TestUsageAccountantStoreFailureAndMonthRollover(t *testing.T) {
 		l.Release()
 	}
 }
+
+func TestInvalidateAllDropsCachedUsers(t *testing.T) {
+	m := &UserAuthMiddleware{cache: map[string]userEntry{
+		"alice": {user: &models.ProxyUser{ID: 1}, expiresAt: time.Now().Add(time.Minute)},
+	}}
+	m.usersConfigured = true
+	m.usersCheckedUntil = time.Now().Add(time.Minute)
+	m.InvalidateAll()
+	if m.isCached("alice") || len(m.cache) != 0 {
+		t.Fatal("user still cached after InvalidateAll")
+	}
+	if !m.usersCheckedUntil.IsZero() || m.gen != 1 {
+		t.Fatal("InvalidateAll didn't reset the users-configured check or bump the generation")
+	}
+}

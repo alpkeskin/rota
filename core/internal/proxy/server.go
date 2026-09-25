@@ -336,6 +336,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return err
 }
 
+// ProxiesChanged makes changes to the upstream proxy inventory take effect at
+// once: selectors and user chains are reloaded and cached transports dropped.
+func (s *Server) ProxiesChanged(ctx context.Context) {
+	ClearTransportCache()
+	if err := s.getSelector().Refresh(ctx); err != nil {
+		s.logger.Warn("failed to refresh proxy list after a change", "error", err)
+	}
+	s.userAuthMw.RefreshChains(ctx)
+}
+
+// UsersChanged drops cached proxy users and their pool chains, so account,
+// limit and pool changes apply to the next request.
+func (s *Server) UsersChanged() {
+	s.userAuthMw.InvalidateAll()
+}
+
 // ReloadSettings reloads settings from database and updates components
 func (s *Server) ReloadSettings(ctx context.Context) error {
 	settings, err := s.settingsRepo.GetAll(ctx)

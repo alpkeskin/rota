@@ -183,6 +183,16 @@ func run() error {
 	// Set proxy server reference in API server for reload functionality
 	apiServer.SetProxyServer(proxyServer)
 
+	// Settings, proxy and user changes made on one instance reach the others
+	// at once rather than on their next periodic refresh.
+	notifier := cluster.NewNotifier(db.Pool, log)
+	apiServer.SetChangePublisher(notifier)
+	for _, topic := range []string{cluster.TopicSettings, cluster.TopicProxies, cluster.TopicUsers} {
+		notifier.Subscribe(topic, func(ctx context.Context) { apiServer.ApplyChange(ctx, topic) })
+	}
+	notifier.Start()
+	defer notifier.Stop()
+
 	// Start servers in goroutines
 	errChan := make(chan error, 2)
 

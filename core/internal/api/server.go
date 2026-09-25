@@ -10,6 +10,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/api/handlers"
 	"github.com/alpkeskin/rota/core/internal/auth"
+	"github.com/alpkeskin/rota/core/internal/cluster"
 	"github.com/alpkeskin/rota/core/internal/config"
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/metrics"
@@ -30,6 +31,14 @@ import (
 // ProxyServer interface for reloading proxy pool
 type ProxyServer interface {
 	ReloadSettings(ctx context.Context) error
+	ProxiesChanged(ctx context.Context)
+	UsersChanged()
+}
+
+// ChangePublisher tells the other instances that shared configuration
+// changed (see cluster.Notifier).
+type ChangePublisher interface {
+	Publish(ctx context.Context, topic string)
 }
 
 // Server represents the API server
@@ -51,6 +60,10 @@ type Server struct {
 
 	// Proxy server reference for reloading
 	proxyServer ProxyServer
+	// changes notifies the other instances; nil on a single instance.
+	changes ChangePublisher
+	// reloadGeoIP reloads GeoIP settings after a settings change.
+	reloadGeoIP func(ctx context.Context) error
 
 	// cancelServices stops all background services (source/pool/alert/cleanup)
 	// on shutdown, before the DB connection is closed (see AUD-6).
@@ -210,17 +223,9 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	}
 
 	// Wire settings reload: when settings are updated via API, reload proxy server & GeoIP service
+	s.reloadGeoIP = geoSvc.ReloadSettings
 	settingsHandler.SetOnUpdate(func(ctx context.Context) {
-		if err := geoSvc.ReloadSettings(ctx); err != nil {
-			log.Error("failed to reload geoip settings after update", "error", err)
-		}
-		if s.proxyServer != nil {
-			if err := s.proxyServer.ReloadSettings(ctx); err != nil {
-				log.Error("failed to reload proxy settings after update", "error", err)
-			} else {
-				log.Info("proxy settings reloaded after update")
-			}
-		}
+		s.ApplyChange(ctx, cluster.TopicSettings)
 	})
 
 	// Alert watcher + proxy cleanup services
@@ -382,32 +387,32 @@ func (s *Server) setupRoutes() {
 		// Inventory changes — operator and up.
 		r.Group(func(r chi.Router) {
 			r.Use(RequireRole(auth.RoleOperator))
-			r.Post("/proxies", s.proxyHandler.Create)
-			r.Post("/proxies/bulk", s.proxyHandler.BulkCreate)
-			r.Post("/proxies/bulk-delete", s.proxyHandler.BulkDelete)
-			r.Post("/proxies/bulk-tags", s.proxyHandler.BulkTag)
-			r.Delete("/proxies", s.proxyHandler.DeleteAll)
-			r.Put("/proxies/{id}", s.proxyHandler.Update)
-			r.Delete("/proxies/{id}", s.proxyHandler.Delete)
+			r.With(s.publishes(cluster.TopicProxies)).Post("/proxies", s.proxyHandler.Create)
+			r.With(s.publishes(cluster.TopicProxies)).Post("/proxies/bulk", s.proxyHandler.BulkCreate)
+			r.With(s.publishes(cluster.TopicProxies)).Post("/proxies/bulk-delete", s.proxyHandler.BulkDelete)
+			r.With(s.publishes(cluster.TopicProxies)).Post("/proxies/bulk-tags", s.proxyHandler.BulkTag)
+			r.With(s.publishes(cluster.TopicProxies)).Delete("/proxies", s.proxyHandler.DeleteAll)
+			r.With(s.publishes(cluster.TopicProxies)).Put("/proxies/{id}", s.proxyHandler.Update)
+			r.With(s.publishes(cluster.TopicProxies)).Delete("/proxies/{id}", s.proxyHandler.Delete)
 			r.Post("/proxies/{id}/test", s.proxyHandler.Test)
-			r.Post("/proxies/reload", s.ReloadProxyPool)
+			r.With(s.publishes(cluster.TopicProxies)).Post("/proxies/reload", s.ReloadProxyPool)
 
-			r.Delete("/sources/{id}", s.sourceHandler.Delete)
-			r.Post("/sources/{id}/fetch", s.sourceHandler.FetchNow)
+			r.With(s.publishes(cluster.TopicProxies)).Delete("/sources/{id}", s.sourceHandler.Delete)
+			r.With(s.publishes(cluster.TopicProxies)).Post("/sources/{id}/fetch", s.sourceHandler.FetchNow)
 			r.Post("/sources/enrich-geo", s.sourceHandler.EnrichGeo)
 
-			r.Post("/proxy-users", s.userHandler.Create)
-			r.Put("/proxy-users/{id}", s.userHandler.Update)
-			r.Delete("/proxy-users/{id}", s.userHandler.Delete)
+			r.With(s.publishes(cluster.TopicUsers)).Post("/proxy-users", s.userHandler.Create)
+			r.With(s.publishes(cluster.TopicUsers)).Put("/proxy-users/{id}", s.userHandler.Update)
+			r.With(s.publishes(cluster.TopicUsers)).Delete("/proxy-users/{id}", s.userHandler.Delete)
 			r.Post("/proxy-users/{id}/export-token", s.userHandler.RotateExportToken)
 			r.Delete("/proxy-users/{id}/export-token", s.userHandler.RevokeExportToken)
 
-			r.Post("/pools", s.poolHandler.Create)
-			r.Put("/pools/{id}", s.poolHandler.Update)
-			r.Delete("/pools/{id}", s.poolHandler.Delete)
-			r.Post("/pools/{id}/proxies", s.poolHandler.AddProxies)
-			r.Delete("/pools/{id}/proxies", s.poolHandler.RemoveProxies)
-			r.Post("/pools/{id}/sync", s.poolHandler.Sync)
+			r.With(s.publishes(cluster.TopicUsers)).Post("/pools", s.poolHandler.Create)
+			r.With(s.publishes(cluster.TopicUsers)).Put("/pools/{id}", s.poolHandler.Update)
+			r.With(s.publishes(cluster.TopicUsers)).Delete("/pools/{id}", s.poolHandler.Delete)
+			r.With(s.publishes(cluster.TopicUsers)).Post("/pools/{id}/proxies", s.poolHandler.AddProxies)
+			r.With(s.publishes(cluster.TopicUsers)).Delete("/pools/{id}/proxies", s.poolHandler.RemoveProxies)
+			r.With(s.publishes(cluster.TopicUsers)).Post("/pools/{id}/sync", s.poolHandler.Sync)
 			r.Post("/pools/{id}/health-check", s.poolHandler.HealthCheck)
 			r.Delete("/pools/{id}/alert-rules/{rule_id}", s.poolHandler.DeleteAlertRule)
 		})
@@ -423,9 +428,9 @@ func (s *Server) setupRoutes() {
 			r.Put("/sources/{id}", s.sourceHandler.Update)
 			r.Post("/pools/{id}/alert-rules", s.poolHandler.CreateAlertRule)
 			r.Put("/pools/{id}/alert-rules/{rule_id}", s.poolHandler.UpdateAlertRule)
-			r.Put("/settings", s.settingsHandler.Update)
-			r.Post("/settings/reset", s.settingsHandler.Reset)
-			r.Post("/settings/geoip/update-db", s.settingsHandler.UpdateGeoIPDB)
+			r.With(s.publishes(cluster.TopicSettings)).Put("/settings", s.settingsHandler.Update)
+			r.With(s.publishes(cluster.TopicSettings)).Post("/settings/reset", s.settingsHandler.Reset)
+			r.With(s.publishes(cluster.TopicSettings)).Post("/settings/geoip/update-db", s.settingsHandler.UpdateGeoIPDB)
 			r.Get("/audit-log", s.accessHandler.ListAuditLog)
 		})
 
@@ -519,6 +524,62 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.cancelServices()
 	}
 	return s.server.Shutdown(ctx)
+}
+
+// SetChangePublisher makes configuration changes made through this instance
+// reach the other instances.
+func (s *Server) SetChangePublisher(p ChangePublisher) {
+	s.changes = p
+}
+
+// ApplyChange makes a change to shared configuration take effect on this
+// instance. It runs for changes made here and, via the cluster notifier, for
+// changes made on other instances.
+func (s *Server) ApplyChange(ctx context.Context, topic string) {
+	switch topic {
+	case cluster.TopicSettings:
+		if s.reloadGeoIP != nil {
+			if err := s.reloadGeoIP(ctx); err != nil {
+				s.logger.Error("failed to reload geoip settings after update", "error", err)
+			}
+		}
+		if s.proxyServer != nil {
+			if err := s.proxyServer.ReloadSettings(ctx); err != nil {
+				s.logger.Error("failed to reload proxy settings after update", "error", err)
+			} else {
+				s.logger.Info("proxy settings reloaded after update")
+			}
+		}
+	case cluster.TopicProxies:
+		if s.proxyServer != nil {
+			s.proxyServer.ProxiesChanged(ctx)
+		}
+	case cluster.TopicUsers:
+		if s.proxyServer != nil {
+			s.proxyServer.UsersChanged()
+		}
+	}
+}
+
+// publishes returns middleware that, once a request succeeds, applies the
+// change on this instance (except settings, whose handler applies it before
+// responding) and tells the other instances about it.
+func (s *Server) publishes(topic string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			next.ServeHTTP(ww, r)
+			if st := ww.Status(); st != 0 && (st < 200 || st > 299) {
+				return
+			}
+			if topic != cluster.TopicSettings {
+				s.ApplyChange(context.WithoutCancel(r.Context()), topic)
+			}
+			if s.changes != nil {
+				s.changes.Publish(r.Context(), topic)
+			}
+		})
+	}
 }
 
 // LeaderJobs returns the background services that must run on exactly one
