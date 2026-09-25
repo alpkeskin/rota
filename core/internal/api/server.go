@@ -526,6 +526,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.server.Shutdown(ctx)
 }
 
+// SetSharedState keeps login and export throttling in the shared store so
+// every instance enforces it. Call before Start.
+func (s *Server) SetSharedState(st LoginStore) {
+	s.authRL.name, s.authRL.shared = "login", st
+	s.exportRL.name, s.exportRL.shared = "export", st
+}
+
 // SetChangePublisher makes configuration changes made through this instance
 // reach the other instances.
 func (s *Server) SetChangePublisher(p ChangePublisher) {

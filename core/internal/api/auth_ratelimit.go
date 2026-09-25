@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strconv"
@@ -8,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 )
 
@@ -36,6 +38,12 @@ type authRateLimiter struct {
 	mu  sync.Mutex
 	log *logger.Logger
 
+	// name keys this limiter's state in the shared store ("login", "export").
+	name string
+	// shared, when set, keeps the counters and blocks in Redis so every
+	// instance enforces them; the in-memory state is used while it fails.
+	shared LoginStore
+
 	// trustProxyHeaders: honour X-Forwarded-For / X-Real-IP only when true, i.e.
 	// when behind a trusted reverse proxy. When false (direct exposure) these are
 	// ignored so they can't be spoofed to bypass per-IP throttling (AUD-20).
@@ -55,6 +63,14 @@ type authRateLimiter struct {
 	ipBlockDuration time.Duration
 	globalMax       int
 	globalLockout   time.Duration
+}
+
+// LoginStore holds login throttling state shared by all instances
+// (sharedstate.Store).
+type LoginStore interface {
+	Hit(ctx context.Context, key string, window time.Duration) (int, error)
+	Block(ctx context.Context, key string, d time.Duration) error
+	Blocked(ctx context.Context, key string) (time.Duration, error)
 }
 
 func newAuthRateLimiter(
@@ -89,6 +105,10 @@ func (rl *authRateLimiter) Middleware() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := rl.clientIP(r)
 			now := time.Now()
+
+			if rl.shared != nil && rl.serveShared(w, r, next, ip) {
+				return
+			}
 
 			rl.mu.Lock()
 
@@ -173,6 +193,84 @@ func (rl *authRateLimiter) Middleware() func(http.Handler) http.Handler {
 			}
 		})
 	}
+}
+
+const (
+	msgGlobalLockout = `{"error":"Authentication temporarily disabled due to too many requests. Try again later."}`
+	msgIPBlocked     = `{"error":"Too many failed authentication attempts from your IP. Try again later."}`
+)
+
+func writeTooMany(w http.ResponseWriter, wait time.Duration, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", retryAfter(wait))
+	w.WriteHeader(http.StatusTooManyRequests)
+	w.Write([]byte(body)) //nolint:errcheck // best-effort body on a 429
+}
+
+// serveShared applies the limits with state kept in the shared store. It
+// returns false, having written nothing, when the store can't be read, and
+// the caller then applies the in-memory limits instead.
+func (rl *authRateLimiter) serveShared(w http.ResponseWriter, r *http.Request, next http.Handler, ip string) bool {
+	ctx := r.Context()
+	globalKey, ipKey := rl.name+":global", rl.name+":ip:"+ip
+	var globalLeft time.Duration
+	if rl.globalMax > 0 {
+		var err error
+		if globalLeft, err = rl.shared.Blocked(ctx, globalKey); err != nil {
+			metrics.SharedStateErrors.WithLabelValues("login").Inc()
+			return false
+		}
+	}
+	ipLeft, err := rl.shared.Blocked(ctx, ipKey)
+	if err != nil {
+		metrics.SharedStateErrors.WithLabelValues("login").Inc()
+		return false
+	}
+	if globalLeft > 0 {
+		rl.log.Warn("auth global lockout active", "ip", ip, "remaining", globalLeft.Truncate(time.Second).String())
+		writeTooMany(w, globalLeft, msgGlobalLockout)
+		return true
+	}
+	if ipLeft > 0 {
+		rl.log.Warn("auth per-IP block active", "ip", ip, "remaining", ipLeft.Truncate(time.Second).String())
+		writeTooMany(w, ipLeft, msgIPBlocked)
+		return true
+	}
+
+	// From here on a store failure no longer changes the outcome: the
+	// attempt is served, and only its bookkeeping is lost.
+	if rl.globalMax > 0 {
+		n, err := rl.shared.Hit(ctx, globalKey, time.Minute)
+		if err != nil {
+			metrics.SharedStateErrors.WithLabelValues("login").Inc()
+		} else if n > rl.globalMax {
+			if err := rl.shared.Block(ctx, globalKey, rl.globalLockout); err != nil {
+				metrics.SharedStateErrors.WithLabelValues("login").Inc()
+			}
+			rl.log.Warn("auth global rate limit exceeded — engaging lockout",
+				"attempts_per_min", n, "limit", rl.globalMax, "lockout", rl.globalLockout.String())
+			writeTooMany(w, rl.globalLockout, msgGlobalLockout)
+			return true
+		}
+	}
+
+	ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+	next.ServeHTTP(ww, r)
+
+	if ww.status == http.StatusUnauthorized {
+		n, err := rl.shared.Hit(ctx, rl.name+":fail:"+ip, rl.ipWindow)
+		if err != nil {
+			metrics.SharedStateErrors.WithLabelValues("login").Inc()
+		} else if n >= rl.ipMaxAttempts {
+			if err := rl.shared.Block(ctx, ipKey, rl.ipBlockDuration); err != nil {
+				metrics.SharedStateErrors.WithLabelValues("login").Inc()
+			}
+			rl.log.Warn("auth per-IP rate limit exceeded — IP blocked",
+				"ip", ip, "attempts", n, "limit", rl.ipMaxAttempts,
+				"block_until", time.Now().Add(rl.ipBlockDuration).Format(time.RFC3339))
+		}
+	}
+	return true
 }
 
 // cleanup removes stale entries every 5 minutes to prevent unbounded growth.

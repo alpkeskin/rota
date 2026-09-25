@@ -33,8 +33,20 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # Shared-state tests (limits, sticky sessions, login throttling across
+      # instances) run when ROTA_TEST_REDIS is set.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       ROTA_TEST_DSN: postgres://rota:rota@localhost:5432/rota_test?sslmode=disable
+      ROTA_TEST_REDIS: redis://localhost:6379/0
     defaults:
       run:
         working-directory: core

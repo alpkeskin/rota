@@ -89,7 +89,7 @@ func (c *PoolChain) pick(ctx context.Context, preq *ProxyRequest, tried map[int]
 	}
 
 	if opts.Session != "" {
-		if id, ok := stickySessions.Get(userID, opts.Session); ok && !tried[id] {
+		if id, ok := stickySessions.Lookup(ctx, userID, opts.Session); ok && !tried[id] {
 			for i, sel := range c.selectors {
 				if p := sel.Find(id); p != nil && opts.Target.Matches(p) && breaker.Allow(id) {
 					return p, i, nil
@@ -112,7 +112,7 @@ func (c *PoolChain) pick(ctx context.Context, preq *ProxyRequest, tried map[int]
 		return nil, -1, err
 	}
 	if opts.Session != "" {
-		stickySessions.Bind(userID, opts.Session, p.ID, opts.SessionTTL)
+		stickySessions.Pin(ctx, userID, opts.Session, p.ID, opts.SessionTTL)
 	}
 	return p, idx, nil
 }

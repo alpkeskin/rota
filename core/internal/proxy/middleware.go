@@ -1,13 +1,16 @@
 package proxy
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"golang.org/x/time/rate"
 )
@@ -129,6 +132,19 @@ type RateLimitMiddleware struct {
 	maxRequests int
 	limiters    map[string]*rate.Limiter
 	mu          sync.RWMutex
+	shared      SharedRate // nil = per-instance limits
+}
+
+// SharedRate is a rate limiter shared by all instances (sharedstate.Store).
+type SharedRate interface {
+	AllowRate(ctx context.Context, key string, limit int, period time.Duration) (bool, time.Duration, error)
+}
+
+// SetShared makes the per-IP limit cluster-wide.
+func (m *RateLimitMiddleware) SetShared(sh SharedRate) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shared = sh
 }
 
 // NewRateLimitMiddleware creates a new rate limiting middleware
@@ -188,12 +204,29 @@ func (m *RateLimitMiddleware) HandleConnect(req *http.Request) (*http.Request, *
 // allow checks if the request is allowed based on rate limiting
 func (m *RateLimitMiddleware) allow(clientIP string) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	interval, maxRequests, shared := m.interval, m.maxRequests, m.shared
+	m.mu.Unlock()
 
 	// Guard against misconfiguration: a non-positive interval would make rps
 	// +Inf (rate.NewLimiter panics / never limits) and a non-positive
 	// maxRequests would set burst to 0 (denies every request). Treat either
 	// case as "limiter effectively disabled" and allow the request through.
+	if interval <= 0 || maxRequests <= 0 {
+		return true
+	}
+
+	// One budget per IP across all instances; per instance while the shared
+	// store is unreachable.
+	if shared != nil {
+		ok, _, err := shared.AllowRate(context.Background(), "ip{"+clientIP+"}", maxRequests, time.Duration(interval)*time.Second)
+		if err == nil {
+			return ok
+		}
+		metrics.SharedStateErrors.WithLabelValues("rate").Inc()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.interval <= 0 || m.maxRequests <= 0 {
 		return true
 	}

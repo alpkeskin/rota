@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"context"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/alpkeskin/rota/core/internal/metrics"
 )
 
 // Memory bounds. A user can hold at most maxStickyPerUser sessions, so one
@@ -24,6 +27,10 @@ type stickyEntry struct {
 // StickySessions pins a user's session id to one upstream proxy for the
 // session's lifetime, so requests carrying the same id exit from the same IP.
 type StickySessions struct {
+	// shared, when set, holds the sessions for all instances; the local
+	// maps are used only while it is unreachable.
+	shared SharedSticky
+
 	mu        sync.Mutex
 	entries   map[string]stickyEntry
 	perUser   map[int]int
@@ -38,6 +45,38 @@ func NewStickySessions() *StickySessions {
 
 func stickyKey(userID int, session string) string {
 	return strconv.Itoa(userID) + ":" + session
+}
+
+// SharedSticky is a sticky session store shared by all instances
+// (sharedstate.Store).
+type SharedSticky interface {
+	StickyGet(ctx context.Context, userID int, session string) (int, bool, error)
+	StickyBind(ctx context.Context, userID int, session string, proxyID int, ttl time.Duration, perUserCap int) error
+}
+
+// Lookup returns the session's pinned proxy from the shared store, or from
+// local memory when there is none or it is unreachable.
+func (s *StickySessions) Lookup(ctx context.Context, userID int, session string) (int, bool) {
+	if s.shared != nil {
+		id, ok, err := s.shared.StickyGet(ctx, userID, session)
+		if err == nil {
+			return id, ok
+		}
+		metrics.SharedStateErrors.WithLabelValues("sticky").Inc()
+	}
+	return s.Get(userID, session)
+}
+
+// Pin pins a session like Bind, in the shared store when there is one.
+func (s *StickySessions) Pin(ctx context.Context, userID int, session string, proxyID int, ttl time.Duration) {
+	if s.shared != nil {
+		err := s.shared.StickyBind(ctx, userID, session, proxyID, ttl, maxStickyPerUser)
+		if err == nil {
+			return
+		}
+		metrics.SharedStateErrors.WithLabelValues("sticky").Inc()
+	}
+	s.Bind(userID, session, proxyID, ttl)
 }
 
 // Get returns the pinned proxy for a session, if any and not expired.

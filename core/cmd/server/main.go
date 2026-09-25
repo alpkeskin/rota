@@ -41,6 +41,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/internal/secrets"
 	"github.com/alpkeskin/rota/core/internal/services"
+	"github.com/alpkeskin/rota/core/internal/sharedstate"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 )
 
@@ -171,8 +172,25 @@ func run() error {
 	elector.Start()
 	defer elector.Stop()
 
+	// Shared limiter and session state for multi-replica deployments.
+	var shared proxy.SharedState
+	if cfg.RedisURL != "" {
+		store, err := sharedstate.Open(cfg.RedisURL, cfg.RedisKeyPrefix)
+		if err != nil {
+			return err
+		}
+		defer store.Close() //nolint:errcheck
+		if err := store.Ping(ctx); err != nil {
+			log.Warn("redis is not reachable yet; limits are enforced per instance until it is", "error", err)
+		} else {
+			log.Info("using redis for shared limits and sticky sessions")
+		}
+		shared = store
+		apiServer.SetSharedState(store)
+	}
+
 	// Create servers
-	proxyServer, err := proxy.New(cfg.ProxyPort, log, db, proxyRepo, poolRepo, userRepo, settingsRepo)
+	proxyServer, err := proxy.New(cfg.ProxyPort, log, db, proxyRepo, poolRepo, userRepo, settingsRepo, shared)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy server: %w", err)
 	}

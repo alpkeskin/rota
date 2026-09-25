@@ -105,6 +105,13 @@ type Server struct {
 	stopChan       chan struct{}
 }
 
+// SharedState is the cluster-wide store for limits and sticky sessions
+// (sharedstate.Store); nil keeps them per instance.
+type SharedState interface {
+	SharedLimits
+	SharedSticky
+}
+
 // New creates a new proxy server instance
 func New(
 	port int,
@@ -114,6 +121,7 @@ func New(
 	poolRepo *repository.PoolRepository,
 	userRepo *repository.UserRepository,
 	settingsRepo *repository.SettingsRepository,
+	shared SharedState,
 ) (*Server, error) {
 	// Load settings
 	ctx := context.Background()
@@ -144,12 +152,19 @@ func New(
 	handler := NewUpstreamProxyHandler(selector, tracker, &settings.Rotation, log)
 	// Per-user limits and bandwidth metering.
 	accountant := NewUsageAccountant(userRepo, log)
+	if shared != nil {
+		accountant.SetShared(shared)
+	}
 	accountant.Start()
 	handler.accountant = accountant
 
 	// Create middlewares
 	authMiddleware := NewAuthMiddleware(settings.Authentication)
 	rateLimitMw := NewRateLimitMiddleware(settings.RateLimit)
+	if shared != nil {
+		rateLimitMw.SetShared(shared)
+		stickySessions.shared = shared
+	}
 
 	// Create user-aware auth middleware (pool-based routing)
 	userAuthMw := NewUserAuthMiddleware(userRepo, poolRepo, db, authMiddleware, &settings.Rotation, log)
