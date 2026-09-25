@@ -280,7 +280,7 @@ open http://localhost:8001/docs
 ### From Source
 
 ```bash
-# Prerequisites: Go 1.25.3+, Node.js 20+, pnpm, and TimescaleDB reachable
+# Prerequisites: Go 1.25.14+, Node.js 20+, pnpm, and TimescaleDB reachable
 
 # Clone the repository
 git clone https://github.com/alpkeskin/rota.git
