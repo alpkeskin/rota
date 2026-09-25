@@ -228,8 +228,15 @@ func run() error {
 	notifier.Start()
 	defer notifier.Stop()
 	watchCtx, stopWatch := context.WithCancel(context.Background())
-	defer stopWatch()
-	go apiServer.WatchSettings(watchCtx)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		apiServer.WatchSettings(watchCtx)
+	}()
+	defer func() {
+		stopWatch()
+		<-watchDone // no settings check may still be running when the DB closes
+	}()
 
 	// Start servers in goroutines
 	errChan := make(chan error, 2)

@@ -568,6 +568,7 @@ func (s *Server) ApplyChange(ctx context.Context, topic string) {
 		reloaded := true
 		if s.reloadGeoIP != nil {
 			if err := s.reloadGeoIP(ctx); err != nil {
+				reloaded = false
 				s.logger.Error("failed to reload geoip settings after update", "error", err)
 			}
 		}
@@ -579,8 +580,12 @@ func (s *Server) ApplyChange(ctx context.Context, topic string) {
 				s.logger.Info("proxy settings reloaded after update")
 			}
 		}
-		if reloaded && fpErr == nil {
+		switch {
+		case reloaded && fpErr == nil:
 			s.settingsSeen = fp
+		case !reloaded:
+			// Never matches a fingerprint: WatchSettings retries next time.
+			s.settingsSeen = "reload-failed"
 		}
 	case cluster.TopicProxies:
 		if s.proxyServer != nil {

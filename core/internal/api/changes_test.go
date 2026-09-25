@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -132,5 +133,21 @@ func TestWatchSettingsCatchesMissedChanges(t *testing.T) {
 	s.checkSettings(ctx)
 	if ps.reloads != 1 {
 		t.Fatal("reloaded again without a further change")
+	}
+}
+
+type failingReloadServer struct{ fakeProxyServer }
+
+func (f *failingReloadServer) ReloadSettings(ctx context.Context) error {
+	f.fakeProxyServer.ReloadSettings(ctx) //nolint:errcheck
+	return errors.New("db blip")
+}
+
+func TestFailedSettingsReloadIsRetried(t *testing.T) {
+	ps := &failingReloadServer{}
+	s := &Server{logger: logger.New("error"), proxyServer: ps}
+	s.ApplyChange(context.Background(), cluster.TopicSettings)
+	if s.settingsSeen == "" {
+		t.Fatal("a failed reload left settingsSeen empty; the watcher would adopt the unapplied settings")
 	}
 }
