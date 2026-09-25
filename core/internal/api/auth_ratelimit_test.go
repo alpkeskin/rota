@@ -128,3 +128,17 @@ func TestRetryAfterNotEarly(t *testing.T) {
 		t.Fatalf("Retry-After = %q, want 60", got)
 	}
 }
+
+func TestTrustedRealIPPrefersForwardedFor(t *testing.T) {
+	var got string
+	h := trustedRealIP(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = r.RemoteAddr }))
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "10.0.0.2:4000" // the reverse proxy
+	r.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.2")
+	r.Header.Set("X-Real-IP", "6.6.6.6")      // passed through from the client
+	r.Header.Set("True-Client-IP", "7.7.7.7") // likewise
+	h.ServeHTTP(httptest.NewRecorder(), r)
+	if got != "203.0.113.9" {
+		t.Fatalf("RemoteAddr = %q, want the X-Forwarded-For client", got)
+	}
+}

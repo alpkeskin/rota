@@ -1,0 +1,42 @@
+Rota {{ .Chart.AppVersion }} is deployed as release {{ .Release.Name }}.
+
+Proxy endpoint:
+  kubectl get svc {{ include "rota.fullname" . }}-proxy -n {{ .Release.Namespace }}
+  curl -x http://USER:PASS@<address>:{{ .Values.core.proxyPort }} https://api.ipify.org
+{{- if .Values.core.socksPort }}
+  SOCKS5: <address>:{{ .Values.core.socksPort }}
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+
+Dashboard: http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+
+Dashboard (no ingress configured):
+  kubectl port-forward svc/{{ include "rota.fullname" . }}-dashboard 3000:3000 -n {{ .Release.Namespace }}
+  The dashboard calls /api and /ws on its own origin, so on its own it can't
+  reach the API. Enable ingress, or route /api and /ws to
+  svc/{{ include "rota.fullname" . }}-api in your own reverse proxy.
+{{- end }}
+
+{{- if and (not .Values.secrets.adminPassword) (not .Values.secrets.existingSecret) }}
+
+The first admin password is generated on first start and printed once:
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=core --tail=-1 | grep "Generated admin password"
+{{- end }}
+
+{{- $replicas := int .Values.core.replicaCount }}
+{{- if .Values.core.autoscaling.enabled }}{{ $replicas = int .Values.core.autoscaling.maxReplicas }}{{ end }}
+{{- if and (gt $replicas 1) (not (include "rota.redisEnabled" .)) }}
+
+WARNING: more than one core replica without Redis. Per-user request rates
+and connection caps, sticky sessions and login throttling are enforced per
+replica (a limit of N allows up to N per replica). Set redis.url.
+{{- end }}
+
+{{- if not .Values.secrets.encryptionKey }}{{ if not .Values.secrets.existingSecret }}
+
+NOTE: secrets.encryptionKey is not set; upstream proxy passwords are
+encrypted with a key stored in the database. Set it (openssl rand -base64 32)
+to protect them against a database leak.
+{{- end }}{{ end }}

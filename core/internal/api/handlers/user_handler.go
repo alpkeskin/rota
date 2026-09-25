@@ -88,7 +88,7 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// username, so an account named that way could never sign in.
 	if proxy.ReservedUsername(req.Username) {
 		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{
-			Error: "username must not contain -country-, -city-, -session- or -sesstime- (they carry routing options)",
+			Error: "username must not have a -country, -city, -session or -sesstime part (they carry routing options)",
 		})
 		return
 	}

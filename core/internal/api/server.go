@@ -77,6 +77,9 @@ type Server struct {
 	// on shutdown, before the DB connection is closed (see AUD-6).
 	cancelServices context.CancelFunc
 
+	// passwordGuard limits wrong current-password attempts in a session.
+	passwordGuard *handlers.PasswordConfirmGuard
+
 	// leaderJobs start the background services that must run on one
 	// instance only; main hands them to the cluster elector.
 	leaderJobs []func(context.Context)
@@ -99,6 +102,7 @@ type Server struct {
 
 // New creates a new API server instance
 func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
+	var pwGuard *handlers.PasswordConfirmGuard
 	// Initialize repositories
 	proxyRepo := repository.NewProxyRepository(db)
 	logRepo := repository.NewLogRepository(db)
@@ -157,6 +161,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 
 	// Initialize handlers
 	passwordGuard := handlers.NewPasswordConfirmGuard(accountRepo, auditRepo, log)
+	pwGuard = passwordGuard
 	authHandler := handlers.NewAuthHandler(accountRepo, auditRepo, passwordGuard, log, jwtSecret)
 	accessHandler := handlers.NewAccessHandler(accountRepo, apiKeyRepo, auditRepo, passwordGuard, log)
 	healthHandler := handlers.NewHealthHandler(db, proxyRepo, log)
@@ -214,6 +219,7 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 			logger:   log,
 		},
 		auditRepo:            auditRepo,
+		passwordGuard:        pwGuard,
 		auditRetention:       time.Duration(cfg.AuditLogRetentionDays) * 24 * time.Hour,
 		accessHandler:        accessHandler,
 		authHandler:          authHandler,
@@ -303,7 +309,7 @@ func (s *Server) setupMiddleware() {
 	// trusting an upstream reverse proxy; otherwise a directly-exposed API would
 	// let clients spoof their apparent IP (AUD-20).
 	if s.trustProxyHeaders {
-		s.router.Use(middleware.RealIP)
+		s.router.Use(trustedRealIP)
 	}
 	s.router.Use(LoggerMiddleware(s.logger))
 	s.router.Use(MetricsMiddleware())
@@ -541,11 +547,21 @@ func (s *Server) BeginDrain() {
 	s.healthHandler.SetDraining()
 }
 
-// SetSharedState keeps login and export throttling in the shared store so
-// every instance enforces it. Call before Start.
-func (s *Server) SetSharedState(st LoginStore) {
+// SetSharedState keeps login and export throttling, and the count of wrong
+// passwords re-entered in a session, in the shared store so every instance
+// enforces them. Call before Start.
+func (s *Server) SetSharedState(st SharedStore) {
 	s.authRL.name, s.authRL.shared = "login", st
 	s.exportRL.name, s.exportRL.shared = "export", st
+	if s.passwordGuard != nil {
+		s.passwordGuard.SetShared(st)
+	}
+}
+
+// SharedStore is the shared state the API uses (sharedstate.Store).
+type SharedStore interface {
+	LoginStore
+	handlers.FailureStore
 }
 
 // SetChangePublisher makes configuration changes made through this instance

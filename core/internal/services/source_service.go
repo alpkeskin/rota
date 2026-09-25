@@ -3,6 +3,7 @@ package services
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -291,12 +292,19 @@ func (s *SourceService) fetchAndImport(ctx context.Context, src *models.ProxySou
 
 	resp, err := s.client.Do(req)
 	if err != nil {
+		// The URL often carries the list's credential (?apikey=, a token in
+		// the path) and the error ends up in last_error, which every role
+		// can read: report only what went wrong.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return 0, 0, fmt.Errorf("fetch failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, fmt.Errorf("unexpected HTTP %d from %s", resp.StatusCode, src.URL)
+		return 0, 0, fmt.Errorf("unexpected HTTP %d from the source", resp.StatusCode)
 	}
 
 	parsed, err := parseProxyList(resp.Body)

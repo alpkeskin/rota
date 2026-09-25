@@ -335,6 +335,13 @@ func (s *Store) Hit(ctx context.Context, key string, window time.Duration) (int,
 	return int(n), err
 }
 
+// ClearHits forgets the events recorded under key.
+func (s *Store) ClearHits(ctx context.Context, key string) error {
+	return s.call(ctx, func(ctx context.Context) error {
+		return s.rdb.Del(ctx, s.key("hits", "{"+key+"}")).Err()
+	})
+}
+
 // Block marks key as blocked for d.
 func (s *Store) Block(ctx context.Context, key string, d time.Duration) error {
 	return s.call(ctx, func(ctx context.Context) error {

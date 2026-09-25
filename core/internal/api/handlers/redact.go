@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/alpkeskin/rota/core/internal/auth"
@@ -34,6 +35,14 @@ func redactURL(raw string) string {
 		out += "/" + Redacted
 	}
 	return out
+}
+
+// urlInText matches URLs embedded in free text such as error messages.
+var urlInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
+
+// redactURLsInText redacts every URL found in s (see redactURL).
+func redactURLsInText(s string) string {
+	return urlInText.ReplaceAllStringFunc(s, redactURL)
 }
 
 // redactHeaders hides header values ("Name: value" lines), keeping names.

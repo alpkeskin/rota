@@ -79,3 +79,11 @@ func TestUpstreamCollector(t *testing.T) {
 		t.Errorf("failing inventory: status %d, body lacks up=0 or still has counts", code)
 	}
 }
+
+func TestMethodLabelBounded(t *testing.T) {
+	for m, want := range map[string]string{"GET": "GET", "DELETE": "DELETE", "M0": "OTHER", "get": "OTHER", "": "OTHER"} {
+		if got := MethodLabel(m); got != want {
+			t.Errorf("MethodLabel(%q) = %q, want %q", m, got, want)
+		}
+	}
+}

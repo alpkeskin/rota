@@ -282,6 +282,9 @@ func (r *UserRepository) Authenticate(ctx context.Context, username, password st
 		return nil, err
 	}
 	if u == nil || !u.Enabled {
+		// Same work as a wrong password, so timing doesn't reveal which
+		// usernames exist.
+		bcrypt.CompareHashAndPassword(dummyHash, []byte(password)) //nolint:errcheck // timing only
 		return nil, ErrInvalidCredentials
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {

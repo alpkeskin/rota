@@ -25,6 +25,15 @@ func untraced(path string) bool {
 	return strings.HasPrefix(path, "/ws/")
 }
 
+// method bounds the method in span names: any token is a valid method.
+func method(m string) string {
+	switch m {
+	case "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS":
+		return m
+	}
+	return "_OTHER"
+}
+
 // Middleware traces REST API requests. It continues a trace from the
 // caller's traceparent header (the dashboard or an API client), names the
 // span after the chi route pattern so IDs don't explode span names, and marks
@@ -36,10 +45,10 @@ func Middleware(next http.Handler) http.Handler {
 			return
 		}
 		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
-		ctx, span := tracer().Start(ctx, r.Method,
+		ctx, span := tracer().Start(ctx, method(r.Method),
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
-				attribute.String("http.request.method", r.Method),
+				attribute.String("http.request.method", method(r.Method)),
 				attribute.String("url.path", r.URL.Path),
 			))
 		defer span.End()
@@ -54,7 +63,7 @@ func Middleware(next http.Handler) http.Handler {
 		span.SetAttributes(attribute.Int("http.response.status_code", status))
 		if rc := chi.RouteContext(r.Context()); rc != nil {
 			if route := rc.RoutePattern(); route != "" {
-				span.SetName(r.Method + " " + route)
+				span.SetName(method(r.Method) + " " + route)
 				span.SetAttributes(attribute.String("http.route", route))
 			}
 		}

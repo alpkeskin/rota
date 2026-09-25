@@ -296,12 +296,12 @@ func routeParams(rctx *chi.Context) string {
 }
 
 // clientIP is the peer address without its port. When the API trusts proxy
-// headers, chi's RealIP middleware has already rewritten RemoteAddr.
+// headers, trustedRealIP has already rewritten RemoteAddr.
 func clientIP(r *http.Request) string {
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
 	}
-	return r.RemoteAddr // RealIP stores a bare IP without a port
+	return r.RemoteAddr // trustedRealIP stores a bare IP without a port
 }
 
 // rejectedAuditPerMinute bounds audit entries for rejected credentials per IP.

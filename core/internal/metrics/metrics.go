@@ -24,7 +24,7 @@ var Registry = prometheus.NewRegistry()
 
 var (
 	// ProxyRequests counts client requests handled by the proxy port.
-	// kind: http | connect. outcome: success | upstream_error | internal_error |
+	// kind: http | connect | socks5. outcome: success | upstream_error | internal_error |
 	// rejected_auth | rejected_rate_limit. A CONNECT counts as success once
 	// the tunnel is established; see TunnelsClosed for how it ended.
 	ProxyRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -179,6 +179,16 @@ func init() {
 		buildInfo,
 	)
 	buildInfo.WithLabelValues(version.Version).Set(1)
+}
+
+// MethodLabel bounds the HTTP method used as a label: net/http accepts any
+// token as a method, so raw values would let anyone create new series.
+func MethodLabel(m string) string {
+	switch m {
+	case "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT":
+		return m
+	}
+	return "OTHER"
 }
 
 // ObserveProxyRequest records one proxy request outcome and its duration.

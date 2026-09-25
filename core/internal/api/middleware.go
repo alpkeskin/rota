@@ -64,10 +64,10 @@ func MetricsMiddleware() func(next http.Handler) http.Handler {
 				}
 			}
 			statusLabel := strconv.Itoa(status)
-			metrics.APIRequests.WithLabelValues(route, r.Method, statusLabel).Inc()
+			metrics.APIRequests.WithLabelValues(route, metrics.MethodLabel(r.Method), statusLabel).Inc()
 			// Long-lived WebSocket streams would swamp the latency histogram.
 			if !strings.HasPrefix(route, "/ws/") {
-				metrics.APIRequestDuration.WithLabelValues(route, r.Method).Observe(time.Since(start).Seconds())
+				metrics.APIRequestDuration.WithLabelValues(route, metrics.MethodLabel(r.Method)).Observe(time.Since(start).Seconds())
 			}
 		})
 	}

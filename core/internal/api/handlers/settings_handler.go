@@ -64,6 +64,11 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		if settings.GeoIP.MaxMindLicenseKey != "" {
 			settings.GeoIP.MaxMindLicenseKey = Redacted
 		}
+		// A custom download URL usually embeds the license key
+		// (?license_key=, or ACCOUNT:KEY@ userinfo).
+		if settings.GeoIP.MaxMindURL != "" {
+			settings.GeoIP.MaxMindURL = redactURL(settings.GeoIP.MaxMindURL)
+		}
 		settings.HealthCheck.Headers = redactHeaders(settings.HealthCheck.Headers)
 	}
 
@@ -105,6 +110,10 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	// placeholders; they mean "keep", never "set to the placeholder".
 	if settings.GeoIP.MaxMindLicenseKey == Redacted {
 		settings.GeoIP.MaxMindLicenseKey = current.GeoIP.MaxMindLicenseKey
+	}
+	if current.GeoIP.MaxMindURL != "" && settings.GeoIP.MaxMindURL == redactURL(current.GeoIP.MaxMindURL) &&
+		settings.GeoIP.MaxMindURL != current.GeoIP.MaxMindURL {
+		settings.GeoIP.MaxMindURL = current.GeoIP.MaxMindURL
 	}
 	settings.HealthCheck.Headers = restoreRedactedHeaders(settings.HealthCheck.Headers, current.HealthCheck.Headers)
 

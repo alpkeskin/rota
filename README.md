@@ -201,7 +201,9 @@ and move the old key to `ROTA_ENCRYPTION_KEYS_PREVIOUS`.
 
 > **Downgrading** below the release that introduced encryption is not supported
 > without first clearing the passwords: older versions would send the encrypted
-> value to your upstream proxies as the password.
+> value to your upstream proxies as the password. Before 3.0.0 there were no
+> roles either: delete viewer and operator accounts before downgrading, or
+> they would become full admins.
 
 ### Production Deployment (HTTPS)
 
@@ -571,8 +573,8 @@ curl -x http://alice-country-de:password@proxy-host:8000 https://api.ipify.org
 # Exit from New York (use _ for spaces)
 curl -x http://alice-country-us-city-new_york:password@proxy-host:8000 https://api.ipify.org
 
-# Sticky session: the same id keeps the same exit IP for 10 minutes
-# (sesstime sets 1-1440 minutes)
+# Sticky session: the same id keeps the same exit IP, here for 30 minutes
+# (sesstime sets 1-1440 minutes; default 10)
 curl -x http://alice-session-a1b2c3-sesstime-30:password@proxy-host:8000 https://api.ipify.org
 ```
 
@@ -585,8 +587,9 @@ curl -x http://alice-session-a1b2c3-sesstime-30:password@proxy-host:8000 https:/
 
 Options apply within the user's pools (main, then fallbacks), so the user
 needs a pool. No match gives `502` with a message saying so; malformed
-options give `400`. Usernames of new accounts can't contain `-country-`,
-`-city-`, `-session-` or `-sesstime-`.
+options give `400`. Usernames of new proxy users can't have a `-country`,
+`-city`, `-session` or `-sesstime` part (e.g. `alice-country` or
+`team-session-1`), since it would be read as a routing option.
 
 #### Limits and usage
 
@@ -657,8 +660,8 @@ Everyone who signs in to the dashboard or API has an **account** with one role
 
 | Role | Can |
 |---|---|
-| `viewer` | Read everything except accounts and the audit log; secrets in configuration (webhook and source URLs past the host, health-check header values, the MaxMind key) are shown redacted |
-| `operator` | …and change proxies, pools and proxy users (including export tokens), fetch/delete sources, delete alert rules |
+| `viewer` | Read everything except accounts and the audit log; secrets in configuration (webhook and source URLs past the host, also inside fetch errors; health-check header values; the MaxMind key and download URL) are shown redacted |
+| `operator` | …and change proxies, pools and proxy users (including export tokens), fetch/delete sources, delete alert rules, test proxies. Note that an operator can therefore obtain upstream proxy credentials (a proxy user's working-proxies export lists them) and make the core connect to proxy addresses of their choosing |
 | `admin` | …and change settings, **set source and webhook URLs** (they make the core call an address of the caller's choosing), manage accounts and others' API keys, read the audit log |
 
 Role changes apply to open sessions immediately — including open live views
@@ -732,9 +735,9 @@ Useful series:
 
 | Metric | What it tells you |
 |---|---|
-| `rota_proxy_requests_total{kind,outcome}` | Proxy traffic by `http`/`connect` and `success`, `upstream_error`, `internal_error`, `rejected_auth`, `rejected_rate_limit` (a CONNECT counts as `success` once the tunnel is established) |
+| `rota_proxy_requests_total{kind,outcome}` | Proxy traffic by `http`/`connect`/`socks5` and `success`, `upstream_error`, `internal_error`, `rejected_auth`, `rejected_rate_limit` (a CONNECT counts as `success` once the tunnel is established) |
 | `rota_proxy_tunnels_closed_total{result}` | CONNECT tunnels by how they ended: `clean` or `error` (includes resets during normal teardown — watch the ratio) |
-| `rota_proxy_request_duration_seconds` | Time to upstream response (HTTP) or tunnel establishment (CONNECT) |
+| `rota_proxy_request_duration_seconds` | Time to upstream response (HTTP) or tunnel establishment (CONNECT, SOCKS5) |
 | `rota_proxy_active_tunnels` | Open CONNECT and SOCKS5 tunnels |
 | `rota_proxy_bytes_total{direction}` | Proxied payload bytes, `up` (client→upstream) and `down` |
 | `rota_proxy_limit_rejections_total{reason}` | Requests refused by per-user limits: `rate_limit`, `concurrency`, `quota` |

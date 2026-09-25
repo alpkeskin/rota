@@ -321,19 +321,8 @@ func filterAfter(ts []time.Time, cutoff time.Time) []time.Time {
 // per-IP login block (AUD-20).
 func (rl *authRateLimiter) clientIP(r *http.Request) string {
 	if rl.trustProxyHeaders {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// X-Forwarded-For may be "client, proxy1, proxy2" — take the first.
-			if idx := strings.IndexByte(xff, ','); idx >= 0 {
-				xff = xff[:idx]
-			}
-			if ip := net.ParseIP(strings.TrimSpace(xff)); ip != nil {
-				return ip.String()
-			}
-		}
-		if xri := r.Header.Get("X-Real-IP"); xri != "" {
-			if ip := net.ParseIP(strings.TrimSpace(xri)); ip != nil {
-				return ip.String()
-			}
+		if ip := forwardedIP(r); ip != "" {
+			return ip
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -341,6 +330,42 @@ func (rl *authRateLimiter) clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// forwardedIP returns the client IP a trusted reverse proxy reported, or "".
+// X-Forwarded-For comes first because proxies (the bundled Caddy, ingress
+// controllers) set or append it themselves, whereas X-Real-IP and
+// True-Client-IP are often passed through from the client unchanged.
+func forwardedIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// X-Forwarded-For may be "client, proxy1, proxy2" — take the first.
+		if idx := strings.IndexByte(xff, ','); idx >= 0 {
+			xff = xff[:idx]
+		}
+		if ip := net.ParseIP(strings.TrimSpace(xff)); ip != nil {
+			return ip.String()
+		}
+	}
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		if ip := net.ParseIP(strings.TrimSpace(xri)); ip != nil {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
+// trustedRealIP sets RemoteAddr to the client IP reported by the trusted
+// reverse proxy, with the same precedence the login limiter uses, so audit
+// entries and per-IP limits agree on who the client is. (chi's RealIP
+// prefers True-Client-IP and X-Real-IP, which clients can set freely
+// through proxies that only manage X-Forwarded-For.)
+func trustedRealIP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ip := forwardedIP(r); ip != "" {
+			r.RemoteAddr = ip
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // retryAfter formats d as the delay-seconds form of the Retry-After header
