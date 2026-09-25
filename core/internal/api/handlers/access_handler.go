@@ -152,6 +152,12 @@ func (h *AccessHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
+	// A missing password is a malformed request, not a wrong guess: it must
+	// not count toward the sign-out after repeated wrong passwords.
+	if req.CurrentPassword == "" {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "current_password is required"})
+		return
+	}
 	if err := h.accounts.VerifyPassword(r.Context(), p.AccountID, req.CurrentPassword); err != nil {
 		if errors.Is(err, repository.ErrWrongPassword) && h.guard.Failed(r.Context(), p, requestIP(r)) {
 			writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{Error: "too many wrong passwords; you have been signed out"})

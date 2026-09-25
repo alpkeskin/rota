@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/proxy"
@@ -54,7 +56,21 @@ func (h *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
 		return
 	}
+	h.fillUsage(r.Context(), u)
 	writeJSON(w, http.StatusOK, u)
+}
+
+// fillUsage sets the user's bandwidth used this month, as List does. A
+// failure leaves it at 0 rather than failing the request.
+func (h *UserHandler) fillUsage(ctx context.Context, u *models.ProxyUser) {
+	now := time.Now().UTC()
+	month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	used, err := h.userRepo.MonthBandwidth(ctx, u.ID, month)
+	if err != nil {
+		h.logger.Warn("failed to load bandwidth usage", "user_id", u.ID, "error", err)
+		return
+	}
+	u.BandwidthUsedBytes = used
 }
 
 // Create adds a new proxy user
@@ -116,6 +132,7 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"user not found or update failed"}`, http.StatusNotFound)
 		return
 	}
+	h.fillUsage(r.Context(), u)
 	writeJSON(w, http.StatusOK, u)
 }
 

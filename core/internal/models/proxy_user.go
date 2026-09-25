@@ -19,7 +19,7 @@ type ProxyUser struct {
 	MonthlyBandwidthLimitBytes int64 `json:"monthly_bandwidth_limit_bytes"`
 	// MaxConcurrentConnections caps open requests and tunnels; 0 = unlimited.
 	MaxConcurrentConnections int `json:"max_concurrent_connections"`
-	// BandwidthUsedBytes is this month's usage (list responses only).
+	// BandwidthUsedBytes is this month's usage (flushed every few seconds).
 	BandwidthUsedBytes int64 `json:"bandwidth_used_bytes"`
 	// HasExportToken reports whether a working-proxies export token is issued.
 	// The token itself is only returned once, when it is generated.

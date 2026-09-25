@@ -150,8 +150,12 @@ func TestCreateAPIKeyRequiresCurrentPassword(t *testing.T) {
 		h.CreateAPIKey(w, r.WithContext(auth.WithPrincipal(r.Context(), p)))
 		return w.Code, w.Body.String()
 	}
-	if code, _ := create(`{"name":"ci"}`); code != http.StatusBadRequest {
-		t.Fatalf("no password = %d, want 400", code)
+	// A missing password is asked for, never counted as a wrong guess:
+	// six of them must not sign the caller out.
+	for i := 0; i < 6; i++ {
+		if code, body := create(`{"name":"ci"}`); code != http.StatusBadRequest || !strings.Contains(body, "required") {
+			t.Fatalf("no password = %d %s, want 400 asking for it", code, body)
+		}
 	}
 	if code, _ := create(`{"name":"ci","current_password":"wrong"}`); code != http.StatusBadRequest {
 		t.Fatalf("wrong password = %d, want 400", code)
