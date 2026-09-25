@@ -6,14 +6,17 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/tracing"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/alpkeskin/rota/core/pkg/safeworker"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // proxyRouter is the core HTTP handler that dispatches incoming proxy requests.
@@ -45,12 +48,52 @@ func (p *proxyRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Dispatch based on method
+	// 3. Trace admitted requests. For CONNECT the span covers the tunnel's
+	// lifetime.
+	host := r.URL.Host
+	if r.Method == http.MethodConnect || host == "" {
+		host = r.Host
+	}
+	ctx, span := tracing.StartProxy(r.Context(), "proxy "+r.Method,
+		proxySpanAttrs(requestKind(r), host, ProxyRequestFrom(r.Context()))...)
+	defer span.End()
+	r = r.WithContext(ctx)
+
+	// 4. Dispatch based on method
 	if r.Method == http.MethodConnect {
 		p.upstream.HandleConnectRequest(w, r)
 	} else {
 		p.upstream.HandleHTTPRequest(w, r)
 	}
+}
+
+// proxySpanAttrs describes a proxied request on its trace span. Only the
+// target host is recorded, never the path or query.
+func proxySpanAttrs(kind, hostport string, preq *ProxyRequest) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{attribute.String("rota.proxy.kind", kind)}
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host, port = hostport, ""
+	}
+	attrs = append(attrs, attribute.String("server.address", host))
+	if p, err := strconv.Atoi(port); err == nil {
+		attrs = append(attrs, attribute.Int("server.port", p))
+	}
+	if preq != nil {
+		if preq.User != nil {
+			attrs = append(attrs, attribute.Int("rota.user_id", preq.User.ID))
+		}
+		if preq.Opts.Target.Country != "" {
+			attrs = append(attrs, attribute.String("rota.target.country", preq.Opts.Target.Country))
+		}
+		if preq.Opts.Target.City != "" {
+			attrs = append(attrs, attribute.String("rota.target.city", preq.Opts.Target.City))
+		}
+		if preq.Opts.Session != "" {
+			attrs = append(attrs, attribute.Bool("rota.sticky_session", true))
+		}
+	}
+	return attrs
 }
 
 // requestKind is the metrics label for a proxy request.

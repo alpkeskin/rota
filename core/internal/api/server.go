@@ -17,6 +17,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/internal/services"
+	"github.com/alpkeskin/rota/core/internal/tracing"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -290,6 +291,7 @@ func (s *Server) setupMiddleware() {
 	}))
 
 	s.router.Use(middleware.RequestID)
+	s.router.Use(tracing.Middleware)
 	// Only derive the client IP from X-Forwarded-For / X-Real-IP when explicitly
 	// trusting an upstream reverse proxy; otherwise a directly-exposed API would
 	// let clients spoof their apparent IP (AUD-20).

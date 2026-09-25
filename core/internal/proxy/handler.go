@@ -15,8 +15,10 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/tracing"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 	proxyDialer "golang.org/x/net/proxy"
 )
 
@@ -204,9 +206,11 @@ func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.
 	h.removeHopByHopHeaders(r)
 
 	reqCtx := r.Context()
+	tracing.SetAttributes(reqCtx, attribute.String("rota.request_id", requestID))
 	preq := ProxyRequestFrom(reqCtx)
 	lease, err := h.beginLease(reqCtx, preq)
 	if err != nil {
+		tracing.Fail(reqCtx, err)
 		writeLimitError(w, preq, err)
 		return
 	}
@@ -224,6 +228,7 @@ func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.
 		}
 		if err != nil {
 			h.logger.Error("pool-chain request failed", "request_id", requestID, "error", err)
+			tracing.Fail(reqCtx, err)
 			metrics.ObserveProxyRequest("http", "upstream_error", time.Since(startTime))
 			if errors.Is(err, ErrNoTargetMatch) {
 				writeRoutingError(w, requestID, err)
@@ -238,6 +243,7 @@ func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.
 	}
 	if preq != nil && (!preq.Opts.Target.Empty() || preq.Opts.Session != "") {
 		metrics.ObserveProxyRequest("http", "upstream_error", time.Since(startTime))
+		tracing.Fail(reqCtx, errRoutingNeedsPool)
 		writeRoutingError(w, requestID, errRoutingNeedsPool)
 		return
 	}
@@ -284,6 +290,7 @@ func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.
 			"duration_ms", duration,
 		)
 		metrics.ObserveProxyRequest("http", "upstream_error", time.Since(startTime))
+		tracing.Fail(reqCtx, err)
 		writeUpstreamError(w, requestID)
 		return
 	}
@@ -404,9 +411,11 @@ func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *ht
 		"host", host,
 	)
 
+	tracing.SetAttributes(r.Context(), attribute.String("rota.request_id", requestID))
 	preq := ProxyRequestFrom(r.Context())
 	upstreamConn, proxyID, lease, err := h.OpenTunnel(r.Context(), host, preq)
 	if err != nil {
+		tracing.Fail(r.Context(), err)
 		switch {
 		case errors.Is(err, ErrQuotaExceeded), errors.Is(err, ErrTooManyConnections), errors.Is(err, ErrRateLimited):
 			writeLimitError(w, preq, err)
@@ -648,8 +657,14 @@ func (h *UpstreamProxyHandler) sendWithRetry(req *http.Request, ctx context.Cont
 			"fallback_attempt", fallbackAttempt+1,
 		)
 
+		_, span := tracing.StartAttempt(ctx, selectedProxy.ID, fallbackAttempt+1)
 		resp, err := h.tryProxyWithRetries(req, ctx, selectedProxy, perProxyRetries)
-		reportOutcome(selectedProxy.ID, responseFault(resp, err))
+		fault := responseFault(resp, err)
+		reportOutcome(selectedProxy.ID, fault)
+		if resp != nil {
+			span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
+		}
+		tracing.End(span, fault)
 		if err != nil {
 			lastErr = fmt.Errorf("proxy %s failed after %d retries: %w", selectedProxy.Address, perProxyRetries, err)
 			h.logger.Warn("proxy failed after all retries",
@@ -765,7 +780,9 @@ func (h *UpstreamProxyHandler) connectThroughProxy(host string, ctx context.Cont
 			break
 		}
 
+		_, span := tracing.StartAttempt(ctx, selectedProxy.ID, fallbackAttempt+1)
 		conn, err := h.tryConnectWithRetries(selectedProxy, host, perProxyRetries)
+		tracing.End(span, err)
 		duration := int(time.Since(startTime).Milliseconds())
 
 		reportOutcome(selectedProxy.ID, err)

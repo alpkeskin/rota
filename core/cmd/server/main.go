@@ -42,6 +42,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/secrets"
 	"github.com/alpkeskin/rota/core/internal/services"
 	"github.com/alpkeskin/rota/core/internal/sharedstate"
+	"github.com/alpkeskin/rota/core/internal/tracing"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 )
 
@@ -66,8 +67,24 @@ func run() error {
 		"api_port", cfg.APIPort,
 	)
 
-	// Initialize database
+	// Tracing (off unless OTEL_EXPORTER_OTLP_ENDPOINT is set). Set up before
+	// the database so query tracing is installed on its connections.
 	ctx := context.Background()
+	shutdownTracing, err := tracing.Setup(ctx)
+	if err != nil {
+		log.Warn("failed to set up OpenTelemetry tracing; continuing without it", "error", err)
+	} else if tracing.Enabled() {
+		log.Info("exporting OpenTelemetry traces")
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(sctx); err != nil {
+			log.Warn("failed to flush traces", "error", err)
+		}
+	}()
+
+	// Initialize database
 	db, err := database.New(ctx, &cfg.Database, database.DefaultConfig(), log)
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)

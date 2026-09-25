@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/config"
+	"github.com/alpkeskin/rota/core/internal/tracing"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -59,6 +60,9 @@ func New(ctx context.Context, cfg *config.DatabaseConfig, poolCfg *Config, log *
 	poolConfig.MaxConnLifetime = poolCfg.MaxConnLifetime
 	poolConfig.MaxConnIdleTime = poolCfg.MaxConnIdleTime
 	poolConfig.HealthCheckPeriod = poolCfg.HealthCheckPeriod
+	if tracing.Enabled() {
+		poolConfig.ConnConfig.Tracer = tracing.PgxTracer()
+	}
 
 	// Set connect timeout
 	connectCtx, cancel := context.WithTimeout(ctx, poolCfg.ConnectTimeout)

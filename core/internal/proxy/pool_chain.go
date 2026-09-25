@@ -12,7 +12,9 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/tracing"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"go.opentelemetry.io/otel/attribute"
 	"h12.io/socks"
 )
 
@@ -231,6 +233,7 @@ func (c *PoolChain) SendWithRetry(
 			return nil, 0, fmt.Errorf("no proxy available: %w", lastErr)
 		}
 		tried[selectedProxy.ID] = true
+		_, span := tracing.StartAttempt(ctx, selectedProxy.ID, attempt+1)
 
 		log.Info("pool chain: trying proxy",
 			"attempt", attempt+1,
@@ -245,6 +248,7 @@ func (c *PoolChain) SendWithRetry(
 			// do not count it toward eviction (AUD-11), and give back a
 			// half-open trial slot this attempt may hold.
 			breaker.Abandon(selectedProxy.ID)
+			tracing.End(span, err)
 			lastErr = err
 			continue
 		}
@@ -281,14 +285,18 @@ func (c *PoolChain) SendWithRetry(
 			lastErr = fmt.Errorf("proxy %s attempt %d: %w", selectedProxy.Address, attempt+1, err)
 			log.Warn("pool chain: proxy failed", "proxy", selectedProxy.Address, "err", err)
 			c.markFailed(selIdx, selectedProxy.ID, err)
+			tracing.End(span, err)
 			continue
 		}
 
-		if fault := responseFault(resp, nil); fault != nil {
+		fault := responseFault(resp, nil)
+		if fault != nil {
 			c.markFailed(selIdx, selectedProxy.ID, fault)
 		} else {
 			c.markSucceeded(selectedProxy.ID)
 		}
+		span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
+		tracing.End(span, fault)
 		log.Info("pool chain: success",
 			"proxy", selectedProxy.Address,
 			"status", resp.StatusCode,
@@ -323,6 +331,7 @@ func (c *PoolChain) ConnectWithRetry(
 			return nil, 0, fmt.Errorf("no proxy available: %w", lastErr)
 		}
 		tried[selectedProxy.ID] = true
+		_, span := tracing.StartAttempt(ctx, selectedProxy.ID, attempt+1)
 
 		log.Info("pool chain CONNECT: trying proxy",
 			"attempt", attempt+1,
@@ -336,10 +345,12 @@ func (c *PoolChain) ConnectWithRetry(
 			lastErr = fmt.Errorf("CONNECT proxy %s attempt %d: %w", selectedProxy.Address, attempt+1, err)
 			log.Warn("pool chain CONNECT: failed", "proxy", selectedProxy.Address, "err", err)
 			c.markFailed(selIdx, selectedProxy.ID, err)
+			tracing.End(span, err)
 			continue
 		}
 
 		c.markSucceeded(selectedProxy.ID)
+		tracing.End(span, nil)
 		log.Info("pool chain CONNECT: success", "proxy", selectedProxy.Address, "host", host)
 		return conn, selectedProxy.ID, nil
 	}
