@@ -115,6 +115,42 @@ var (
 		Buckets:   prometheus.DefBuckets,
 	}, []string{"route", "method"})
 
+	// Leader is 1 while this instance runs the cluster-wide background jobs.
+	Leader = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: "cluster",
+		Name:      "leader",
+		Help:      "1 while this instance holds leadership and runs the singleton background jobs.",
+	})
+
+	// LeaderTransitions counts leadership gained and lost by this instance.
+	// event: acquired | lost.
+	LeaderTransitions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "cluster",
+		Name:      "leader_transitions_total",
+		Help:      "Leadership changes on this instance, by event.",
+	}, []string{"event"})
+
+	// ChangeEvents counts cross-instance change notifications received.
+	// topic: settings | proxies | users.
+	ChangeEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "cluster",
+		Name:      "change_events_total",
+		Help:      "Change notifications received from other instances, by topic.",
+	}, []string{"topic"})
+
+	// SharedStateErrors counts failed calls to the shared state store (Redis);
+	// the instance falls back to local state while they fail.
+	// op: rate | concurrency | sticky | login.
+	SharedStateErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "sharedstate",
+		Name:      "errors_total",
+		Help:      "Shared state (Redis) calls that failed and fell back to local state, by operation.",
+	}, []string{"op"})
+
 	buildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "build_info",
@@ -136,6 +172,10 @@ func init() {
 		LimitRejections,
 		APIRequests,
 		APIRequestDuration,
+		Leader,
+		LeaderTransitions,
+		ChangeEvents,
+		SharedStateErrors,
 		buildInfo,
 	)
 	buildInfo.WithLabelValues(version.Version).Set(1)

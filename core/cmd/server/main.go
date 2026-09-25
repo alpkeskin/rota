@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/api"
+	"github.com/alpkeskin/rota/core/internal/cluster"
 	"github.com/alpkeskin/rota/core/internal/config"
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/metrics"
@@ -72,14 +73,21 @@ func run() error {
 	}
 	defer db.Close()
 
-	// Run database migrations
-	if err := db.Migrate(ctx); err != nil {
-		return fmt.Errorf("failed to run migrations: %w", err)
-	}
-
-	// Configure at-rest encryption for sensitive columns before anything reads
-	// them, then seal any legacy plaintext passwords.
-	if err := setupEncryption(ctx, cfg, db, log); err != nil {
+	// Replicas starting together take turns: migrations, key setup and
+	// seeding the first admin run on one instance at a time.
+	var apiServer *api.Server
+	if err := cluster.WithLock(ctx, db.Pool, cluster.StartupLockKey, func() error {
+		if err := db.Migrate(ctx); err != nil {
+			return fmt.Errorf("failed to run migrations: %w", err)
+		}
+		// Configure at-rest encryption for sensitive columns before anything
+		// reads them, then seal any legacy plaintext passwords.
+		if err := setupEncryption(ctx, cfg, db, log); err != nil {
+			return err
+		}
+		apiServer = api.New(cfg, log, db)
+		return nil
+	}); err != nil {
 		return err
 	}
 
@@ -147,12 +155,21 @@ func run() error {
 		func() float64 { return float64(secrets.DecryptFailures()) })
 	metrics.RegisterUpstreamInventory(proxyRepo.CountByStatus)
 
-	// Create and start log cleanup service
+	// Jobs that must run on one instance only (fetching sources, pool health
+	// checks, alerts, cleanup) run on the elected leader.
 	logCleanupService := services.NewLogCleanupService(db, settingsRepo, log)
-	if err := logCleanupService.Start(ctx); err != nil {
-		log.Warn("failed to start log cleanup service", "error", err)
-	}
 	defer logCleanupService.Stop()
+	elector := cluster.NewElector(db.Pool, log)
+	for _, job := range apiServer.LeaderJobs() {
+		elector.OnElected(job)
+	}
+	elector.OnElected(func(ctx context.Context) {
+		if err := logCleanupService.Start(ctx); err != nil {
+			log.Warn("failed to start log cleanup service", "error", err)
+		}
+	})
+	elector.Start()
+	defer elector.Stop()
 
 	// Create servers
 	proxyServer, err := proxy.New(cfg.ProxyPort, log, db, proxyRepo, poolRepo, userRepo, settingsRepo)
@@ -162,7 +179,6 @@ func run() error {
 	if cfg.SOCKSPort > 0 {
 		proxyServer.EnableSOCKS5(cfg.SOCKSPort)
 	}
-	apiServer := api.New(cfg, log, db)
 
 	// Set proxy server reference in API server for reload functionality
 	apiServer.SetProxyServer(proxyServer)

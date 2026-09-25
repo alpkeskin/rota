@@ -56,6 +56,10 @@ type Server struct {
 	// on shutdown, before the DB connection is closed (see AUD-6).
 	cancelServices context.CancelFunc
 
+	// leaderJobs start the background services that must run on one
+	// instance only; main hands them to the cluster elector.
+	leaderJobs []func(context.Context)
+
 	// Handlers
 	authHandler          *handlers.AuthHandler
 	healthHandler        *handlers.HealthHandler
@@ -228,18 +232,24 @@ func New(cfg *config.Config, log *logger.Logger, db *database.DB) *Server {
 	// select on ctx.Done().
 	svcCtx, cancelServices := context.WithCancel(context.Background())
 	s.cancelServices = cancelServices
+	// Every instance keeps its own copy of the GeoIP database.
 	geoSvc.StartAutoUpdate(svcCtx)
-	sourceSvc.Start(svcCtx)
-	poolSvc.Start(svcCtx)
-	alertWatcher.Start(svcCtx)
 
+	// The rest change shared state or talk to the outside world (fetching
+	// sources, health-checking pools, sending alerts, deleting rows), so
+	// they run on the leader only; see LeaderJobs.
+	//
 	// NOTE: global StartPeriodicHealthCheck is intentionally NOT started.
 	// Its 60s timeout was too lenient and kept flapping pool-marked 'failed'
 	// proxies back to 'active', returning dead proxies to rotation.
 	// Pool-level health checks (PoolService cron) are authoritative.
-
-	cleanupSvc.Start(svcCtx)
-	go s.pruneAuditLog(svcCtx)
+	s.leaderJobs = []func(context.Context){
+		sourceSvc.Start,
+		poolSvc.Start,
+		alertWatcher.Start,
+		cleanupSvc.Start,
+		func(ctx context.Context) { go s.pruneAuditLog(ctx) },
+	}
 
 	s.setupMiddleware()
 	s.setupRoutes()
@@ -509,6 +519,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.cancelServices()
 	}
 	return s.server.Shutdown(ctx)
+}
+
+// LeaderJobs returns the background services that must run on exactly one
+// instance. Each starts its loops and stops them when ctx is cancelled.
+func (s *Server) LeaderJobs() []func(context.Context) {
+	return s.leaderJobs
 }
 
 // SetProxyServer sets the proxy server reference after initialization
