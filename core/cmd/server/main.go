@@ -257,6 +257,23 @@ func run() error {
 		log.Info("received shutdown signal", "signal", sig.String())
 	}
 
+	// Hand the cluster-wide jobs to another instance right away; they don't
+	// serve clients, so there is nothing to drain.
+	elector.Stop()
+
+	// Report not ready, then keep serving for the drain period so load
+	// balancers (Kubernetes endpoints, Caddy) stop sending new clients
+	// before the listeners close. A second signal skips the wait.
+	apiServer.BeginDrain()
+	if cfg.ShutdownDrain > 0 {
+		log.Info("draining before shutdown", "drain", cfg.ShutdownDrain.String())
+		select {
+		case <-time.After(cfg.ShutdownDrain):
+		case sig := <-quit:
+			log.Info("received second signal; shutting down now", "signal", sig.String())
+		}
+	}
+
 	// Graceful shutdown with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/database"
@@ -20,7 +21,13 @@ type HealthHandler struct {
 	db        *database.DB
 	proxyRepo *repository.ProxyRepository
 	logger    *logger.Logger
+	// draining is set on shutdown: readiness fails so load balancers stop
+	// sending new clients while in-flight work finishes.
+	draining atomic.Bool
 }
+
+// SetDraining makes Readyz report not ready from now on.
+func (h *HealthHandler) SetDraining() { h.draining.Store(true) }
 
 // NewHealthHandler creates a new HealthHandler
 func NewHealthHandler(db *database.DB, proxyRepo *repository.ProxyRepository, log *logger.Logger) *HealthHandler {
@@ -73,6 +80,10 @@ func (h *HealthHandler) Livez(w http.ResponseWriter, r *http.Request) {
 //	@Failure		503	{object}	map[string]interface{}
 //	@Router			/readyz [get]
 func (h *HealthHandler) Readyz(w http.ResponseWriter, r *http.Request) {
+	if h.draining.Load() {
+		h.jsonResponse(w, http.StatusServiceUnavailable, map[string]interface{}{"status": "draining"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := h.db.Ping(ctx); err != nil {

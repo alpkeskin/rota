@@ -1,0 +1,29 @@
+{{- if .Values.core.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rota.fullname" . }}-core
+  labels:
+    {{- include "rota.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core
+spec:
+  minAvailable: {{ .Values.core.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "rota.coreSelectorLabels" . | nindent 6 }}
+{{- end }}
+{{- if and .Values.dashboard.enabled .Values.dashboard.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rota.fullname" . }}-dashboard
+  labels:
+    {{- include "rota.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  minAvailable: {{ .Values.dashboard.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "rota.dashboardSelectorLabels" . | nindent 6 }}
+{{- end }}

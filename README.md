@@ -159,6 +159,10 @@ only to change something. The common knobs:
 | `ROTA_ENCRYPTION_KEY` | _(generated, stored in DB)_ | Key that encrypts upstream proxy passwords at rest. Set it (e.g. `openssl rand -base64 32`) so a database leak alone doesn't expose them — see [Encryption at rest](#encryption-at-rest) |
 | `ROTA_ENCRYPTION_KEYS_PREVIOUS` | _(empty)_ | Comma-separated retired keys, still accepted for decryption during key rotation |
 | `METRICS_TOKEN` | _(empty)_ | Require `Authorization: Bearer <token>` on `/metrics` |
+| `REDIS_URL` | _(off)_ | Redis for limits and sticky sessions shared by all replicas (see [Running several replicas](#running-several-replicas)) |
+| `REDIS_KEY_PREFIX` | `rota:` | Prefix for Rota's keys in a shared Redis |
+| `SHUTDOWN_DRAIN_SECONDS` | `0` | On shutdown, report not ready and keep serving this long before closing listeners |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(off)_ | Export OpenTelemetry traces over OTLP/HTTP (see [Tracing](#tracing)) |
 
 See `.env.example` for the full list including auth brute-force protection.
 
@@ -358,17 +362,70 @@ same-origin behind it. Only the proxy port is exposed separately.
 
 ## 🐳 Deployment
 
-### Production Deployment
-
-#### Using Docker Compose
+### Docker Compose
 
 ```bash
-# Production configuration
-docker compose -f docker-compose.yml up -d
-
-# Enable auto-restart
-docker compose up -d --restart=unless-stopped
+docker compose up -d
 ```
+
+The bundled `docker-compose.yml` runs one core, the dashboard, TimescaleDB and
+Caddy, restarting them automatically. See [Production Deployment
+(HTTPS)](#production-deployment-https) for a domain with automatic TLS.
+
+### Kubernetes (Helm)
+
+A chart lives in [`deploy/helm/rota`](deploy/helm/rota). It runs the core
+(proxy, optional SOCKS5 and API) and the dashboard, with an ingress that
+routes `/api`, `/ws` and `/docs` to the core like the bundled Caddy does.
+PostgreSQL with TimescaleDB is **not** bundled — point it at a managed
+database or one run by an operator.
+
+```bash
+helm install rota ./deploy/helm/rota \
+  --set database.host=timescaledb.db.svc \
+  --set database.existingSecret=rota-db \
+  --set redis.url=redis://redis-master.redis.svc:6379/0 \
+  --set secrets.encryptionKey="$(openssl rand -base64 32)" \
+  --set ingress.enabled=true --set ingress.host=rota.example.com
+```
+
+See the [chart README](deploy/helm/rota/README.md) for every value.
+
+### Running several replicas
+
+Any number of core instances can share one database:
+
+- **Startup** (migrations, key setup, seeding the first admin) runs on one
+  instance at a time, under a Postgres advisory lock.
+- **Background jobs** (fetching sources, pool health checks, alerts, proxy/log/
+  audit cleanup) run on one elected leader. If it stops or loses its database
+  session, another instance takes over within seconds
+  (`rota_cluster_leader` shows which one leads).
+- **Configuration changes** (settings, proxies, proxy users, pools) made on
+  one instance reach the others at once through Postgres `LISTEN/NOTIFY`.
+- **Limits and sticky sessions** need Redis (`REDIS_URL`): per-user requests
+  per minute and connection caps, the per-IP proxy rate limit, sticky
+  sessions and login throttling are then enforced across all instances.
+  Without Redis each instance enforces them on its own (a cap of N allows N
+  per instance). If Redis becomes unreachable, instances fall back to their
+  own limits until it's back (`rota_sharedstate_errors_total`).
+- **Bandwidth quotas** are always kept in the database; users with a quota
+  reload their monthly total every 30 seconds, so usage on other instances
+  counts against it within about half a minute.
+
+Leader election and notifications hold a session on the database, so connect
+directly or through a pooler in **session** mode (PgBouncer in transaction
+mode breaks them). The MaxMind GeoIP database is kept per instance.
+
+### Graceful shutdown
+
+On `SIGTERM` an instance hands off leadership, then reports `503` on
+`/readyz` for `SHUTDOWN_DRAIN_SECONDS` while still serving, so load balancers
+stop sending it new clients; then it stops accepting connections, waits up to
+30 seconds for requests in flight, and closes the remaining tunnels (their
+bytes are counted). A second signal skips the drain. Give the process at least
+drain + 35 seconds (the Helm chart sets `terminationGracePeriodSeconds: 60`
+with a 15 s drain).
 
 ---
 
@@ -657,7 +714,7 @@ The core exposes probes and Prometheus metrics on the API port (`:8001`):
 | Endpoint | Purpose |
 |---|---|
 | `GET /livez` | Liveness — `200` while the process serves HTTP; never checks dependencies |
-| `GET /readyz` | Readiness — `200` when the database answers a ping, `503` otherwise |
+| `GET /readyz` | Readiness — `200` when the database answers a ping, `503` otherwise or while draining on shutdown |
 | `GET /metrics` | Prometheus metrics |
 
 The bundled Caddy does **not** route `/metrics`, `/livez` or `/readyz`, so they are
@@ -680,8 +737,31 @@ Useful series:
 | `rota_api_requests_total{route,method,status}` / `rota_api_request_duration_seconds` | REST API traffic by route pattern |
 | `rota_log_hook_dropped_total` | Log events dropped because the DB log queue was full |
 | `rota_secrets_decrypt_failures_total` | Stored proxy passwords no configured key could decrypt |
+| `rota_cluster_leader` / `rota_cluster_leader_transitions_total{event}` | Whether this instance runs the background jobs, and leadership changes |
+| `rota_cluster_change_events_total{topic}` | Configuration changes received from other instances |
+| `rota_sharedstate_errors_total{op}` | Redis calls that failed; the instance used its own limits meanwhile |
 
 Plus the standard `go_*` and `process_*` series and `rota_build_info{version}`.
+
+### Tracing
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `http://otel-collector:4318`) to export
+OpenTelemetry traces over OTLP/HTTP. The standard `OTEL_*` variables apply
+(`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`,
+`OTEL_TRACES_SAMPLER`/`_ARG`, `OTEL_SDK_DISABLED`).
+
+- **API requests** get a span named after the route (`GET /api/v1/pools/{id}`),
+  continuing the caller's `traceparent`. Probes, `/metrics` and WebSockets
+  aren't traced.
+- **Proxied requests and tunnels** (HTTP, CONNECT, SOCKS5) get a root span with
+  the user, target host and port, routing options and the request id
+  (`X-Rota-Request-Id`), and a child span per upstream proxy attempt. A CONNECT
+  or SOCKS5 span lasts as long as the tunnel.
+- **Database queries** made while handling a traced request get a span each.
+
+The proxy stays transparent: trace context sent by proxy clients is ignored
+(a client can't join your traces or force sampling), nothing is added to
+forwarded requests, and paths and query strings are never recorded.
 
 ### Brute-Force Protection
 

@@ -46,3 +46,18 @@ func TestReadyz(t *testing.T) {
 		t.Fatalf("readyz without DB = %d, want 503", w.Code)
 	}
 }
+
+func TestReadyzReportsDraining(t *testing.T) {
+	h := NewHealthHandler(nil, nil, logger.New("error"))
+	h.SetDraining()
+	w := httptest.NewRecorder()
+	h.Readyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "draining") {
+		t.Fatalf("draining readyz = %d %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	h.Livez(w, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("livez while draining = %d; the process must not be restarted", w.Code)
+	}
+}

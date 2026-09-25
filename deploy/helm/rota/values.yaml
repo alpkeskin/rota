@@ -1,0 +1,219 @@
+# Default values for the Rota chart.
+#
+# Rota needs PostgreSQL with the TimescaleDB extension (not bundled — use a
+# managed service or an operator) and, when running more than one core
+# replica, Redis for limits and sticky sessions shared by all replicas.
+
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ── Core: the proxy (8000), optional SOCKS5 and the REST API (8001) ────────
+core:
+  image:
+    repository: ghcr.io/alpkeskin/rota
+    # Defaults to the chart's appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Replicas share the database. With more than one, set redis.url so
+  # per-user limits, sticky sessions and login throttling are cluster-wide.
+  # Background jobs (source fetching, health checks, alerts, cleanup) run on
+  # one elected replica.
+  replicaCount: 2
+
+  proxyPort: 8000
+  apiPort: 8001
+  # 0 disables the SOCKS5 listener.
+  socksPort: 0
+  logLevel: info
+
+  # On shutdown the pod reports not ready for this long, still serving, so
+  # Services and ingresses stop sending it new clients before it closes its
+  # listeners. Must stay below terminationGracePeriodSeconds minus ~35s.
+  shutdownDrainSeconds: 15
+  terminationGracePeriodSeconds: 60
+
+  # Honour X-Forwarded-For from the ingress for login throttling. Set false
+  # if the API service is exposed without a trusted proxy in front.
+  trustProxyHeaders: true
+  corsAllowedOrigins: "*"
+  auditLogRetentionDays: 365
+
+  # Extra environment variables, e.g. OTEL_* settings.
+  extraEnv: []
+  #  - name: OTEL_TRACES_SAMPLER
+  #    value: parentbased_traceidratio
+  #  - name: OTEL_TRACES_SAMPLER_ARG
+  #    value: "0.1"
+  extraEnvFrom: []
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Spread replicas over nodes when possible.
+  topologySpread: true
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+  # Startup waits for migrations (and for other replicas holding the startup
+  # lock); allow failureThreshold x periodSeconds for it.
+  startupProbe:
+    periodSeconds: 5
+    failureThreshold: 120
+  livenessProbe:
+    periodSeconds: 10
+    failureThreshold: 6
+  readinessProbe:
+    periodSeconds: 5
+    failureThreshold: 2
+
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  # The proxy (and SOCKS5) listener: the service clients connect to.
+  proxyService:
+    type: LoadBalancer
+    # Local keeps the client's source IP, which the per-IP rate limit uses.
+    externalTrafficPolicy: Local
+    annotations: {}
+    loadBalancerSourceRanges: []
+
+  # The REST API, reached by the ingress (and Prometheus).
+  apiService:
+    type: ClusterIP
+    annotations: {}
+
+# ── Dashboard (Next.js) ────────────────────────────────────────────────────
+dashboard:
+  enabled: true
+  image:
+    repository: ghcr.io/alpkeskin/rota-dashboard
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  service:
+    type: ClusterIP
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# ── Ingress: dashboard at /, API, WebSockets and docs routed to the core ───
+# The dashboard calls the API on its own origin, so both must share a host.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  #  cert-manager.io/cluster-issuer: letsencrypt
+  host: rota.example.com
+  tls: []
+  #  - secretName: rota-tls
+  #    hosts: [rota.example.com]
+
+# ── Database (PostgreSQL + TimescaleDB) ────────────────────────────────────
+# Connect directly or through a session-mode pooler: leader election and
+# change notifications use session advisory locks and LISTEN.
+database:
+  host: ""
+  port: 5432
+  name: rota
+  user: rota
+  sslMode: require
+  # Either set the password here (stored in the chart's Secret) or name an
+  # existing Secret holding it.
+  password: ""
+  existingSecret: ""
+  existingSecretKey: password
+
+# ── Redis (shared limits and sticky sessions) ──────────────────────────────
+redis:
+  # e.g. redis://:password@redis-master:6379/0 (rediss:// for TLS).
+  url: ""
+  existingSecret: ""
+  existingSecretKey: url
+  keyPrefix: "rota:"
+
+# ── Secrets ────────────────────────────────────────────────────────────────
+# All optional. Unset values fall back to safe defaults: the JWT secret and
+# the data-encryption key are generated once and stored in the database, and
+# a missing admin password is generated on first start and printed once in
+# the core logs.
+secrets:
+  # Use an existing Secret instead of the values below. Recognised keys:
+  # ROTA_ENCRYPTION_KEY, ROTA_ENCRYPTION_KEYS_PREVIOUS, JWT_SECRET,
+  # ROTA_ADMIN_USER, ROTA_ADMIN_PASSWORD, METRICS_TOKEN.
+  existingSecret: ""
+  encryptionKey: ""
+  encryptionKeysPrevious: ""
+  jwtSecret: ""
+  adminUser: admin
+  adminPassword: ""
+  metricsToken: ""
+
+# ── Observability ──────────────────────────────────────────────────────────
+tracing:
+  # OTLP/HTTP endpoint, e.g. http://otel-collector.observability:4318.
+  otlpEndpoint: ""
+  serviceName: rota-core
+
+metrics:
+  serviceMonitor:
+    # Requires the Prometheus Operator CRDs.
+    enabled: false
+    interval: 30s
+    labels: {}
+    # Secret key holding METRICS_TOKEN when it lives in secrets.existingSecret
+    # (e.g. {name: rota-secrets, key: METRICS_TOKEN}). A token set in
+    # secrets.metricsToken is used automatically.
+    tokenSecret: {}

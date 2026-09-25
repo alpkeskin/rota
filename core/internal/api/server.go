@@ -528,6 +528,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.server.Shutdown(ctx)
 }
 
+// BeginDrain makes /readyz fail so load balancers stop routing new clients
+// here; requests keep being served until Shutdown.
+func (s *Server) BeginDrain() {
+	s.healthHandler.SetDraining()
+}
+
 // SetSharedState keeps login and export throttling in the shared store so
 // every instance enforces it. Call before Start.
 func (s *Server) SetSharedState(st LoginStore) {

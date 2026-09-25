@@ -156,6 +156,30 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
 
+  helm:
+    name: Helm chart — lint & validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.18.6
+
+      - name: Lint
+        run: helm lint deploy/helm/rota --set database.host=db,database.password=x
+
+      # Render the main configurations and validate them against the
+      # Kubernetes schemas (ServiceMonitor is a CRD and is skipped).
+      - name: Validate rendered manifests
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+          chart=deploy/helm/rota
+          helm template r $chart --set database.host=db,database.password=x > minimal.yaml
+          helm template r $chart --set database.host=db,database.existingSecret=db,redis.url=redis://r:6379/0,core.socksPort=1080,ingress.enabled=true,core.autoscaling.enabled=true,tracing.otlpEndpoint=http://otel:4318,secrets.metricsToken=t,metrics.serviceMonitor.enabled=true > full.yaml
+          helm template r $chart --set database.host=db,database.existingSecret=db,secrets.existingSecret=app,redis.existingSecret=redis,dashboard.enabled=false > existing.yaml
+          ~/go/bin/kubeconform -strict -summary -kubernetes-version 1.30.0 -skip ServiceMonitor minimal.yaml full.yaml existing.yaml
+
   docker:
     name: Docker — build images
     runs-on: ubuntu-latest
