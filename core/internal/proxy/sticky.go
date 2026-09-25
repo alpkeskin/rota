@@ -52,6 +52,8 @@ func stickyKey(userID int, session string) string {
 type SharedSticky interface {
 	StickyGet(ctx context.Context, userID int, session string) (int, bool, error)
 	StickyBind(ctx context.Context, userID int, session string, proxyID int, ttl time.Duration, perUserCap int) error
+	// StickyRestore pins only if the session isn't pinned yet.
+	StickyRestore(ctx context.Context, userID int, session string, proxyID int, ttl time.Duration, perUserCap int) error
 }
 
 // Lookup returns the session's pinned proxy from the shared store, or from
@@ -64,10 +66,24 @@ func (s *StickySessions) Lookup(ctx context.Context, userID int, session string)
 		}
 		if err != nil {
 			metrics.SharedStateErrors.WithLabelValues("sticky").Inc()
+			return s.Get(userID, session)
 		}
 		// Not in the shared store: it may have been pinned locally while
 		// the store was unreachable. Keep that pin rather than moving the
-		// session to a new exit IP when the store comes back.
+		// session to a new exit IP, and share it so other instances use it
+		// too (unless one of them pinned the session meanwhile).
+		id, left, ok := s.getWithTTL(userID, session)
+		if !ok {
+			return 0, false
+		}
+		if err := s.shared.StickyRestore(ctx, userID, session, id, left, maxStickyPerUser); err != nil {
+			metrics.SharedStateErrors.WithLabelValues("sticky").Inc()
+			return id, true
+		}
+		if sid, ok, err := s.shared.StickyGet(ctx, userID, session); err == nil && ok {
+			return sid, true
+		}
+		return id, true
 	}
 	return s.Get(userID, session)
 }
@@ -82,6 +98,18 @@ func (s *StickySessions) Pin(ctx context.Context, userID int, session string, pr
 		metrics.SharedStateErrors.WithLabelValues("sticky").Inc()
 	}
 	s.Bind(userID, session, proxyID, ttl)
+}
+
+// getWithTTL returns the local pin and its remaining lifetime.
+func (s *StickySessions) getWithTTL(userID int, session string) (int, time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[stickyKey(userID, session)]
+	now := s.now()
+	if !ok || !now.Before(e.expires) {
+		return 0, 0, false
+	}
+	return e.proxyID, e.expires.Sub(now), true
 }
 
 // Get returns the pinned proxy for a session, if any and not expired.

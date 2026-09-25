@@ -412,7 +412,9 @@ Any number of core instances can share one database:
   per instance). If Redis becomes unreachable, instances fall back to their
   own limits until it's back (`rota_sharedstate_errors_total`). Use a single
   Redis endpoint (standalone, or a managed service's primary endpoint; Redis
-  Cluster is not supported), version 5 or newer.
+  Cluster is not supported), version 5 or newer. A user's connection cap
+  costs two Redis round trips per request, made one at a time per user on
+  each instance, so keep Redis close (sub-millisecond) to the core.
 - **Bandwidth quotas** are always kept in the database; users with a quota
   reload their monthly total every 30 seconds, so usage on other instances
   counts against it within about half a minute.

@@ -110,6 +110,9 @@ func (f *failingShared) StickyGet(context.Context, int, string) (int, bool, erro
 func (f *failingShared) StickyBind(context.Context, int, string, int, time.Duration, int) error {
 	return errDown
 }
+func (f *failingShared) StickyRestore(context.Context, int, string, int, time.Duration, int) error {
+	return errDown
+}
 
 func TestSharedLimitsFallBackToLocal(t *testing.T) {
 	f := &failingShared{}
@@ -203,6 +206,45 @@ func TestFailedReleaseIsCorrectedByHeartbeat(t *testing.T) {
 	}
 }
 
+func TestHeartbeatSkipsBusyAndEvictedUsers(t *testing.T) {
+	r := &recordingShared{}
+	a := NewUsageAccountant(&fakeBandwidthStore{totals: map[int]int64{}}, logger.New("error"))
+	a.SetShared(r)
+	l, _ := a.Begin(context.Background(), &models.ProxyUser{ID: 15, MaxConcurrentConnections: 2})
+	defer l.Release()
+	n := len(r.sets)
+	a.mu.Lock()
+	u := a.users[15]
+	a.mu.Unlock()
+	u.connMu.Lock() // a write for this user is in flight
+	done := make(chan struct{})
+	go func() { a.heartbeat(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeat blocked on a busy user")
+	}
+	u.connMu.Unlock()
+	if len(r.sets) != n {
+		t.Fatal("heartbeat wrote a busy user's count")
+	}
+}
+
+func TestBeginGivesUpWhenClientIsGone(t *testing.T) {
+	a := NewUsageAccountant(&fakeBandwidthStore{totals: map[int]int64{}}, logger.New("error"))
+	a.SetShared(&recordingShared{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := a.Begin(ctx, &models.ProxyUser{ID: 16, MaxConcurrentConnections: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if l, err := a.Begin(context.Background(), &models.ProxyUser{ID: 16, MaxConcurrentConnections: 1}); err != nil {
+		t.Fatalf("abandoned request kept a slot: %v", err)
+	} else {
+		l.Release()
+	}
+}
+
 func TestHeartbeatDuringAcquireKeepsTheNewConnection(t *testing.T) {
 	r := &recordingShared{}
 	a := NewUsageAccountant(&fakeBandwidthStore{totals: map[int]int64{}}, logger.New("error"))
@@ -238,6 +280,21 @@ func TestStickyKeepsLocalPinAfterRecovery(t *testing.T) {
 	s.shared = st                          // store back, without the pin
 	if id, ok := s.Lookup(ctx, 5, "sess"); !ok || id != 42 {
 		t.Fatalf("session moved after the store recovered: %d, %v", id, ok)
+	}
+	// The pin is now shared: another instance, with nothing local, uses it.
+	other := NewStickySessions()
+	other.shared = st
+	if id, ok := other.Lookup(ctx, 5, "sess"); !ok || id != 42 {
+		t.Fatalf("other instance sees %d, %v; want the restored pin 42", id, ok)
+	}
+	// A pin another instance made first wins over a local one.
+	s.Pin(ctx, 5, "s2", 7, time.Minute) // shared now
+	third := NewStickySessions()
+	third.shared = &failingShared{}
+	third.Pin(ctx, 5, "s2", 99, time.Minute) // local only
+	third.shared = st
+	if id, _ := third.Lookup(ctx, 5, "s2"); id != 7 {
+		t.Fatalf("local pin overrode the shared one: %d", id)
 	}
 }
 

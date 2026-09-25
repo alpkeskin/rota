@@ -245,8 +245,9 @@ func (s *Store) SetConn(ctx context.Context, userID, count int) error {
 var bindScript = redis.NewScript(`
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-local proxy, ttl, cap, member = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), ARGV[4]
+local proxy, ttl, cap, member, onlyNew = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3]), ARGV[4], ARGV[5]
 local left = redis.call('PTTL', KEYS[1])
+if left > 0 and onlyNew == '1' then return 0 end
 if left > 0 then
   -- Re-pin: keep the session's original lifetime.
   redis.call('SET', KEYS[1], proxy, 'PX', left)
@@ -288,9 +289,23 @@ func (s *Store) StickyGet(ctx context.Context, userID int, session string) (int,
 // to a proxy. A user holds at most perUserCap live sessions; past that new
 // sessions are not pinned.
 func (s *Store) StickyBind(ctx context.Context, userID int, session string, proxyID int, ttl time.Duration, perUserCap int) error {
+	return s.stickyBind(ctx, userID, session, proxyID, ttl, perUserCap, false)
+}
+
+// StickyRestore pins a session only if no instance has pinned it, for
+// copying a pin made locally while the store was unreachable.
+func (s *Store) StickyRestore(ctx context.Context, userID int, session string, proxyID int, ttl time.Duration, perUserCap int) error {
+	return s.stickyBind(ctx, userID, session, proxyID, ttl, perUserCap, true)
+}
+
+func (s *Store) stickyBind(ctx context.Context, userID int, session string, proxyID int, ttl time.Duration, perUserCap int, onlyNew bool) error {
 	k, idx := s.stickyKeys(userID, session)
+	flag := "0"
+	if onlyNew {
+		flag = "1"
+	}
 	return s.call(ctx, func(ctx context.Context) error {
-		return bindScript.Run(ctx, s.rdb, []string{k, idx}, proxyID, ttl.Milliseconds(), perUserCap, session).Err()
+		return bindScript.Run(ctx, s.rdb, []string{k, idx}, proxyID, ttl.Milliseconds(), perUserCap, session, flag).Err()
 	})
 }
 

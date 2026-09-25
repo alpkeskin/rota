@@ -305,6 +305,12 @@ func (a *UsageAccountant) Begin(ctx context.Context, user *models.ProxyUser) (*L
 	shared := false
 	if max := user.MaxConcurrentConnections; max > 0 {
 		u.connMu.Lock()
+		// Requests queue here behind the user's other Redis round trips;
+		// drop the ones whose client gave up meanwhile.
+		if err := ctx.Err(); err != nil {
+			u.connMu.Unlock()
+			return nil, err
+		}
 		a.mu.Lock()
 		u.active++
 		mine := u.active
@@ -399,8 +405,18 @@ func (a *UsageAccountant) heartbeat() {
 	}
 	a.mu.Unlock()
 	for _, e := range todo {
-		e.u.connMu.Lock()
+		// A user whose count is being written right now is renewed by that
+		// write; don't let one busy user delay everyone else's renewal.
+		if !e.u.connMu.TryLock() {
+			continue
+		}
 		a.mu.Lock()
+		if a.users[e.id] != e.u {
+			// Evicted and re-created meanwhile: the new entry owns the count.
+			a.mu.Unlock()
+			e.u.connMu.Unlock()
+			continue
+		}
 		n := e.u.active
 		if e.u.maxConns <= 0 {
 			n = 0 // cap removed: withdraw our count
