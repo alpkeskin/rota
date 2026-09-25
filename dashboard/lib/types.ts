@@ -149,11 +149,89 @@ export interface Settings {
   }
 }
 
+export type Role = "viewer" | "operator" | "admin"
+
+/** The signed-in principal (GET /auth/me). */
+export interface Me {
+  id: number
+  username: string
+  role: Role
+  via: "session" | "api_key"
+}
+
 export interface AuthResponse {
   token: string
-  user: {
-    username: string
-  }
+  user: Me
+}
+
+export interface Account {
+  id: number
+  username: string
+  role: Role
+  enabled: boolean
+  last_login_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateAccountRequest {
+  username: string
+  password: string
+  role: Role
+}
+
+export interface UpdateAccountRequest {
+  role?: Role
+  enabled?: boolean
+  password?: string
+}
+
+export interface ApiKey {
+  id: number
+  account_id: number
+  username: string
+  name: string
+  prefix: string
+  role: Role
+  created_at: string
+  expires_at?: string
+  last_used_at?: string
+  revoked_at?: string
+  /** False when the owning account is disabled (the key then doesn't work). */
+  owner_enabled: boolean
+  /** The key's role capped by its owner's current role. */
+  effective_role: Role
+}
+
+export interface CreateApiKeyRequest {
+  current_password: string
+  name: string
+  role?: Role
+  expires_in_days?: number
+}
+
+export interface CreateApiKeyResponse extends ApiKey {
+  key: string
+}
+
+export interface AuditEntry {
+  id: number
+  at: string
+  actor_type: "session" | "api_key" | "anonymous"
+  actor_id?: number
+  actor_name: string
+  action: string
+  resource: string
+  status: number
+  ip: string
+  details?: Record<string, unknown>
+}
+
+export interface AuditLogResponse {
+  entries: AuditEntry[]
+  total: number
+  page: number
+  limit: number
 }
 
 export interface ApiError {
@@ -367,8 +445,21 @@ export interface ProxyUser {
   fallback_pool_ids: number[]
   max_retries: number
   requests_per_minute: number
+  /** 0 = unlimited. Proxied bytes (up + down) per calendar month, UTC. */
+  monthly_bandwidth_limit_bytes: number
+  /** 0 = unlimited. Open requests and tunnels at once. */
+  max_concurrent_connections: number
+  /** This month's usage (list responses). */
+  bandwidth_used_bytes?: number
+  has_export_token?: boolean
+  export_token_created_at?: string
   created_at: string
   updated_at: string
+}
+
+export interface ExportTokenResponse {
+  token: string
+  created_at: string
 }
 
 export interface CreateProxyUserRequest {
@@ -380,6 +471,8 @@ export interface CreateProxyUserRequest {
   fallback_pool_ids: number[]
   max_retries: number
   requests_per_minute?: number
+  monthly_bandwidth_limit_bytes?: number
+  max_concurrent_connections?: number
 }
 
 export interface UpdateProxyUserRequest {
@@ -390,6 +483,8 @@ export interface UpdateProxyUserRequest {
   fallback_pool_ids?: number[]
   max_retries?: number
   requests_per_minute?: number
+  monthly_bandwidth_limit_bytes?: number
+  max_concurrent_connections?: number
 }
 
 export interface CreatePoolRequest {

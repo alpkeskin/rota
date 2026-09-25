@@ -1,37 +1,43 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/alpkeskin/rota/core/internal/auth"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
-	"github.com/golang-jwt/jwt/v5"
 )
 
-// AuthHandler handles authentication endpoints
+// AuthHandler handles sign-in and the signed-in account's own credentials.
 type AuthHandler struct {
-	settingsRepo *repository.SettingsRepository
-	adminRepo    *repository.AdminRepository
-	logger       *logger.Logger
-	jwtSecret    []byte
+	guard     *PasswordConfirmGuard
+	accounts  *repository.AccountRepository
+	audit     *repository.AuditRepository
+	logger    *logger.Logger
+	jwtSecret []byte
 }
 
 // NewAuthHandler creates a new AuthHandler
-func NewAuthHandler(settingsRepo *repository.SettingsRepository, adminRepo *repository.AdminRepository, log *logger.Logger, jwtSecret, _, _ string) *AuthHandler {
+func NewAuthHandler(accounts *repository.AccountRepository, audit *repository.AuditRepository, guard *PasswordConfirmGuard, log *logger.Logger, jwtSecret string) *AuthHandler {
 	return &AuthHandler{
-		settingsRepo: settingsRepo,
-		adminRepo:    adminRepo,
-		logger:       log,
-		jwtSecret:    []byte(jwtSecret),
+		guard:     guard,
+		accounts:  accounts,
+		audit:     audit,
+		logger:    log,
+		jwtSecret: []byte(jwtSecret),
 	}
 }
 
 // Login handles user login for dashboard/API access
+//
 //	@Summary		User login
 //	@Description	Authenticate user and receive JWT token
 //	@Tags			auth
@@ -49,37 +55,84 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify against DB (bcrypt)
-	if err := h.adminRepo.Authenticate(r.Context(), req.Username, req.Password); err != nil {
+	acct, err := h.accounts.Authenticate(r.Context(), req.Username, req.Password)
+	if err != nil {
+		if !errors.Is(err, repository.ErrInvalidCredentials) {
+			h.logger.Error("login lookup failed", "error", err)
+			h.errorResponse(w, http.StatusServiceUnavailable, "Authentication temporarily unavailable")
+			return
+		}
 		h.logger.Warn("failed login attempt", "username", req.Username)
+		h.recordLogin(r, nil, req.Username, http.StatusUnauthorized)
 		h.errorResponse(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
-	// Generate JWT token
-	token, err := h.generateToken(req.Username)
+	token, err := auth.IssueSession(h.jwtSecret, acct.ID, acct.TokenVersion, acct.Username, time.Now())
 	if err != nil {
 		h.logger.Error("failed to generate token", "error", err)
 		h.errorResponse(w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
+	if err := h.accounts.TouchLogin(r.Context(), acct.ID); err != nil {
+		h.logger.Warn("failed to record login time", "error", err)
+	}
+	h.recordLogin(r, acct, acct.Username, http.StatusOK)
 
-	response := models.LoginResponse{
+	h.logger.Info("successful login", "username", acct.Username)
+	h.jsonResponse(w, http.StatusOK, models.LoginResponse{
 		Token: token,
 		User: models.UserInfoResponse{
-			Username: req.Username,
+			ID: acct.ID, Username: acct.Username, Role: acct.Role, Via: string(auth.PrincipalSession),
 		},
-	}
-
-	h.logger.Info("successful login", "username", req.Username)
-	h.jsonResponse(w, http.StatusOK, response)
+	})
 }
 
-// ChangePassword handles password change for the currently logged-in admin
+// recordLogin writes a login attempt to the audit log. Failed attempts are
+// attributed to the username that was tried.
+func (h *AuthHandler) recordLogin(r *http.Request, acct *models.Account, username string, status int) {
+	e := models.AuditEntry{
+		ActorType: "anonymous",
+		ActorName: auditName(username),
+		Action:    "auth.login",
+		Status:    status,
+		IP:        requestIP(r),
+	}
+	if acct != nil {
+		id := acct.ID
+		e.ActorType, e.ActorID = string(auth.PrincipalSession), &id
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := h.audit.Record(ctx, e); err != nil {
+		h.logger.Error("failed to write audit entry", "action", e.Action, "error", err)
+	}
+}
+
+// auditName makes an attacker-supplied username safe to store as an actor
+// name: valid UTF-8, at most 255 characters (the column size), so an
+// oversized or malformed name can't make the audit insert fail.
+func auditName(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if utf8.RuneCountInString(s) > 255 {
+		s = string([]rune(s)[:254]) + "…"
+	}
+	return s
+}
+
+func requestIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// ChangePassword changes the signed-in account's password (and optionally
+// username). Other sessions are signed out; the response carries a fresh
+// token for this one.
 func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
-	// Extract username from JWT
-	username, err := h.usernameFromRequest(r)
-	if err != nil {
+	p := auth.FromContext(r.Context())
+	if p == nil {
 		h.errorResponse(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
@@ -93,103 +146,89 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-
 	if req.CurrentPassword == "" || req.NewPassword == "" {
 		h.errorResponse(w, http.StatusBadRequest, "current_password and new_password are required")
 		return
 	}
 
-	// Change username if requested
-	newUsername := username
-	if req.NewUsername != "" && req.NewUsername != username {
-		if err := h.adminRepo.ChangeUsername(r.Context(), username, req.NewUsername, req.CurrentPassword); err != nil {
-			h.errorResponse(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		newUsername = req.NewUsername
-		username = newUsername
-	}
-
-	// Change password
-	if err := h.adminRepo.ChangePassword(r.Context(), username, req.CurrentPassword, req.NewPassword); err != nil {
-		h.errorResponse(w, http.StatusBadRequest, err.Error())
+	acct, err := h.accounts.ChangeOwnCredentials(r.Context(), p.AccountID, p.TokenVersion, req.CurrentPassword, req.NewPassword, req.NewUsername)
+	if errors.Is(err, repository.ErrWrongPassword) && h.guard.Failed(r.Context(), p, requestIP(r)) {
+		h.errorResponse(w, http.StatusUnauthorized, "too many wrong passwords; you have been signed out")
 		return
 	}
-
-	// Issue a new token with updated username
-	token, err := h.generateToken(newUsername)
+	if err != nil {
+		h.accountError(w, err)
+		return
+	}
+	h.guard.Succeeded(p.AccountID)
+	token, err := auth.IssueSession(h.jwtSecret, acct.ID, acct.TokenVersion, acct.Username, time.Now())
 	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to generate token")
 		return
 	}
 
-	h.logger.Info("admin password changed", "username", newUsername)
+	h.logger.Info("account password changed", "username", acct.Username)
 	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"message":  "Password updated successfully",
-		"username": newUsername,
+		"username": acct.Username,
 		"token":    token,
 	})
 }
 
-// GetAdminInfo returns current admin username
-func (h *AuthHandler) GetAdminInfo(w http.ResponseWriter, r *http.Request) {
-	username, err := h.adminRepo.GetUsername(r.Context())
-	if err != nil {
-		h.errorResponse(w, http.StatusInternalServerError, "Failed to get admin info")
+// SignOutEverywhere revokes every session of the signed-in account,
+// including the current one.
+func (h *AuthHandler) SignOutEverywhere(w http.ResponseWriter, r *http.Request) {
+	p := auth.FromContext(r.Context())
+	if p == nil {
+		h.errorResponse(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
-	h.jsonResponse(w, http.StatusOK, map[string]string{"username": username})
+	if _, err := h.accounts.RevokeSessions(r.Context(), p.AccountID); err != nil {
+		h.accountError(w, err)
+		return
+	}
+	h.jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// usernameFromRequest extracts the username from the JWT Bearer token
-func (h *AuthHandler) usernameFromRequest(r *http.Request) (string, error) {
-	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return "", fmt.Errorf("missing token")
+// GetAdminInfo returns the signed-in account (GET /auth/me).
+func (h *AuthHandler) GetAdminInfo(w http.ResponseWriter, r *http.Request) {
+	p := auth.FromContext(r.Context())
+	if p == nil {
+		h.errorResponse(w, http.StatusUnauthorized, "Unauthorized")
+		return
 	}
-	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-		// Restrict to HMAC signing to prevent alg-confusion attacks
-		// (mirrors JWTMiddleware in api/middleware.go).
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		return h.jwtSecret, nil
+	h.jsonResponse(w, http.StatusOK, models.UserInfoResponse{
+		ID: p.AccountID, Username: p.Username, Role: string(p.Role), Via: string(p.Type),
 	})
-	if err != nil || !token.Valid {
-		return "", fmt.Errorf("invalid token")
-	}
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return "", fmt.Errorf("invalid claims")
-	}
-	username, _ := claims["username"].(string)
-	return username, nil
 }
 
-// generateToken generates a JWT token for the user
-func (h *AuthHandler) generateToken(username string) (string, error) {
-	claims := jwt.MapClaims{
-		"username": username,
-		"exp":      time.Now().Add(24 * time.Hour).Unix(),
-		"iat":      time.Now().Unix(),
-	}
+// accountError maps repository errors to responses.
+func (h *AuthHandler) accountError(w http.ResponseWriter, err error) {
+	writeAccountError(w, h.logger, err)
+}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(h.jwtSecret)
+// writeAccountError maps account/API-key repository errors to HTTP responses.
+func writeAccountError(w http.ResponseWriter, log *logger.Logger, err error) {
+	var verr *repository.ValidationError
+	switch {
+	case errors.As(err, &verr):
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: verr.Msg})
+	case errors.Is(err, repository.ErrAccountNotFound), errors.Is(err, repository.ErrAPIKeyNotFound):
+		writeJSON(w, http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
+	case errors.Is(err, repository.ErrLastAdmin), errors.Is(err, repository.ErrUsernameTaken), errors.Is(err, repository.ErrStaleSession):
+		writeJSON(w, http.StatusConflict, models.ErrorResponse{Error: err.Error()})
+	default:
+		log.Error("account operation failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "internal server error"})
+	}
 }
 
 // jsonResponse sends a JSON response
 func (h *AuthHandler) jsonResponse(w http.ResponseWriter, statusCode int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(data)
+	writeJSON(w, statusCode, data)
 }
 
 // errorResponse sends an error JSON response
 func (h *AuthHandler) errorResponse(w http.ResponseWriter, statusCode int, message string) {
-	response := models.ErrorResponse{
-		Error: message,
-	}
-	h.jsonResponse(w, statusCode, response)
+	writeJSON(w, statusCode, models.ErrorResponse{Error: message})
 }

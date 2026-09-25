@@ -21,7 +21,7 @@ func connectViaSocks5(p *models.Proxy, host string) (net.Conn, error) {
 		}
 		auth = &proxyDialer.Auth{User: *p.Username, Password: pw}
 	}
-	dialer, err := proxyDialer.SOCKS5("tcp", p.Address, auth, proxyDialer.Direct)
+	dialer, err := proxyDialer.SOCKS5("tcp", p.Address, auth, socksForward)
 	if err != nil {
 		return nil, fmt.Errorf("socks5 dialer: %w", err)
 	}
@@ -68,6 +68,9 @@ func connectViaHTTPStandalone(p *models.Proxy, host string, timeout time.Duratio
 	}
 	if !strings.Contains(line, "200") {
 		conn.Close()
+		if strings.Contains(line, " 407") {
+			return nil, fmt.Errorf("CONNECT to %s rejected: %s: %w", p.Address, line, errProxyAuth)
+		}
 		return nil, fmt.Errorf("CONNECT to %s rejected: %s", p.Address, line)
 	}
 
@@ -115,3 +118,7 @@ func readCONNECTResponse(conn net.Conn) (string, error) {
 	}
 	return statusLine, nil
 }
+
+// socksForward dials SOCKS5 upstreams with a bound, so an unreachable proxy
+// can't hold a request (or a shutdown) for the OS default of minutes.
+var socksForward = &net.Dialer{Timeout: 30 * time.Second}

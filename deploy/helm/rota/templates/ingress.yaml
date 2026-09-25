@@ -1,0 +1,52 @@
+{{- if .Values.ingress.enabled }}
+{{- $fullname := include "rota.fullname" . }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "rota.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # Same routing as the bundled Caddyfile: API, WebSockets and docs
+          # to the core, everything else to the dashboard.
+          {{- range list "/api" "/ws" "/docs" }}
+          - path: {{ . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-api
+                port:
+                  name: api
+          {{- end }}
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $fullname }}-api
+                port:
+                  name: api
+          {{- if .Values.dashboard.enabled }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-dashboard
+                port:
+                  name: http
+          {{- end }}
+{{- end }}

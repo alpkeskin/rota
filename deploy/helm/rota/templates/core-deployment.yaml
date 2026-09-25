@@ -1,0 +1,198 @@
+{{- if not .Values.database.host }}
+{{- fail "database.host is required: Rota needs PostgreSQL with TimescaleDB (not bundled with this chart)" }}
+{{- end }}
+{{- if and (not .Values.database.password) (not .Values.database.existingSecret) }}
+{{- fail "set database.password or database.existingSecret" }}
+{{- end }}
+{{- $secretData := include "rota.secretData" . | trim }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rota.fullname" . }}-core
+  labels:
+    {{- include "rota.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core
+spec:
+  {{- if not .Values.core.autoscaling.enabled }}
+  replicas: {{ .Values.core.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "rota.coreSelectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      annotations:
+        # Roll the pods when chart-managed credentials change.
+        checksum/secret: {{ $secretData | sha256sum }}
+        {{- with .Values.core.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "rota.coreSelectorLabels" . | nindent 8 }}
+        {{- with .Values.core.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "rota.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.core.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.core.podSecurityContext | nindent 8 }}
+      containers:
+        - name: core
+          image: {{ include "rota.coreImage" . }}
+          imagePullPolicy: {{ .Values.core.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.core.securityContext | nindent 12 }}
+          ports:
+            - name: proxy
+              containerPort: {{ .Values.core.proxyPort }}
+              protocol: TCP
+            - name: api
+              containerPort: {{ .Values.core.apiPort }}
+              protocol: TCP
+            {{- if .Values.core.socksPort }}
+            - name: socks
+              containerPort: {{ .Values.core.socksPort }}
+              protocol: TCP
+            {{- end }}
+          env:
+            # Referenced by OTEL_RESOURCE_ATTRIBUTES below; must come first.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PROXY_PORT
+              value: {{ .Values.core.proxyPort | quote }}
+            - name: API_PORT
+              value: {{ .Values.core.apiPort | quote }}
+            - name: SOCKS_PORT
+              value: {{ .Values.core.socksPort | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.core.logLevel | quote }}
+            - name: SHUTDOWN_DRAIN_SECONDS
+              value: {{ .Values.core.shutdownDrainSeconds | quote }}
+            - name: TRUST_PROXY_HEADERS
+              value: {{ .Values.core.trustProxyHeaders | quote }}
+            - name: CORS_ALLOWED_ORIGINS
+              value: {{ .Values.core.corsAllowedOrigins | quote }}
+            - name: AUDIT_LOG_RETENTION_DAYS
+              value: {{ .Values.core.auditLogRetentionDays | quote }}
+            - name: DB_HOST
+              value: {{ .Values.database.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.database.port | quote }}
+            - name: DB_NAME
+              value: {{ .Values.database.name | quote }}
+            - name: DB_USER
+              value: {{ .Values.database.user | quote }}
+            - name: DB_SSLMODE
+              value: {{ .Values.database.sslMode | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.database.existingSecret }}
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.existingSecretKey }}
+                  {{- else }}
+                  name: {{ include "rota.secretName" . }}
+                  key: DB_PASSWORD
+                  {{- end }}
+            {{- if include "rota.redisEnabled" . }}
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.redis.existingSecret }}
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.existingSecretKey }}
+                  {{- else }}
+                  name: {{ include "rota.secretName" . }}
+                  key: REDIS_URL
+                  {{- end }}
+            - name: REDIS_KEY_PREFIX
+              value: {{ .Values.redis.keyPrefix | quote }}
+            {{- end }}
+            {{- if .Values.tracing.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.tracing.otlpEndpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.tracing.serviceName | quote }}
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.namespace.name={{ .Release.Namespace }},k8s.pod.name=$(POD_NAME)"
+            {{- end }}
+            {{- with .Values.core.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            {{- if .Values.secrets.existingSecret }}
+            - secretRef:
+                name: {{ .Values.secrets.existingSecret }}
+            {{- else if $secretData }}
+            - secretRef:
+                name: {{ include "rota.secretName" . }}
+            {{- end }}
+            {{- with .Values.core.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: api
+            periodSeconds: {{ .Values.core.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.core.startupProbe.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: api
+            periodSeconds: {{ .Values.core.livenessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.core.livenessProbe.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: api
+            periodSeconds: {{ .Values.core.readinessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.core.readinessProbe.failureThreshold }}
+          resources:
+            {{- toYaml .Values.core.resources | nindent 12 }}
+          volumeMounts:
+            # GeoIP database downloads and temporary files; the root
+            # filesystem is read-only.
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.core.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.core.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.core.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.core.topologySpread }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "rota.coreSelectorLabels" . | nindent 14 }}
+      {{- end }}

@@ -2,7 +2,14 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/models"
@@ -27,6 +34,10 @@ func (r *UserRepository) List(ctx context.Context) ([]models.ProxyUser, error) {
 		       COALESCE(pu.allow_working_proxies_export, false),
 		       pu.main_pool_id, pu.fallback_pool_ids, pu.max_retries,
 		       COALESCE(pu.requests_per_minute, 0),
+		       pu.monthly_bandwidth_limit_bytes, pu.max_concurrent_connections,
+		       COALESCE((SELECT b.bytes_up + b.bytes_down FROM proxy_user_bandwidth b
+		                 WHERE b.user_id = pu.id AND b.month = date_trunc('month', NOW() AT TIME ZONE 'UTC')::date), 0),
+		       pu.export_token_hash IS NOT NULL, pu.export_token_created_at,
 		       pu.created_at, pu.updated_at,
 		       COALESCE(pp.name, '') AS main_pool_name
 		FROM proxy_users pu
@@ -46,6 +57,8 @@ func (r *UserRepository) List(ctx context.Context) ([]models.ProxyUser, error) {
 			&u.ID, &u.Username, &u.Enabled, &u.AllowWorkingProxiesExport,
 			&u.MainPoolID, &u.FallbackPoolIDs, &u.MaxRetries,
 			&u.RequestsPerMinute,
+			&u.MonthlyBandwidthLimitBytes, &u.MaxConcurrentConnections, &u.BandwidthUsedBytes,
+			&u.HasExportToken, &u.ExportTokenCreatedAt,
 			&u.CreatedAt, &u.UpdatedAt, &u.MainPoolName,
 		); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
@@ -63,23 +76,24 @@ func (r *UserRepository) List(ctx context.Context) ([]models.ProxyUser, error) {
 
 // GetByID returns a user by primary key (includes password_hash)
 func (r *UserRepository) GetByID(ctx context.Context, id int) (*models.ProxyUser, error) {
-	return r.scan(ctx, `SELECT id, username, password_hash, enabled,
-		COALESCE(allow_working_proxies_export, false),
-		main_pool_id, fallback_pool_ids, max_retries,
-		COALESCE(requests_per_minute, 0),
-		created_at, updated_at
-		FROM proxy_users WHERE id = $1`, id)
+	return r.scan(ctx, proxyUserSelect+`id = $1`, id)
 }
 
 // GetByUsername returns a user by username (includes password_hash — used for auth)
 func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*models.ProxyUser, error) {
-	return r.scan(ctx, `SELECT id, username, password_hash, enabled,
+	return r.scan(ctx, proxyUserSelect+`username = $1`, username)
+}
+
+// proxyUserSelect is the column list scan expects, followed by an open WHERE.
+// Keep it the single source of truth so every lookup scans the same shape.
+const proxyUserSelect = `SELECT id, username, password_hash, enabled,
 		COALESCE(allow_working_proxies_export, false),
 		main_pool_id, fallback_pool_ids, max_retries,
 		COALESCE(requests_per_minute, 0),
+		monthly_bandwidth_limit_bytes, max_concurrent_connections,
+		export_token_hash IS NOT NULL, export_token_created_at,
 		created_at, updated_at
-		FROM proxy_users WHERE username = $1`, username)
-}
+		FROM proxy_users WHERE `
 
 func (r *UserRepository) scan(ctx context.Context, query string, arg interface{}) (*models.ProxyUser, error) {
 	var u models.ProxyUser
@@ -87,6 +101,8 @@ func (r *UserRepository) scan(ctx context.Context, query string, arg interface{}
 		&u.ID, &u.Username, &u.PasswordHash, &u.Enabled, &u.AllowWorkingProxiesExport,
 		&u.MainPoolID, &u.FallbackPoolIDs, &u.MaxRetries,
 		&u.RequestsPerMinute,
+		&u.MonthlyBandwidthLimitBytes, &u.MaxConcurrentConnections,
+		&u.HasExportToken, &u.ExportTokenCreatedAt,
 		&u.CreatedAt, &u.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -117,29 +133,33 @@ func (r *UserRepository) Create(ctx context.Context, req models.CreateProxyUserR
 		fbIDs = []int{}
 	}
 
-	var u models.ProxyUser
+	if req.RequestsPerMinute < 0 || req.MonthlyBandwidthLimitBytes < 0 || req.MaxConcurrentConnections < 0 {
+		return nil, invalid("limits must not be negative (0 = unlimited)")
+	}
+
+	var id int
 	err = r.db.Pool.QueryRow(ctx, `
-		INSERT INTO proxy_users (username, password_hash, enabled, allow_working_proxies_export, main_pool_id, fallback_pool_ids, max_retries, requests_per_minute)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, username, enabled, allow_working_proxies_export, main_pool_id, fallback_pool_ids, max_retries,
-		          COALESCE(requests_per_minute, 0), created_at, updated_at
-	`, req.Username, string(hash), req.Enabled, req.AllowWorkingProxiesExport, req.MainPoolID, fbIDs, maxRetries, req.RequestsPerMinute,
-	).Scan(&u.ID, &u.Username, &u.Enabled, &u.AllowWorkingProxiesExport, &u.MainPoolID, &u.FallbackPoolIDs,
-		&u.MaxRetries, &u.RequestsPerMinute, &u.CreatedAt, &u.UpdatedAt)
+		INSERT INTO proxy_users (username, password_hash, enabled, allow_working_proxies_export, main_pool_id, fallback_pool_ids,
+		                         max_retries, requests_per_minute, monthly_bandwidth_limit_bytes, max_concurrent_connections)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id
+	`, req.Username, string(hash), req.Enabled, req.AllowWorkingProxiesExport, req.MainPoolID, fbIDs, maxRetries,
+		req.RequestsPerMinute, req.MonthlyBandwidthLimitBytes, req.MaxConcurrentConnections,
+	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
 	}
-	if u.FallbackPoolIDs == nil {
-		u.FallbackPoolIDs = []int{}
-	}
-	return &u, nil
+	return r.GetByID(ctx, id)
 }
 
 // Update modifies an existing user
 func (r *UserRepository) Update(ctx context.Context, id int, req models.UpdateProxyUserRequest) (*models.ProxyUser, error) {
 	current, err := r.GetByID(ctx, id)
-	if err != nil || current == nil {
-		return nil, fmt.Errorf("user not found: %w", err)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, nil
 	}
 
 	enabled := current.Enabled
@@ -175,6 +195,17 @@ func (r *UserRepository) Update(ctx context.Context, id int, req models.UpdatePr
 	if req.RequestsPerMinute != nil {
 		requestsPerMin = *req.RequestsPerMinute
 	}
+	bandwidthLimit := current.MonthlyBandwidthLimitBytes
+	if req.MonthlyBandwidthLimitBytes != nil {
+		bandwidthLimit = *req.MonthlyBandwidthLimitBytes
+	}
+	maxConns := current.MaxConcurrentConnections
+	if req.MaxConcurrentConnections != nil {
+		maxConns = *req.MaxConcurrentConnections
+	}
+	if requestsPerMin < 0 || bandwidthLimit < 0 || maxConns < 0 {
+		return nil, invalid("limits must not be negative (0 = unlimited)")
+	}
 
 	var hashPtr *string
 	if req.Password != "" {
@@ -186,34 +217,56 @@ func (r *UserRepository) Update(ctx context.Context, id int, req models.UpdatePr
 		hashPtr = &s
 	}
 
-	var u models.ProxyUser
-	err = r.db.Pool.QueryRow(ctx, `
+	tag, err := r.db.Pool.Exec(ctx, `
 		UPDATE proxy_users SET
-			password_hash                = CASE WHEN $1::TEXT IS NOT NULL THEN $1 ELSE password_hash END,
-			enabled                      = $2,
-			allow_working_proxies_export = $3,
-			main_pool_id                 = $4,
-			fallback_pool_ids            = $5,
-			max_retries                  = $6,
-			requests_per_minute          = $7,
-			updated_at                   = NOW()
-		WHERE id = $8
-		RETURNING id, username, enabled, allow_working_proxies_export, main_pool_id, fallback_pool_ids, max_retries,
-		          COALESCE(requests_per_minute, 0), created_at, updated_at
-	`, hashPtr, enabled, allowExport, mainPoolID, fallbackPoolIDs, maxRetries, requestsPerMin, id,
-	).Scan(&u.ID, &u.Username, &u.Enabled, &u.AllowWorkingProxiesExport, &u.MainPoolID, &u.FallbackPoolIDs,
-		&u.MaxRetries, &u.RequestsPerMinute, &u.CreatedAt, &u.UpdatedAt)
-
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
+			password_hash                 = CASE WHEN $1::TEXT IS NOT NULL THEN $1 ELSE password_hash END,
+			enabled                       = $2,
+			allow_working_proxies_export  = $3,
+			main_pool_id                  = $4,
+			fallback_pool_ids             = $5,
+			max_retries                   = $6,
+			requests_per_minute           = $7,
+			monthly_bandwidth_limit_bytes = $8,
+			max_concurrent_connections    = $9,
+			updated_at                    = NOW()
+		WHERE id = $10
+	`, hashPtr, enabled, allowExport, mainPoolID, fallbackPoolIDs, maxRetries, requestsPerMin, bandwidthLimit, maxConns, id)
 	if err != nil {
 		return nil, fmt.Errorf("update user: %w", err)
 	}
-	if u.FallbackPoolIDs == nil {
-		u.FallbackPoolIDs = []int{}
+	if tag.RowsAffected() == 0 {
+		return nil, nil
 	}
-	return &u, nil
+	return r.GetByID(ctx, id)
+}
+
+// AddBandwidth adds proxied bytes to a user's total for the month starting
+// at month (UTC). Usage for users deleted meanwhile is dropped.
+func (r *UserRepository) AddBandwidth(ctx context.Context, userID int, month time.Time, up, down int64) error {
+	_, err := r.db.Pool.Exec(ctx, `
+		INSERT INTO proxy_user_bandwidth (user_id, month, bytes_up, bytes_down)
+		SELECT $1, $2::date, $3, $4 WHERE EXISTS (SELECT 1 FROM proxy_users WHERE id = $1)
+		ON CONFLICT (user_id, month) DO UPDATE SET
+			bytes_up   = proxy_user_bandwidth.bytes_up + EXCLUDED.bytes_up,
+			bytes_down = proxy_user_bandwidth.bytes_down + EXCLUDED.bytes_down,
+			updated_at = NOW()
+	`, userID, month.UTC().Format("2006-01-02"), up, down)
+	if err != nil {
+		return fmt.Errorf("add bandwidth: %w", err)
+	}
+	return nil
+}
+
+// MonthBandwidth returns a user's up+down bytes for the month starting at month.
+func (r *UserRepository) MonthBandwidth(ctx context.Context, userID int, month time.Time) (int64, error) {
+	var total int64
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(bytes_up + bytes_down), 0) FROM proxy_user_bandwidth
+		WHERE user_id = $1 AND month = $2::date`, userID, month.UTC().Format("2006-01-02")).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("month bandwidth: %w", err)
+	}
+	return total, nil
 }
 
 // Delete removes a user
@@ -225,14 +278,91 @@ func (r *UserRepository) Delete(ctx context.Context, id int) error {
 // Authenticate checks username/password and returns the user if valid.
 func (r *UserRepository) Authenticate(ctx context.Context, username, password string) (*models.ProxyUser, error) {
 	u, err := r.GetByUsername(ctx, username)
-	if err != nil || u == nil {
-		return nil, fmt.Errorf("user not found")
+	if err != nil {
+		return nil, err
 	}
-	if !u.Enabled {
-		return nil, fmt.Errorf("user disabled")
+	if u == nil || !u.Enabled {
+		// Same work as a wrong password, so timing doesn't reveal which
+		// usernames exist.
+		bcrypt.CompareHashAndPassword(dummyHash, []byte(password)) //nolint:errcheck // timing only
+		return nil, ErrInvalidCredentials
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
-		return nil, fmt.Errorf("invalid password")
+		return nil, ErrInvalidCredentials
+	}
+	return u, nil
+}
+
+// ExportTokenPrefix marks working-proxies export tokens so they are easy to
+// recognise in configs and secret scanners.
+const ExportTokenPrefix = "rota_exp_"
+
+// ErrUserNotFound is returned when the target proxy user does not exist.
+var ErrUserNotFound = errors.New("user not found")
+
+// ErrInvalidCredentials is returned when credentials or an export token don't
+// match an enabled user. Any other error from the Authenticate* methods is an
+// infrastructure failure (e.g. the database is unavailable).
+var ErrInvalidCredentials = errors.New("invalid credentials")
+
+func hashExportToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// RotateExportToken issues a new export token for the user, replacing (and so
+// revoking) any previous one. Only a SHA-256 hash is stored; the plaintext
+// token is returned to the caller exactly once.
+func (r *UserRepository) RotateExportToken(ctx context.Context, id int) (string, time.Time, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", time.Time{}, fmt.Errorf("generate export token: %w", err)
+	}
+	token := ExportTokenPrefix + base64.RawURLEncoding.EncodeToString(buf)
+
+	var createdAt time.Time
+	err := r.db.Pool.QueryRow(ctx, `
+		UPDATE proxy_users
+		SET export_token_hash = $1, export_token_created_at = NOW(), updated_at = NOW()
+		WHERE id = $2
+		RETURNING export_token_created_at
+	`, hashExportToken(token), id).Scan(&createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", time.Time{}, ErrUserNotFound
+	}
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("store export token: %w", err)
+	}
+	return token, createdAt, nil
+}
+
+// RevokeExportToken removes the user's export token.
+func (r *UserRepository) RevokeExportToken(ctx context.Context, id int) error {
+	tag, err := r.db.Pool.Exec(ctx, `
+		UPDATE proxy_users
+		SET export_token_hash = NULL, export_token_created_at = NULL, updated_at = NOW()
+		WHERE id = $1
+	`, id)
+	if err != nil {
+		return fmt.Errorf("revoke export token: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// AuthenticateExportToken resolves an export token to its enabled user.
+func (r *UserRepository) AuthenticateExportToken(ctx context.Context, token string) (*models.ProxyUser, error) {
+	if !strings.HasPrefix(token, ExportTokenPrefix) {
+		return nil, ErrInvalidCredentials
+	}
+	u, err := r.scan(ctx, proxyUserSelect+`export_token_hash = $1`, hashExportToken(token))
+	if err != nil {
+		return nil, err
+	}
+	if u == nil || !u.Enabled {
+		return nil, ErrInvalidCredentials
 	}
 	return u, nil
 }

@@ -58,6 +58,19 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	// Never expose proxy authentication password in response
 	settings.Authentication.Password = ""
+	// The MaxMind license key and health-check header values are
+	// credentials; only admins (who can change settings) see them.
+	if !canSeeSecrets(r.Context()) {
+		if settings.GeoIP.MaxMindLicenseKey != "" {
+			settings.GeoIP.MaxMindLicenseKey = Redacted
+		}
+		// A custom download URL usually embeds the license key
+		// (?license_key=, or ACCOUNT:KEY@ userinfo).
+		if settings.GeoIP.MaxMindURL != "" {
+			settings.GeoIP.MaxMindURL = redactURL(settings.GeoIP.MaxMindURL)
+		}
+		settings.HealthCheck.Headers = redactHeaders(settings.HealthCheck.Headers)
+	}
 
 	h.jsonResponse(w, http.StatusOK, settings)
 }
@@ -93,6 +106,16 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if settings.Authentication.Password == "" {
 		settings.Authentication.Password = current.Authentication.Password
 	}
+	// A form loaded while the caller couldn't see secrets carries redacted
+	// placeholders; they mean "keep", never "set to the placeholder".
+	if settings.GeoIP.MaxMindLicenseKey == Redacted {
+		settings.GeoIP.MaxMindLicenseKey = current.GeoIP.MaxMindLicenseKey
+	}
+	if current.GeoIP.MaxMindURL != "" && settings.GeoIP.MaxMindURL == redactURL(current.GeoIP.MaxMindURL) &&
+		settings.GeoIP.MaxMindURL != current.GeoIP.MaxMindURL {
+		settings.GeoIP.MaxMindURL = current.GeoIP.MaxMindURL
+	}
+	settings.HealthCheck.Headers = restoreRedactedHeaders(settings.HealthCheck.Headers, current.HealthCheck.Headers)
 
 	// Validate settings
 	if err := h.validateSettings(&settings); err != nil {
@@ -155,6 +178,11 @@ func (h *SettingsHandler) Reset(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("failed to get settings after reset", "error", err)
 		h.errorResponse(w, http.StatusInternalServerError, "Failed to get settings")
 		return
+	}
+
+	// Apply the defaults now, as Update does.
+	if h.onSettingsUpdate != nil {
+		h.onSettingsUpdate(r.Context())
 	}
 
 	response := map[string]interface{}{

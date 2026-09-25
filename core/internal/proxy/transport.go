@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -75,6 +76,9 @@ func ClearTransportCache() {
 	})
 }
 
+// proxyDial connects to HTTP(S) upstream proxies.
+var proxyDial = &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+
 // CreateProxyTransport creates an HTTP transport configured for the given proxy
 // This is shared between proxy handler and health checker
 func CreateProxyTransport(p *models.Proxy) (*http.Transport, error) {
@@ -89,9 +93,9 @@ func CreateProxyTransport(p *models.Proxy) (*http.Transport, error) {
 			// Don't specify CipherSuites to accept all available ciphers for maximum compatibility
 			// This is acceptable since InsecureSkipVerify is already true
 		},
-		// Timeouts for proxy connections
-		// NOTE: Do NOT set DialContext here - it will override Proxy settings!
-		// Let http.Transport handle proxy dialing automatically
+		// Timeouts for proxy connections. Without a dial timeout an
+		// unreachable proxy fails only by the client timeout, which reads
+		// as inconclusive rather than as a proxy fault.
 		TLSHandshakeTimeout:   30 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
 		ExpectContinueTimeout: 10 * time.Second,
@@ -127,6 +131,9 @@ func CreateProxyTransport(p *models.Proxy) (*http.Transport, error) {
 	case "http", "https":
 		// Set proxy URL - http.Transport will handle authentication headers automatically
 		transport.Proxy = http.ProxyURL(parsedURL)
+		// DialContext dials the proxy itself (the transport then speaks to
+		// it per Proxy), so this bounds connecting to the proxy.
+		transport.DialContext = proxyDial.DialContext
 	case "socks4", "socks4a":
 		// Create SOCKS4/SOCKS4A dialer using h12.io/socks
 		// The Dial function accepts URI format: socks4://[user@]host:port
@@ -146,7 +153,7 @@ func CreateProxyTransport(p *models.Proxy) (*http.Transport, error) {
 			}
 		}
 
-		dialer, err := proxyDialer.SOCKS5("tcp", p.Address, auth, proxyDialer.Direct)
+		dialer, err := proxyDialer.SOCKS5("tcp", p.Address, auth, socksForward)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
 		}

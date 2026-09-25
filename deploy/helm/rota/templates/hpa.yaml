@@ -1,0 +1,31 @@
+{{- if .Values.core.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "rota.fullname" . }}-core
+  labels:
+    {{- include "rota.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "rota.fullname" . }}-core
+  minReplicas: {{ .Values.core.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.core.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.core.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    # Scaling in closes long-lived tunnels on the removed pods; do it slowly.
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 300
+{{- end }}

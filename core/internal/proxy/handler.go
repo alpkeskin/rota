@@ -3,17 +3,22 @@ package proxy
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/tracing"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 	proxyDialer "golang.org/x/net/proxy"
 )
 
@@ -27,6 +32,60 @@ type UpstreamProxyHandler struct {
 	tracker         *UsageTracker
 	logger          *logger.Logger
 	removeUnhealthy bool
+	// accountant enforces per-user limits and meters bytes; nil disables both.
+	accountant *UsageAccountant
+
+	// Open tunnels, so shutdown can close them (net/http doesn't track
+	// hijacked connections) and meter their last bytes before exiting.
+	tunnelsMu  sync.Mutex
+	tunnels    map[uint64]func()
+	tunnelSeq  uint64
+	tunnelsWG  sync.WaitGroup
+	tunnelsOff bool
+}
+
+// trackTunnel registers an open tunnel's closer; ok is false once shutdown
+// has begun (the caller should drop the tunnel).
+func (h *UpstreamProxyHandler) trackTunnel(closeFn func()) (untrack func(), ok bool) {
+	h.tunnelsMu.Lock()
+	defer h.tunnelsMu.Unlock()
+	if h.tunnelsOff {
+		return func() {}, false
+	}
+	if h.tunnels == nil {
+		h.tunnels = make(map[uint64]func())
+	}
+	h.tunnelSeq++
+	id := h.tunnelSeq
+	h.tunnels[id] = closeFn
+	h.tunnelsWG.Add(1)
+	return func() {
+		h.tunnelsMu.Lock()
+		delete(h.tunnels, id)
+		h.tunnelsMu.Unlock()
+		h.tunnelsWG.Done()
+	}, true
+}
+
+// CloseTunnels closes every open tunnel and waits (until ctx ends) for their
+// handlers to finish counting.
+func (h *UpstreamProxyHandler) CloseTunnels(ctx context.Context) {
+	h.tunnelsMu.Lock()
+	h.tunnelsOff = true
+	closers := make([]func(), 0, len(h.tunnels))
+	for _, fn := range h.tunnels {
+		closers = append(closers, fn)
+	}
+	h.tunnelsMu.Unlock()
+	for _, fn := range closers {
+		fn()
+	}
+	done := make(chan struct{})
+	go func() { h.tunnelsWG.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // getSettings returns the current rotation settings under the read lock.
@@ -73,6 +132,63 @@ func NewUpstreamProxyHandler(
 	}
 }
 
+// RequestIDHeader carries the proxy's request ID on error responses so a
+// client-side failure can be matched to the server log entry.
+const RequestIDHeader = "X-Rota-Request-Id"
+
+// writeUpstreamError answers a failed upstream attempt with a generic 502.
+// The underlying error names upstream proxy addresses, pools and dial
+// details, so it is logged server-side and never sent to the client.
+func writeUpstreamError(w http.ResponseWriter, requestID string) {
+	w.Header().Set(RequestIDHeader, requestID)
+	http.Error(w, "upstream proxy request failed (request id "+requestID+")", http.StatusBadGateway)
+}
+
+// errRoutingNeedsPool means the request asked for country/city targeting or
+// a sticky session but the user has no pool to apply it to.
+var errRoutingNeedsPool = errors.New("country, city and session options need a pool assigned to the proxy user")
+
+// userChain returns the request's pool chain when it should be used: the
+// user has at least one pool. Users without pools use the global rotation.
+func userChain(preq *ProxyRequest) *PoolChain {
+	if preq == nil || preq.Chain == nil || preq.Chain.Len() == 0 {
+		return nil
+	}
+	return preq.Chain
+}
+
+// beginLease admits the request under the user's limits. It returns a nil
+// lease (and no error) for requests that aren't tied to a proxy user.
+func (h *UpstreamProxyHandler) beginLease(ctx context.Context, preq *ProxyRequest) (*Lease, error) {
+	if h.accountant == nil || preq == nil || preq.User == nil {
+		return nil, nil
+	}
+	return h.accountant.Begin(ctx, preq.User)
+}
+
+// writeLimitError answers a request refused by a per-user limit with 429.
+func writeLimitError(w http.ResponseWriter, preq *ProxyRequest, err error) {
+	retry := "60"
+	if errors.Is(err, ErrRateLimited) && preq != nil && preq.User != nil && preq.User.RequestsPerMinute > 0 {
+		// One request's worth of the per-minute budget, rounded up.
+		retry = strconv.Itoa((60 + preq.User.RequestsPerMinute - 1) / preq.User.RequestsPerMinute)
+	}
+	if errors.Is(err, ErrQuotaExceeded) {
+		retry = "" // resets next month; retrying won't help
+	}
+	if retry != "" {
+		w.Header().Set("Retry-After", retry)
+	}
+	http.Error(w, err.Error(), http.StatusTooManyRequests)
+}
+
+// writeRoutingError answers a request whose routing options can't be met.
+// Unlike upstream failures, the reason is the client's to fix, so it's shown.
+func writeRoutingError(w http.ResponseWriter, requestID string, err error) {
+	w.Header().Set(RequestIDHeader, requestID)
+	http.Error(w, err.Error(), http.StatusBadGateway)
+}
+
 // HandleHTTPRequest handles HTTP requests (non-CONNECT) with upstream proxy rotation.
 // It writes the proxied response directly to w.
 func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.Request) {
@@ -89,24 +205,50 @@ func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.
 	// Remove hop-by-hop headers
 	h.removeHopByHopHeaders(r)
 
-	// --- Pool-aware path: if a PoolChain was attached by UserAuthMiddleware, use it ---
 	reqCtx := r.Context()
-	if chain, ok := reqCtx.Value(UserChainContextKey).(*PoolChain); ok && chain != nil {
-		resp, proxyID, err := chain.SendWithRetry(r, reqCtx, h.getSettings(), h.logger)
+	tracing.SetAttributes(reqCtx, attribute.String("rota.request_id", requestID))
+	preq := ProxyRequestFrom(reqCtx)
+	lease, err := h.beginLease(reqCtx, preq)
+	if err != nil {
+		tracing.Fail(reqCtx, err)
+		writeLimitError(w, preq, err)
+		return
+	}
+	defer lease.Release()
+	if r.Body != nil && r.Body != http.NoBody {
+		r.Body = countingReadCloser{ReadCloser: r.Body, count: func(n int64) { countUp(lease, n) }}
+	}
+
+	// --- Pool-aware path: the user's pool chain ---
+	if chain := userChain(preq); chain != nil {
+		resp, proxyID, err := chain.SendWithRetry(r, reqCtx, preq, h.getSettings(), h.logger)
 		duration := int(time.Since(startTime).Milliseconds())
 		if proxyID > 0 {
 			h.recordAsync(proxyID, "", r.URL.String(), r.Method, resp, err, duration, startTime)
 		}
 		if err != nil {
 			h.logger.Error("pool-chain request failed", "request_id", requestID, "error", err)
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			tracing.Fail(reqCtx, err)
+			metrics.ObserveProxyRequest("http", "upstream_error", time.Since(startTime))
+			if errors.Is(err, ErrNoTargetMatch) {
+				writeRoutingError(w, requestID, err)
+				return
+			}
+			writeUpstreamError(w, requestID)
 			return
 		}
-		copyResponse(w, resp)
+		metrics.ObserveProxyRequest("http", "success", time.Since(startTime))
+		h.copyMetered(w, resp, lease)
+		return
+	}
+	if preq != nil && (!preq.Opts.Target.Empty() || preq.Opts.Session != "") {
+		metrics.ObserveProxyRequest("http", "upstream_error", time.Since(startTime))
+		tracing.Fail(reqCtx, errRoutingNeedsPool)
+		writeRoutingError(w, requestID, errRoutingNeedsPool)
 		return
 	}
 
-	// --- Legacy path: global proxy pool ---
+	// --- Global rotation path ---
 	resp, proxyID, err := h.sendWithRetry(r, r.Context())
 	duration := int(time.Since(startTime).Milliseconds())
 
@@ -147,9 +289,12 @@ func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.
 			"error", err,
 			"duration_ms", duration,
 		)
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		metrics.ObserveProxyRequest("http", "upstream_error", time.Since(startTime))
+		tracing.Fail(reqCtx, err)
+		writeUpstreamError(w, requestID)
 		return
 	}
+	metrics.ObserveProxyRequest("http", "success", time.Since(startTime))
 
 	h.logger.Debug("proxy request completed",
 		"source", "proxy",
@@ -158,84 +303,79 @@ func (h *UpstreamProxyHandler) HandleHTTPRequest(w http.ResponseWriter, r *http.
 		"duration_ms", duration,
 	)
 
-	copyResponse(w, resp)
+	h.copyMetered(w, resp, lease)
 }
 
-// HandleConnectRequest handles HTTPS CONNECT requests.
-// It hijacks the client connection, establishes an upstream tunnel,
-// and copies data bidirectionally using splice(2) on Linux.
-func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *http.Request) {
-	startTime := time.Now()
-	host := r.Host
-
-	h.logger.Debug("handling CONNECT request",
-		"source", "proxy",
-		"host", host,
-	)
-
-	// Establish upstream connection (pool-chain or global)
-	var upstreamConn net.Conn
-	var proxyID int
-	var err error
-
-	reqCtx := r.Context()
-	if chain, ok := reqCtx.Value(UserChainContextKey).(*PoolChain); ok && chain != nil {
-		upstreamConn, proxyID, err = chain.ConnectWithRetry(host, reqCtx, h.getSettings(), h.logger)
+// OpenTunnel admits a tunnel under the user's limits and connects to host
+// through the user's pool chain or the global rotation. It is shared by
+// HTTP CONNECT and SOCKS5. On success the caller owns conn and lease (call
+// lease.Release and close conn). Routing and limit errors are returned as
+// is (their messages are safe to show); other errors are upstream failures.
+func (h *UpstreamProxyHandler) OpenTunnel(ctx context.Context, host string, preq *ProxyRequest) (conn net.Conn, proxyID int, lease *Lease, err error) {
+	lease, err = h.beginLease(ctx, preq)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if chain := userChain(preq); chain != nil {
+		conn, proxyID, err = chain.ConnectWithRetry(host, ctx, preq, h.getSettings(), h.logger)
+	} else if preq != nil && (!preq.Opts.Target.Empty() || preq.Opts.Session != "") {
+		err = errRoutingNeedsPool
 	} else {
-		upstreamConn, proxyID, err = h.connectThroughProxy(host, reqCtx)
+		conn, proxyID, err = h.connectThroughProxy(host, ctx)
 	}
-
 	if err != nil {
-		h.logger.Error("CONNECT upstream failed",
-			"source", "proxy",
-			"host", host,
-			"error", err,
-		)
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+		lease.Release()
+		return nil, 0, nil, err
 	}
-	defer upstreamConn.Close()
+	return conn, proxyID, lease, nil
+}
 
-	// Hijack the client connection from the HTTP server.
-	hijacker, ok := w.(http.Hijacker)
+// isClientError reports whether an OpenTunnel error is the client's to fix
+// (limits, routing options) rather than an upstream failure.
+func isClientError(err error) bool {
+	return errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrTooManyConnections) ||
+		errors.Is(err, ErrRateLimited) || errors.Is(err, ErrNoTargetMatch) || errors.Is(err, errRoutingNeedsPool)
+}
+
+// ServeTunnel relays an established tunnel until either side closes,
+// counting bytes against the lease and recording the outcome. clientConn
+// and upstreamConn are closed when it returns. The tunnel is also closed if
+// the user's bandwidth quota runs out meanwhile.
+func (h *UpstreamProxyHandler) ServeTunnel(clientConn, upstreamConn net.Conn, lease *Lease, kind, host string, proxyID int, startTime time.Time) {
+	defer lease.Release()
+	defer clientConn.Close()   //nolint:errcheck // best-effort close/write
+	defer upstreamConn.Close() //nolint:errcheck // best-effort close/write
+	abort := func() {
+		abortConn(clientConn)
+		abortConn(upstreamConn)
+	}
+	untrack, ok := h.trackTunnel(abort)
+	defer untrack()
 	if !ok {
-		h.logger.Error("ResponseWriter does not support Hijack")
-		http.Error(w, "hijack not supported", http.StatusInternalServerError)
-		return
+		return // shutting down
 	}
-
-	clientConn, clientBuf, err := hijacker.Hijack()
-	if err != nil {
-		h.logger.Error("hijack failed", "error", err)
-		return
-	}
-	defer clientConn.Close()
-
-	// Send 200 Connection Established to the client.
-	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
-		h.logger.Error("failed to write CONNECT response", "error", err)
-		return
-	}
-
-	// Drain any buffered data the HTTP server read ahead.
-	if clientBuf != nil && clientBuf.Reader.Buffered() > 0 {
-		buffered := make([]byte, clientBuf.Reader.Buffered())
-		if _, err := io.ReadFull(clientBuf.Reader, buffered); err == nil {
-			upstreamConn.Write(buffered) //nolint:errcheck
-		}
-	}
+	lease.OnQuotaExceeded(abort)
 
 	// Measure time-to-establish before the (long-lived) tunnel copy.
-	duration := int(time.Since(startTime).Milliseconds())
+	establish := time.Since(startTime)
+	duration := int(establish.Milliseconds())
+	// Counted at establishment so rates and latency aren't delayed by the
+	// tunnel's lifetime; how the tunnel ended is tracked separately below.
+	metrics.ObserveProxyRequest(kind, "success", establish)
 
 	// Bidirectional copy — uses splice(2) on Linux for zero-copy. This blocks
 	// until either direction closes or errors.
-	copyErr := BidirectionalCopy(clientConn, upstreamConn)
+	copyErr := h.runTunnel(clientConn, upstreamConn, lease)
+	closeResult := "clean"
+	if copyErr != nil {
+		closeResult = "error"
+	}
+	metrics.TunnelsClosed.WithLabelValues(closeResult).Inc()
 
-	// Record the CONNECT outcome based on the copy result: a tunnel that fails
+	// Record the outcome based on the copy result: a tunnel that fails
 	// immediately must not be logged as a success (AUD-37). A healthy tunnel
 	// eventually returns nil (EOF) and is recorded as success.
-	if proxyID > 0 {
+	if proxyID > 0 && h.tracker != nil {
 		go func() {
 			recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -257,6 +397,129 @@ func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *ht
 	}
 }
 
+// HandleConnectRequest handles HTTPS CONNECT requests.
+// It hijacks the client connection, establishes an upstream tunnel,
+// and copies data bidirectionally using splice(2) on Linux.
+func (h *UpstreamProxyHandler) HandleConnectRequest(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	host := r.Host
+	requestID := uuid.New().String()
+
+	h.logger.Debug("handling CONNECT request",
+		"source", "proxy",
+		"request_id", requestID,
+		"host", host,
+	)
+
+	tracing.SetAttributes(r.Context(), attribute.String("rota.request_id", requestID))
+	preq := ProxyRequestFrom(r.Context())
+	upstreamConn, proxyID, lease, err := h.OpenTunnel(r.Context(), host, preq)
+	if err != nil {
+		tracing.Fail(r.Context(), err)
+		switch {
+		case errors.Is(err, ErrQuotaExceeded), errors.Is(err, ErrTooManyConnections), errors.Is(err, ErrRateLimited):
+			writeLimitError(w, preq, err)
+			return
+		}
+		h.logger.Error("CONNECT upstream failed",
+			"source", "proxy",
+			"request_id", requestID,
+			"host", host,
+			"error", err,
+		)
+		metrics.ObserveProxyRequest("connect", "upstream_error", time.Since(startTime))
+		if isClientError(err) {
+			writeRoutingError(w, requestID, err)
+			return
+		}
+		writeUpstreamError(w, requestID)
+		return
+	}
+
+	// Hijack the client connection from the HTTP server.
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		h.logger.Error("ResponseWriter does not support Hijack")
+		metrics.ObserveProxyRequest("connect", "internal_error", time.Since(startTime))
+		lease.Release()
+		upstreamConn.Close() //nolint:errcheck // best-effort close/write
+		http.Error(w, "hijack not supported", http.StatusInternalServerError)
+		return
+	}
+
+	clientConn, clientBuf, err := hijacker.Hijack()
+	if err != nil {
+		h.logger.Error("hijack failed", "error", err)
+		metrics.ObserveProxyRequest("connect", "internal_error", time.Since(startTime))
+		lease.Release()
+		upstreamConn.Close() //nolint:errcheck // best-effort close/write
+		return
+	}
+
+	// Send 200 Connection Established to the client.
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		h.logger.Error("failed to write CONNECT response", "error", err)
+		metrics.ObserveProxyRequest("connect", "internal_error", time.Since(startTime))
+		lease.Release()
+		upstreamConn.Close() //nolint:errcheck // best-effort close/write
+		clientConn.Close()   //nolint:errcheck // best-effort close/write
+		return
+	}
+
+	// Drain any buffered data the HTTP server read ahead.
+	if clientBuf != nil && clientBuf.Reader.Buffered() > 0 {
+		buffered := make([]byte, clientBuf.Reader.Buffered())
+		if _, err := io.ReadFull(clientBuf.Reader, buffered); err == nil {
+			n, _ := upstreamConn.Write(buffered)
+			countUp(lease, int64(n))
+		}
+	}
+
+	h.ServeTunnel(clientConn, upstreamConn, lease, "connect", host, proxyID, startTime)
+}
+
+// runTunnel copies between client and upstream while tracking the open
+// tunnel in the active-tunnels gauge (decremented even if the copy panics).
+func (h *UpstreamProxyHandler) runTunnel(clientConn, upstreamConn net.Conn, lease *Lease) error {
+	metrics.ActiveTunnels.Inc()
+	defer metrics.ActiveTunnels.Dec()
+	return BidirectionalCopyCounted(clientConn, upstreamConn,
+		func(n int64) { countUp(lease, n) },
+		func(n int64) { countDown(lease, n) })
+}
+
+// countUp / countDown attribute bytes to the lease (and the byte metrics);
+// a nil lease (no proxy user) still feeds the metrics.
+func countUp(lease *Lease, n int64) {
+	if lease != nil {
+		lease.AddUp(n)
+	} else if n > 0 {
+		metrics.Bytes.WithLabelValues("up").Add(float64(n))
+	}
+}
+
+func countDown(lease *Lease, n int64) {
+	if lease != nil {
+		lease.AddDown(n)
+	} else if n > 0 {
+		metrics.Bytes.WithLabelValues("down").Add(float64(n))
+	}
+}
+
+// countingReadCloser reports bytes read from a request body.
+type countingReadCloser struct {
+	io.ReadCloser
+	count func(int64)
+}
+
+func (c countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	if n > 0 {
+		c.count(int64(n))
+	}
+	return n, err
+}
+
 // hopHeaders are hop-by-hop headers that must not be forwarded from the
 // upstream response to the client (RFC 7230 §6.1). Keys are in canonical
 // http.Header form to match resp.Header's canonicalization.
@@ -272,11 +535,22 @@ var hopHeaders = map[string]struct{}{
 	"Upgrade":             {},
 }
 
-// copyResponse writes an *http.Response to an http.ResponseWriter.
-func copyResponse(w http.ResponseWriter, resp *http.Response) {
+// copyMetered streams resp to the client, counting bytes against the lease
+// as they flow and aborting the transfer if the user's quota runs out.
+func (h *UpstreamProxyHandler) copyMetered(w http.ResponseWriter, resp *http.Response, lease *Lease) {
+	if resp != nil && lease != nil {
+		lease.OnQuotaExceeded(func() { resp.Body.Close() }) //nolint:errcheck // aborts the copy
+	}
+	copyResponseCounted(w, resp, func(n int64) { countDown(lease, n) })
+}
+
+// copyResponseCounted writes an *http.Response to an http.ResponseWriter,
+// reporting body bytes to count (may be nil) as they're written, and returns
+// the number of body bytes written.
+func copyResponseCounted(w http.ResponseWriter, resp *http.Response, count func(int64)) int64 {
 	if resp == nil {
 		http.Error(w, "empty upstream response", http.StatusBadGateway)
-		return
+		return 0
 	}
 	defer resp.Body.Close()
 
@@ -296,7 +570,51 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 	// Use pooled buffer for the body copy
 	buf := bufPool.Get().([]byte)
 	defer bufPool.Put(buf)
-	io.CopyBuffer(w, resp.Body, buf) //nolint:errcheck
+	var dst io.Writer = w
+	if count != nil {
+		dst = countingWriter{w: w, count: count}
+	}
+	n, _ := io.CopyBuffer(dst, resp.Body, buf)
+	return n
+}
+
+// globalPicker hands out untried proxies from the global selector for the
+// retry loops. Proxies with an open circuit are set aside without using up
+// an attempt; if nothing else turns up they are used as a last resort.
+type globalPicker struct {
+	selector ProxySelector
+	tried    map[int]bool
+	skipped  []*models.Proxy
+	budget   int // selector draws allowed, so a small inventory can't spin
+}
+
+func newGlobalPicker(selector ProxySelector, attempts int) *globalPicker {
+	return &globalPicker{selector: selector, tried: make(map[int]bool), budget: attempts*4 + 16}
+}
+
+func (g *globalPicker) next(ctx context.Context) (*models.Proxy, error) {
+	for g.budget > 0 {
+		g.budget--
+		p, err := g.selector.Select(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if g.tried[p.ID] {
+			continue
+		}
+		g.tried[p.ID] = true
+		if !breaker.Allow(p.ID) {
+			g.skipped = append(g.skipped, p)
+			continue
+		}
+		return p, nil
+	}
+	if len(g.skipped) > 0 {
+		p := g.skipped[0]
+		g.skipped = g.skipped[1:]
+		return p, nil
+	}
+	return nil, errors.New("no untried proxy left")
 }
 
 // sendWithRetry attempts to send the request with retry and fallback logic
@@ -321,18 +639,19 @@ func (h *UpstreamProxyHandler) sendWithRetry(req *http.Request, ctx context.Cont
 	)
 
 	var lastErr error
-	triedProxies := make(map[int]bool)
+	picker := newGlobalPicker(selector, maxFallbackRetries)
 
 	for fallbackAttempt := 0; fallbackAttempt < maxFallbackRetries; fallbackAttempt++ {
-		selectedProxy, err := selector.Select(ctx)
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err // the client is gone
+		}
+		selectedProxy, err := picker.next(ctx)
 		if err != nil {
-			return nil, 0, fmt.Errorf("no proxy available: %w", err)
+			if lastErr == nil {
+				return nil, 0, fmt.Errorf("no proxy available: %w", err)
+			}
+			break
 		}
-
-		if triedProxies[selectedProxy.ID] {
-			continue
-		}
-		triedProxies[selectedProxy.ID] = true
 
 		h.logger.Debug("attempting request with proxy",
 			"source", "proxy",
@@ -341,7 +660,18 @@ func (h *UpstreamProxyHandler) sendWithRetry(req *http.Request, ctx context.Cont
 			"fallback_attempt", fallbackAttempt+1,
 		)
 
+		_, span := tracing.StartAttempt(ctx, selectedProxy.ID, fallbackAttempt+1)
 		resp, err := h.tryProxyWithRetries(req, ctx, selectedProxy, perProxyRetries)
+		fault := responseFault(resp, err)
+		reportOutcome(selectedProxy.ID, fault)
+		if resp != nil {
+			span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
+		}
+		tracing.End(span, fault)
+		if err != nil && ctx.Err() != nil {
+			// The client gave up: don't count it against the proxy.
+			return nil, 0, ctx.Err()
+		}
 		if err != nil {
 			lastErr = fmt.Errorf("proxy %s failed after %d retries: %w", selectedProxy.Address, perProxyRetries, err)
 			h.logger.Warn("proxy failed after all retries",
@@ -388,7 +718,7 @@ func (h *UpstreamProxyHandler) tryProxyWithRetries(req *http.Request, ctx contex
 	for retry := 0; retry < maxRetries; retry++ {
 		transport, err := GetOrCreateTransport(selectedProxy)
 		if err != nil {
-			lastErr = fmt.Errorf("failed to create transport: %w", err)
+			lastErr = fmt.Errorf("%w: %w", errTransportBuild, err)
 			continue
 		}
 
@@ -446,22 +776,34 @@ func (h *UpstreamProxyHandler) connectThroughProxy(host string, ctx context.Cont
 	}
 
 	var lastErr error
-	triedProxies := make(map[int]bool)
+	picker := newGlobalPicker(selector, maxFallbackRetries)
 
 	for fallbackAttempt := 0; fallbackAttempt < maxFallbackRetries; fallbackAttempt++ {
-		selectedProxy, err := selector.Select(ctx)
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err // the client is gone
+		}
+		selectedProxy, err := picker.next(ctx)
 		if err != nil {
-			return nil, 0, fmt.Errorf("no proxy available: %w", err)
+			if lastErr == nil {
+				return nil, 0, fmt.Errorf("no proxy available: %w", err)
+			}
+			break
 		}
 
-		if triedProxies[selectedProxy.ID] {
-			continue
-		}
-		triedProxies[selectedProxy.ID] = true
-
+		_, span := tracing.StartAttempt(ctx, selectedProxy.ID, fallbackAttempt+1)
 		conn, err := h.tryConnectWithRetries(selectedProxy, host, perProxyRetries)
+		tracing.End(span, err)
 		duration := int(time.Since(startTime).Milliseconds())
+		if ctx.Err() != nil {
+			// The client gave up while we connected.
+			if conn != nil {
+				conn.Close() //nolint:errcheck
+			}
+			breaker.Abandon(selectedProxy.ID)
+			return nil, 0, ctx.Err()
+		}
 
+		reportOutcome(selectedProxy.ID, err)
 		if err != nil {
 			lastErr = fmt.Errorf("proxy %s failed after %d retries: %w", selectedProxy.Address, perProxyRetries, err)
 
@@ -525,9 +867,9 @@ func (h *UpstreamProxyHandler) connectViaProxy(proxy *models.Proxy, host string)
 				User:     *proxy.Username,
 				Password: password,
 			}
-			dialer, err = proxyDialer.SOCKS5("tcp", proxy.Address, auth, proxyDialer.Direct)
+			dialer, err = proxyDialer.SOCKS5("tcp", proxy.Address, auth, socksForward)
 		} else {
-			dialer, err = proxyDialer.SOCKS5("tcp", proxy.Address, nil, proxyDialer.Direct)
+			dialer, err = proxyDialer.SOCKS5("tcp", proxy.Address, nil, socksForward)
 		}
 
 		if err != nil {
@@ -602,6 +944,9 @@ func (h *UpstreamProxyHandler) connectViaHTTPProxy(proxy *models.Proxy, host str
 	parts := strings.SplitN(strings.TrimSpace(statusLine), " ", 3)
 	if len(parts) < 2 || parts[1] != "200" {
 		conn.Close()
+		if len(parts) >= 2 && parts[1] == "407" {
+			return nil, fmt.Errorf("CONNECT request failed: %s: %w", strings.TrimSpace(statusLine), errProxyAuth)
+		}
 		return nil, fmt.Errorf("CONNECT request failed: %s", strings.TrimSpace(statusLine))
 	}
 
@@ -640,6 +985,9 @@ func (h *UpstreamProxyHandler) removeHopByHopHeaders(req *http.Request) {
 
 // recordAsync records a proxy request asynchronously.
 func (h *UpstreamProxyHandler) recordAsync(proxyID int, proxyAddr, url, method string, resp *http.Response, reqErr error, duration int, ts time.Time) {
+	if h.tracker == nil {
+		return
+	}
 	record := RequestRecord{
 		ProxyID:      proxyID,
 		ProxyAddress: proxyAddr,

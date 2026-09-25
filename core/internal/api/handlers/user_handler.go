@@ -1,12 +1,17 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/go-chi/chi/v5"
@@ -51,7 +56,21 @@ func (h *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
 		return
 	}
+	h.fillUsage(r.Context(), u)
 	writeJSON(w, http.StatusOK, u)
+}
+
+// fillUsage sets the user's bandwidth used this month, as List does. A
+// failure leaves it at 0 rather than failing the request.
+func (h *UserHandler) fillUsage(ctx context.Context, u *models.ProxyUser) {
+	now := time.Now().UTC()
+	month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	used, err := h.userRepo.MonthBandwidth(ctx, u.ID, month)
+	if err != nil {
+		h.logger.Warn("failed to load bandwidth usage", "user_id", u.ID, "error", err)
+		return
+	}
+	u.BandwidthUsedBytes = used
 }
 
 // Create adds a new proxy user
@@ -65,14 +84,27 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"username and password are required"}`, http.StatusBadRequest)
 		return
 	}
+	// "-country-", "-session-" etc. carry routing options in the proxy
+	// username, so an account named that way could never sign in.
+	if proxy.ReservedUsername(req.Username) {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{
+			Error: "username must not have a -country, -city, -session or -sesstime part (they carry routing options)",
+		})
+		return
+	}
 	if req.MaxRetries <= 0 {
 		req.MaxRetries = 5
 	}
 
 	u, err := h.userRepo.Create(r.Context(), req)
 	if err != nil {
+		var verr *repository.ValidationError
+		if errors.As(err, &verr) {
+			writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: verr.Msg})
+			return
+		}
 		h.logger.Error("create user failed", "error", err)
-		http.Error(w, `{"error":"failed to create user: `+err.Error()+`"}`, http.StatusInternalServerError)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "failed to create user (is the username taken?)"})
 		return
 	}
 	writeJSON(w, http.StatusCreated, u)
@@ -91,10 +123,16 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := h.userRepo.Update(r.Context(), id, req)
+	var verr *repository.ValidationError
+	if errors.As(err, &verr) {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: verr.Msg})
+		return
+	}
 	if err != nil || u == nil {
 		http.Error(w, `{"error":"user not found or update failed"}`, http.StatusNotFound)
 		return
 	}
+	h.fillUsage(r.Context(), u)
 	writeJSON(w, http.StatusOK, u)
 }
 
@@ -112,25 +150,121 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// ExportWorkingProxies exports working proxies for a specific pool using user credentials supplied via URL query.
-// GET /api/v1/proxy-users/export-working-proxies?username=...&password=...&pool=...&count=...
-func (h *UserHandler) ExportWorkingProxies(w http.ResponseWriter, r *http.Request) {
-	username := r.URL.Query().Get("username")
-	if username == "" {
-		username = r.URL.Query().Get("user")
-	}
-	password := r.URL.Query().Get("password")
-	if password == "" {
-		password = r.URL.Query().Get("pass")
-	}
-	if username == "" || password == "" {
-		http.Error(w, `{"error":"username and password query parameters are required"}`, http.StatusUnauthorized)
+// RotateExportToken issues a new working-proxies export token for a user,
+// revoking any previous one. The token is returned only in this response.
+func (h *UserHandler) RotateExportToken(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
 		return
 	}
+	token, createdAt, err := h.userRepo.RotateExportToken(r.Context(), id)
+	if errors.Is(err, repository.ErrUserNotFound) {
+		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		h.logger.Error("rotate export token failed", "error", err, "user_id", id)
+		http.Error(w, `{"error":"failed to generate export token"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ExportTokenResponse{Token: token, CreatedAt: createdAt})
+}
 
-	user, err := h.userRepo.Authenticate(r.Context(), username, password)
+// RevokeExportToken deletes a user's working-proxies export token.
+func (h *UserHandler) RevokeExportToken(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
+		return
+	}
+	if err := h.userRepo.RevokeExportToken(r.Context(), id); err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+			return
+		}
+		h.logger.Error("revoke export token failed", "error", err, "user_id", id)
+		http.Error(w, `{"error":"failed to revoke export token"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// exportAuth is how a working-proxies export request identified itself.
+type exportAuth struct {
+	token       string
+	username    string
+	password    string
+	legacyQuery bool // username/password came from the query string
+}
+
+// exportCredentials extracts export credentials, preferring (in order) an
+// export token in the Authorization header or ?token=, HTTP Basic auth, and
+// finally the deprecated ?username=&password= query parameters.
+func exportCredentials(r *http.Request) exportAuth {
+	if auth := r.Header.Get("Authorization"); len(auth) > 7 && strings.EqualFold(auth[:7], "Bearer ") {
+		return exportAuth{token: strings.TrimSpace(auth[7:])}
+	}
+	if t := r.URL.Query().Get("token"); t != "" {
+		return exportAuth{token: t}
+	}
+	if u, p, ok := r.BasicAuth(); ok {
+		return exportAuth{username: u, password: p}
+	}
+	q := r.URL.Query()
+	username := q.Get("username")
+	if username == "" {
+		username = q.Get("user")
+	}
+	password := q.Get("password")
+	if password == "" {
+		password = q.Get("pass")
+	}
+	return exportAuth{username: username, password: password, legacyQuery: username != "" || password != ""}
+}
+
+// ExportRequestUsesToken reports whether an export request authenticates with
+// an export token (rather than a username and password).
+func ExportRequestUsesToken(r *http.Request) bool {
+	return exportCredentials(r).token != ""
+}
+
+// ExportWorkingProxies exports working proxies from one of the authenticated
+// user's pools (its main pool by default, or a fallback pool named by ?pool=).
+//
+// Authenticate with an export token (Authorization: Bearer rota_exp_… or
+// ?token=), or with the user's proxy credentials via HTTP Basic auth. The
+// legacy ?username=&password= form still works but is deprecated because it
+// puts the password in URLs and access logs.
+func (h *UserHandler) ExportWorkingProxies(w http.ResponseWriter, r *http.Request) {
+	creds := exportCredentials(r)
+
+	var user *models.ProxyUser
+	var err error
+	switch {
+	case creds.token != "":
+		user, err = h.userRepo.AuthenticateExportToken(r.Context(), creds.token)
+	case creds.username != "" && creds.password != "":
+		if creds.legacyQuery {
+			w.Header().Set("Deprecation", "true")
+			h.logger.Warn("working-proxies export authenticated with password in query string; use an export token instead",
+				"username", creds.username)
+		}
+		user, err = h.userRepo.Authenticate(r.Context(), creds.username, creds.password)
+	default:
+		w.Header().Set("WWW-Authenticate", `Bearer realm="rota-export"`)
+		http.Error(w, `{"error":"an export token or user credentials are required"}`, http.StatusUnauthorized)
+		return
+	}
+	if err != nil && !errors.Is(err, repository.ErrInvalidCredentials) {
+		// Infrastructure failure: a 5xx, so the brute-force limiter (which
+		// counts 401s) doesn't block legitimate clients during a DB outage.
+		h.logger.Error("export authentication failed", "error", err)
+		http.Error(w, `{"error":"authentication temporarily unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil || user == nil {
-		http.Error(w, `{"error":"invalid user credentials"}`, http.StatusUnauthorized)
+		http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
 		return
 	}
 
@@ -151,10 +285,17 @@ func (h *UserHandler) ExportWorkingProxies(w http.ResponseWriter, r *http.Reques
 		} else {
 			p, err := h.poolRepo.GetByName(r.Context(), poolParam)
 			if err != nil || p == nil {
-				http.Error(w, `{"error":"pool not found by name"}`, http.StatusNotFound)
+				http.Error(w, `{"error":"pool not found"}`, http.StatusNotFound)
 				return
 			}
 			poolID = p.ID
+		}
+		// A user may only export pools it is routed through; anything else
+		// would hand out other tenants' upstream credentials. Unknown and
+		// foreign pools get the same 404 so pool names can't be enumerated.
+		if !userCanUsePool(user, poolID) {
+			http.Error(w, `{"error":"pool not found"}`, http.StatusNotFound)
+			return
 		}
 	} else {
 		if user.MainPoolID == nil || *user.MainPoolID <= 0 {
@@ -214,4 +355,15 @@ func (h *UserHandler) ExportWorkingProxies(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-
+// userCanUsePool reports whether poolID is the user's main or a fallback pool.
+func userCanUsePool(u *models.ProxyUser, poolID int) bool {
+	if u.MainPoolID != nil && *u.MainPoolID == poolID {
+		return true
+	}
+	for _, id := range u.FallbackPoolIDs {
+		if id == poolID {
+			return true
+		}
+	}
+	return false
+}

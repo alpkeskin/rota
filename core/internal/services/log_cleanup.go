@@ -61,6 +61,11 @@ func (s *LogCleanupService) Start(ctx context.Context) error {
 		interval = time.Hour
 	}
 	s.mu.Lock()
+	// Start runs again each time this instance regains leadership; the
+	// previous worker has exited with its context, so retire its ticker.
+	if s.ticker != nil {
+		s.ticker.Stop()
+	}
 	s.ticker = time.NewTicker(interval)
 	s.interval = interval
 	tickC := s.ticker.C

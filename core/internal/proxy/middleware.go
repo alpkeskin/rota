@@ -1,13 +1,16 @@
 package proxy
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/models"
 	"golang.org/x/time/rate"
 )
@@ -44,6 +47,16 @@ func (m *AuthMiddleware) UpdateSettings(settings models.AuthenticationSettings) 
 	m.enabled = settings.Enabled
 	m.username = settings.Username
 	m.password = settings.Password
+}
+
+// Check reports whether username/password match the legacy credentials,
+// in constant time. It doesn't consider whether legacy auth is enabled.
+func (m *AuthMiddleware) Check(username, password string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(m.username))
+	passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(m.password))
+	return userMatch&passMatch == 1
 }
 
 // HandleRequest validates proxy authentication for HTTP requests
@@ -119,6 +132,19 @@ type RateLimitMiddleware struct {
 	maxRequests int
 	limiters    map[string]*rate.Limiter
 	mu          sync.RWMutex
+	shared      SharedRate // nil = per-instance limits
+}
+
+// SharedRate is a rate limiter shared by all instances (sharedstate.Store).
+type SharedRate interface {
+	AllowRate(ctx context.Context, key string, limit int, period time.Duration) (bool, time.Duration, error)
+}
+
+// SetShared makes the per-IP limit cluster-wide.
+func (m *RateLimitMiddleware) SetShared(sh SharedRate) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shared = sh
 }
 
 // NewRateLimitMiddleware creates a new rate limiting middleware
@@ -146,7 +172,10 @@ func (m *RateLimitMiddleware) UpdateSettings(settings models.RateLimitSettings) 
 
 // HandleRequest validates rate limits for HTTP requests
 func (m *RateLimitMiddleware) HandleRequest(req *http.Request) (*http.Request, *http.Response) {
-	if !m.enabled {
+	m.mu.RLock()
+	enabled := m.enabled
+	m.mu.RUnlock()
+	if !enabled {
 		return req, nil
 	}
 
@@ -161,6 +190,15 @@ func (m *RateLimitMiddleware) HandleRequest(req *http.Request) (*http.Request, *
 	return req, nil
 }
 
+// Allow reports whether a request from clientIP is within the limit (always
+// true when rate limiting is disabled). Used by the SOCKS5 listener.
+func (m *RateLimitMiddleware) Allow(clientIP string) bool {
+	m.mu.RLock()
+	enabled := m.enabled
+	m.mu.RUnlock()
+	return !enabled || m.allow(clientIP)
+}
+
 // HandleConnect validates rate limits for HTTPS CONNECT requests
 func (m *RateLimitMiddleware) HandleConnect(req *http.Request) (*http.Request, *http.Response) {
 	return m.HandleRequest(req)
@@ -169,12 +207,29 @@ func (m *RateLimitMiddleware) HandleConnect(req *http.Request) (*http.Request, *
 // allow checks if the request is allowed based on rate limiting
 func (m *RateLimitMiddleware) allow(clientIP string) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	interval, maxRequests, shared := m.interval, m.maxRequests, m.shared
+	m.mu.Unlock()
 
 	// Guard against misconfiguration: a non-positive interval would make rps
 	// +Inf (rate.NewLimiter panics / never limits) and a non-positive
 	// maxRequests would set burst to 0 (denies every request). Treat either
 	// case as "limiter effectively disabled" and allow the request through.
+	if interval <= 0 || maxRequests <= 0 {
+		return true
+	}
+
+	// One budget per IP across all instances; per instance while the shared
+	// store is unreachable.
+	if shared != nil {
+		ok, _, err := shared.AllowRate(context.Background(), "ip{"+clientIP+"}", maxRequests, time.Duration(interval)*time.Second)
+		if err == nil {
+			return ok
+		}
+		metrics.SharedStateErrors.WithLabelValues("rate").Inc()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.interval <= 0 || m.maxRequests <= 0 {
 		return true
 	}

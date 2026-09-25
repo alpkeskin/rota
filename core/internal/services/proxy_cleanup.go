@@ -16,7 +16,6 @@ type ProxyCleanupService struct {
 	proxyRepo    *repository.ProxyRepository
 	settingsRepo *repository.SettingsRepository
 	log          *logger.Logger
-	interval     time.Duration
 }
 
 // NewProxyCleanupService creates a new ProxyCleanupService.
@@ -29,7 +28,6 @@ func NewProxyCleanupService(
 		proxyRepo:    proxyRepo,
 		settingsRepo: settingsRepo,
 		log:          log,
-		interval:     24 * time.Hour, // placeholder; real interval loaded from settings in Start
 	}
 }
 
@@ -38,8 +36,10 @@ func NewProxyCleanupService(
 // each run so config changes take effect without a restart.
 func (s *ProxyCleanupService) Start(ctx context.Context) {
 	go func() {
-		s.interval = s.intervalFromSettings(ctx)
-		ticker := time.NewTicker(s.interval)
+		// Kept local: Start runs again whenever this instance
+		// regains leadership, possibly while the last loop is still winding down.
+		interval := s.intervalFromSettings(ctx)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -47,8 +47,8 @@ func (s *ProxyCleanupService) Start(ctx context.Context) {
 				return
 			case <-ticker.C:
 				s.run(ctx)
-				if next := s.intervalFromSettings(ctx); next != s.interval {
-					s.interval = next
+				if next := s.intervalFromSettings(ctx); next != interval {
+					interval = next
 					ticker.Reset(next)
 					s.log.Info("proxy cleanup interval updated", "hours", int(next/time.Hour))
 				}

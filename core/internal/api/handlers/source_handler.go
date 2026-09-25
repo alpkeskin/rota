@@ -32,6 +32,17 @@ func NewSourceHandler(
 	}
 }
 
+// redactSource hides a source's URL, which often carries the list's
+// credential, from roles that may not see secrets, including where it was
+// recorded in an error message.
+func redactSource(src *models.ProxySource) {
+	src.URL = redactURL(src.URL)
+	if src.LastError != nil {
+		e := redactURLsInText(*src.LastError)
+		src.LastError = &e
+	}
+}
+
 // List returns all proxy sources
 func (h *SourceHandler) List(w http.ResponseWriter, r *http.Request) {
 	sources, err := h.sourceRepo.List(r.Context())
@@ -39,6 +50,11 @@ func (h *SourceHandler) List(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("failed to list sources", "error", err)
 		http.Error(w, `{"error":"failed to list sources"}`, http.StatusInternalServerError)
 		return
+	}
+	if !canSeeSecrets(r.Context()) {
+		for i := range sources {
+			redactSource(&sources[i])
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"sources": sources})
 }
@@ -128,8 +144,15 @@ func (h *SourceHandler) FetchNow(w http.ResponseWriter, r *http.Request) {
 	src, count, err := h.sourceSvc.FetchNow(r.Context(), id)
 	if err != nil {
 		h.logger.Error("fetch now failed", "source_id", id, "error", err)
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadGateway)
+		msg := err.Error()
+		if !canSeeSecrets(r.Context()) {
+			msg = redactURLsInText(msg)
+		}
+		writeJSON(w, http.StatusBadGateway, models.ErrorResponse{Error: msg})
 		return
+	}
+	if src != nil && !canSeeSecrets(r.Context()) {
+		redactSource(src)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"source":  src,

@@ -7,6 +7,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/secrets"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -256,6 +257,7 @@ func (r *PoolRepository) GetProxies(ctx context.Context, poolID int) ([]models.P
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan pool proxy: %w", err)
 		}
+		secrets.DecryptInPlace(&pp.Password)
 		if pp.Requests > 0 {
 			pp.SuccessRate = float64(succReq) / float64(pp.Requests) * 100
 		}
@@ -1144,6 +1146,7 @@ func (r *PoolRepository) GetWorkingProxies(ctx context.Context, poolID int, limi
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan working pool proxy: %w", err)
 		}
+		secrets.DecryptInPlace(&pp.Password)
 		if pp.Requests > 0 {
 			pp.SuccessRate = float64(succReq) / float64(pp.Requests) * 100
 		}

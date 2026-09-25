@@ -4,14 +4,19 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/database"
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/tracing"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/alpkeskin/rota/core/pkg/safeworker"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // proxyRouter is the core HTTP handler that dispatches incoming proxy requests.
@@ -30,6 +35,7 @@ func (p *proxyRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. User auth middleware (sets PoolChain in context or falls back to legacy)
 	r, reject := p.userAuthMw.HandleRequest(r)
 	if reject != nil {
+		metrics.ProxyRequests.WithLabelValues(requestKind(r), "rejected_auth").Inc()
 		writeHTTPResponse(w, reject)
 		return
 	}
@@ -37,16 +43,67 @@ func (p *proxyRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 2. Rate limit middleware
 	r, reject = p.rateLimitMw.HandleRequest(r)
 	if reject != nil {
+		metrics.ProxyRequests.WithLabelValues(requestKind(r), "rejected_rate_limit").Inc()
 		writeHTTPResponse(w, reject)
 		return
 	}
 
-	// 3. Dispatch based on method
+	// 3. Trace admitted requests. For CONNECT the span covers the tunnel's
+	// lifetime.
+	if tracing.Enabled() {
+		host := r.URL.Host
+		if r.Method == http.MethodConnect || host == "" {
+			host = r.Host
+		}
+		ctx, span := tracing.StartProxy(r.Context(), "proxy "+r.Method,
+			proxySpanAttrs(requestKind(r), host, ProxyRequestFrom(r.Context()))...)
+		defer span.End()
+		r = r.WithContext(ctx)
+	}
+
+	// 4. Dispatch based on method
 	if r.Method == http.MethodConnect {
 		p.upstream.HandleConnectRequest(w, r)
 	} else {
 		p.upstream.HandleHTTPRequest(w, r)
 	}
+}
+
+// proxySpanAttrs describes a proxied request on its trace span. Only the
+// target host is recorded, never the path or query.
+func proxySpanAttrs(kind, hostport string, preq *ProxyRequest) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{attribute.String("rota.proxy.kind", kind)}
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host, port = hostport, ""
+	}
+	attrs = append(attrs, attribute.String("server.address", host))
+	if p, err := strconv.Atoi(port); err == nil {
+		attrs = append(attrs, attribute.Int("server.port", p))
+	}
+	if preq != nil {
+		if preq.User != nil {
+			attrs = append(attrs, attribute.Int("rota.user_id", preq.User.ID))
+		}
+		if preq.Opts.Target.Country != "" {
+			attrs = append(attrs, attribute.String("rota.target.country", preq.Opts.Target.Country))
+		}
+		if preq.Opts.Target.City != "" {
+			attrs = append(attrs, attribute.String("rota.target.city", preq.Opts.Target.City))
+		}
+		if preq.Opts.Session != "" {
+			attrs = append(attrs, attribute.Bool("rota.sticky_session", true))
+		}
+	}
+	return attrs
+}
+
+// requestKind is the metrics label for a proxy request.
+func requestKind(r *http.Request) string {
+	if r.Method == http.MethodConnect {
+		return "connect"
+	}
+	return "http"
 }
 
 // writeHTTPResponse translates a middleware-returned *http.Response into
@@ -83,11 +140,21 @@ type Server struct {
 	authMiddleware *AuthMiddleware
 	userAuthMw     *UserAuthMiddleware
 	rateLimitMw    *RateLimitMiddleware
+	accountant     *UsageAccountant
+	socks          *socksServer
+	socksPort      int
 	proxyRepo      *repository.ProxyRepository
 	settingsRepo   *repository.SettingsRepository
 	refreshTicker  *time.Ticker
 	cleanupTicker  *time.Ticker
 	stopChan       chan struct{}
+}
+
+// SharedState is the cluster-wide store for limits and sticky sessions
+// (sharedstate.Store); nil keeps them per instance.
+type SharedState interface {
+	SharedLimits
+	SharedSticky
 }
 
 // New creates a new proxy server instance
@@ -99,6 +166,7 @@ func New(
 	poolRepo *repository.PoolRepository,
 	userRepo *repository.UserRepository,
 	settingsRepo *repository.SettingsRepository,
+	shared SharedState,
 ) (*Server, error) {
 	// Load settings
 	ctx := context.Background()
@@ -127,10 +195,21 @@ func New(
 
 	// Create upstream proxy handler
 	handler := NewUpstreamProxyHandler(selector, tracker, &settings.Rotation, log)
+	// Per-user limits and bandwidth metering.
+	accountant := NewUsageAccountant(userRepo, log)
+	if shared != nil {
+		accountant.SetShared(shared)
+	}
+	accountant.Start()
+	handler.accountant = accountant
 
 	// Create middlewares
 	authMiddleware := NewAuthMiddleware(settings.Authentication)
 	rateLimitMw := NewRateLimitMiddleware(settings.RateLimit)
+	if shared != nil {
+		rateLimitMw.SetShared(shared)
+		stickySessions.shared = shared
+	}
 
 	// Create user-aware auth middleware (pool-based routing)
 	userAuthMw := NewUserAuthMiddleware(userRepo, poolRepo, db, authMiddleware, &settings.Rotation, log)
@@ -163,6 +242,7 @@ func New(
 		authMiddleware: authMiddleware,
 		userAuthMw:     userAuthMw,
 		rateLimitMw:    rateLimitMw,
+		accountant:     accountant,
 		proxyRepo:      proxyRepo,
 		settingsRepo:   settingsRepo,
 		stopChan:       make(chan struct{}),
@@ -219,7 +299,9 @@ func (s *Server) startBackgroundTasks() {
 			case <-s.cleanupTicker.C:
 				safeworker.Call(s.logger, "rate_limit_cleanup", func() {
 					s.rateLimitMw.CleanupLimiters()
-					s.logger.Debug("cleaned up rate limiters")
+					stickySessions.Sweep()
+					s.pruneBreaker()
+					s.logger.Debug("cleaned up rate limiters and expired sticky sessions")
 				})
 			case <-s.stopChan:
 				return
@@ -228,9 +310,55 @@ func (s *Server) startBackgroundTasks() {
 	}()
 }
 
+// EnableSOCKS5 makes Start also listen for SOCKS5 clients on port.
+func (s *Server) EnableSOCKS5(port int) {
+	s.socksPort = port
+	s.socks = newSOCKSServer(s.userAuthMw, s.rateLimitMw, s.handler, s.logger)
+}
+
+// pruneBreaker drops circuit state for proxies deleted from the inventory.
+func (s *Server) pruneBreaker() {
+	if s.proxyRepo == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx, `SELECT id FROM proxies`)
+	if err != nil {
+		s.logger.Warn("failed to list proxies for breaker pruning", "error", err)
+		return
+	}
+	defer rows.Close()
+	ids := make(map[int]bool)
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return
+		}
+		ids[id] = true
+	}
+	if rows.Err() != nil {
+		return
+	}
+	breaker.Retain(func(id int) bool { return ids[id] })
+}
+
 // Start starts the proxy server
 func (s *Server) Start() error {
 	s.logger.Info("starting proxy server", "port", s.port)
+
+	if s.socks != nil {
+		l, err := net.Listen("tcp", fmt.Sprintf(":%d", s.socksPort))
+		if err != nil {
+			return fmt.Errorf("socks5 listener: %w", err)
+		}
+		s.logger.Info("starting SOCKS5 listener", "port", s.socksPort)
+		go func() {
+			if err := s.socks.Serve(l); err != nil {
+				s.logger.Error("socks5 listener stopped", "error", err)
+			}
+		}()
+	}
 
 	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("proxy server failed: %w", err)
@@ -250,12 +378,39 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.cleanupTicker != nil {
 		s.cleanupTicker.Stop()
 	}
-	// Flush any buffered usage records before the process exits.
+	if s.socks != nil {
+		s.socks.Close(ctx) //nolint:errcheck
+	}
+	err := s.server.Shutdown(ctx)
+	// Hijacked tunnels aren't covered by Shutdown; close them so their final
+	// bytes are metered before the last flush below.
+	s.handler.CloseTunnels(ctx)
+	// Flush buffered usage records only now, so requests and tunnels that
+	// ended during the drain are still recorded in the batch.
 	if s.tracker != nil {
 		s.tracker.Stop()
 	}
+	// Stop metering last, so the final flush includes the tunnels just closed.
+	if s.accountant != nil {
+		s.accountant.Stop()
+	}
+	return err
+}
 
-	return s.server.Shutdown(ctx)
+// ProxiesChanged makes changes to the upstream proxy inventory take effect at
+// once: selectors and user chains are reloaded and cached transports dropped.
+func (s *Server) ProxiesChanged(ctx context.Context) {
+	ClearTransportCache()
+	if err := s.getSelector().Refresh(ctx); err != nil {
+		s.logger.Warn("failed to refresh proxy list after a change", "error", err)
+	}
+	s.userAuthMw.RefreshChains(ctx)
+}
+
+// UsersChanged drops cached proxy users and their pool chains, so account,
+// limit and pool changes apply to the next request.
+func (s *Server) UsersChanged() {
+	s.userAuthMw.InvalidateAll()
 }
 
 // ReloadSettings reloads settings from database and updates components

@@ -8,11 +8,15 @@ type LoginRequest struct {
 
 // LoginResponse represents a login response
 type LoginResponse struct {
-	Token string          `json:"token"`
+	Token string           `json:"token"`
 	User  UserInfoResponse `json:"user"`
 }
 
-// UserInfoResponse represents user information in responses
+// UserInfoResponse describes the signed-in account.
 type UserInfoResponse struct {
+	ID       int    `json:"id"`
 	Username string `json:"username"`
+	Role     string `json:"role"`
+	// Via is "session" for a dashboard login or "api_key" for an API key.
+	Via string `json:"via"`
 }

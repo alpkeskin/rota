@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useRef, useState, useCallback } from "react"
 import { Check, ChevronDown, Copy, Eye, EyeOff } from "lucide-react"
 import { toast } from "@/lib/toast"
 import { api } from "@/lib/api"
@@ -34,7 +34,9 @@ import {
 import { PageHeader, Content, Section, EmptyLine, LoadingLine } from "@/components/page-header"
 import { StatStrip } from "@/components/stat-strip"
 import { Tag } from "@/components/status"
-import { count } from "@/lib/format"
+import { bytes, count } from "@/lib/format"
+
+const GiB = 1024 ** 3
 
 const DEFAULT_FORM: CreateProxyUserRequest = {
   username: "",
@@ -45,6 +47,8 @@ const DEFAULT_FORM: CreateProxyUserRequest = {
   fallback_pool_ids: [],
   max_retries: 5,
   requests_per_minute: 0,
+  monthly_bandwidth_limit_bytes: 0,
+  max_concurrent_connections: 0,
 }
 
 export default function UsersPage() {
@@ -64,7 +68,11 @@ export default function UsersPage() {
   const [apiLinkPool, setApiLinkPool] = useState<string>("default")
   const [apiLinkCount, setApiLinkCount] = useState<string>("")
   const [apiLinkFormat, setApiLinkFormat] = useState<string>("raw")
-  const [copiedLink, setCopiedLink] = useState(false)
+  const [copiedLink, setCopiedLink] = useState<string | null>(null)
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Plaintext token, held only while the dialog that generated it is open.
+  const [apiLinkToken, setApiLinkToken] = useState<string | null>(null)
+  const [tokenBusy, setTokenBusy] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -105,6 +113,8 @@ export default function UsersPage() {
       fallback_pool_ids: u.fallback_pool_ids ?? [],
       max_retries: u.max_retries,
       requests_per_minute: u.requests_per_minute ?? 0,
+      monthly_bandwidth_limit_bytes: u.monthly_bandwidth_limit_bytes ?? 0,
+      max_concurrent_connections: u.max_concurrent_connections ?? 0,
     })
     setShowPass(false)
     setDialogOpen(true)
@@ -130,6 +140,8 @@ export default function UsersPage() {
           fallback_pool_ids: form.fallback_pool_ids,
           max_retries: form.max_retries,
           requests_per_minute: form.requests_per_minute,
+          monthly_bandwidth_limit_bytes: form.monthly_bandwidth_limit_bytes,
+          max_concurrent_connections: form.max_concurrent_connections,
         }
         if (form.password) upd.password = form.password
         await api.updateProxyUser(editUser.id, upd)
@@ -197,23 +209,72 @@ export default function UsersPage() {
     setApiLinkPool("default")
     setApiLinkCount("")
     setApiLinkFormat("raw")
-    setCopiedLink(false)
+    setCopiedLink(null)
+    setApiLinkToken(null)
   }
 
-  const generateExportUrl = (u: ProxyUser) => {
+  const closeApiLinkModal = () => {
+    setApiLinkUser(null)
+    setApiLinkToken(null)
+  }
+
+  const applyTokenState = (id: number, has: boolean, createdAt?: string) => {
+    const patch = (u: ProxyUser) => (u.id === id ? { ...u, has_export_token: has, export_token_created_at: createdAt } : u)
+    setUsers((prev) => prev.map(patch))
+    setApiLinkUser((prev) => (prev ? patch(prev) : prev))
+  }
+
+  const rotateExportToken = async (u: ProxyUser) => {
+    setTokenBusy(true)
+    try {
+      const res = await api.rotateProxyUserExportToken(u.id)
+      setApiLinkToken(res.token)
+      applyTokenState(u.id, true, res.created_at)
+      toast.success(u.has_export_token ? "Token regenerated — the old one no longer works" : "Export token generated")
+    } catch {
+      toast.error("Failed to generate export token")
+    } finally {
+      setTokenBusy(false)
+    }
+  }
+
+  const revokeExportToken = async (u: ProxyUser) => {
+    setTokenBusy(true)
+    try {
+      await api.revokeProxyUserExportToken(u.id)
+      setApiLinkToken(null)
+      applyTokenState(u.id, false)
+      toast.success("Export token revoked")
+    } catch {
+      toast.error("Failed to revoke export token")
+    } finally {
+      setTokenBusy(false)
+    }
+  }
+
+  // Export only serves the user's own pools: its main pool and fallbacks.
+  const exportablePools = (u: ProxyUser) =>
+    pools.filter((p) => p.id !== u.main_pool_id && (u.fallback_pool_ids ?? []).includes(p.id))
+
+  // withToken: put the token in the query string, for tools that only take a
+  // URL. Otherwise the token goes in the Authorization header (see exportCurl).
+  const generateExportUrl = (withToken: boolean) => {
     const protocol = window.location.protocol
     const host = window.location.hostname
     const port = process.env.NEXT_PUBLIC_API_PORT || (window.location.port ? window.location.port : protocol === "https:" ? "443" : "80")
     const portSuffix = port === "80" || port === "443" ? "" : `:${port}`
     const baseUrl = `${protocol}//${host}${portSuffix}/api/v1/proxy-users/export-working-proxies`
     const params = new URLSearchParams()
-    params.set("username", u.username)
-    params.set("password", "YOUR_PASSWORD")
+    if (withToken) params.set("token", apiLinkToken ?? "YOUR_EXPORT_TOKEN")
     if (apiLinkPool && apiLinkPool !== "default") params.set("pool", apiLinkPool)
     if (apiLinkCount && parseInt(apiLinkCount) > 0) params.set("count", apiLinkCount)
     if (apiLinkFormat === "url") params.set("format", "url")
-    return `${baseUrl}?${params.toString()}`
+    const query = params.toString()
+    return query ? `${baseUrl}?${query}` : baseUrl
   }
+
+  const exportCurl = () =>
+    `curl -H "Authorization: Bearer ${apiLinkToken ?? "YOUR_EXPORT_TOKEN"}" "${generateExportUrl(false)}"`
 
   const enabled = users.filter((u) => u.enabled).length
   const withPool = users.filter((u) => u.main_pool_id).length
@@ -224,7 +285,7 @@ export default function UsersPage() {
         title="Users"
         description={
           <>
-            Credentials clients use on port <span className="font-mono">{PROXY_PORT}</span>. A user is routed through its main pool, then its fallbacks in order; without a pool it rotates over the whole inventory.
+            Credentials clients use on port <span className="font-mono">{PROXY_PORT}</span>. A user is routed through its main pool, then its fallbacks in order; without a pool it rotates over the whole inventory. Append <span className="font-mono">-country-us</span>, <span className="font-mono">-city-new_york</span> or <span className="font-mono">-session-&lt;id&gt;</span> to the username to pick the exit country, city or a sticky IP.
           </>
         }
       >
@@ -255,6 +316,7 @@ export default function UsersPage() {
                 <TableHead>Fallbacks</TableHead>
                 <TableHead className="text-right">Max retries</TableHead>
                 <TableHead className="text-right">Rate limit</TableHead>
+                <TableHead className="text-right">This month</TableHead>
                 <TableHead>Enabled</TableHead>
                 <TableHead>Export API</TableHead>
                 <TableHead className="w-8" />
@@ -287,6 +349,16 @@ export default function UsersPage() {
                   <TableCell className="num text-right">{u.max_retries}</TableCell>
                   <TableCell className="num text-muted-foreground text-right">
                     {u.requests_per_minute > 0 ? `${count(u.requests_per_minute)}/min` : "unlimited"}
+                  </TableCell>
+                  <TableCell
+                    className={
+                      "num text-right " +
+                      (u.monthly_bandwidth_limit_bytes > 0 && (u.bandwidth_used_bytes ?? 0) >= u.monthly_bandwidth_limit_bytes ? "text-critical" : "text-muted-foreground")
+                    }
+                    title={u.max_concurrent_connections > 0 ? `Up to ${count(u.max_concurrent_connections)} connections at once` : undefined}
+                  >
+                    {bytes(u.bandwidth_used_bytes ?? 0)}
+                    {u.monthly_bandwidth_limit_bytes > 0 && <> / {bytes(u.monthly_bandwidth_limit_bytes)}</>}
                   </TableCell>
                   <TableCell>
                     <Switch checked={u.enabled} onCheckedChange={() => toggleEnabled(u)} aria-label={`${u.username} enabled`} />
@@ -436,6 +508,26 @@ export default function UsersPage() {
               </div>
             </div>
 
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="user-quota">Monthly bandwidth, GB</Label>
+                <Input
+                  id="user-quota"
+                  type="number"
+                  min={0}
+                  step="any"
+                  value={form.monthly_bandwidth_limit_bytes ? +(form.monthly_bandwidth_limit_bytes / GiB).toFixed(3) : 0}
+                  onChange={(e) => setForm({ ...form, monthly_bandwidth_limit_bytes: Math.max(0, Math.round((parseFloat(e.target.value) || 0) * GiB)) })}
+                />
+                <p className="text-muted-foreground text-[0.6875rem] leading-4">Up + down, per calendar month (UTC). 0 = unlimited. Open tunnels close when it runs out.</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="user-conns">Max concurrent connections</Label>
+                <Input id="user-conns" type="number" min={0} value={form.max_concurrent_connections ?? 0} onChange={(e) => setForm({ ...form, max_concurrent_connections: Math.max(0, parseInt(e.target.value) || 0) })} />
+                <p className="text-muted-foreground text-[0.6875rem] leading-4">Open requests and tunnels at once. 0 = unlimited.</p>
+              </div>
+            </div>
+
             <div className="flex items-start justify-between gap-4">
               <div>
                 <Label htmlFor="user-export" className="text-foreground">Allow working-proxy export</Label>
@@ -457,14 +549,38 @@ export default function UsersPage() {
       </Dialog>
 
       {/* Export link */}
-      <Dialog open={!!apiLinkUser} onOpenChange={(open) => !open && setApiLinkUser(null)}>
+      <Dialog open={!!apiLinkUser} onOpenChange={(open) => !open && closeApiLinkModal()}>
         <DialogContent className="sm:max-w-[32rem]">
           <DialogHeader>
             <DialogTitle>Export link for {apiLinkUser?.username}</DialogTitle>
-            <DialogDescription>A GET that returns the user&apos;s alive proxies, one per line. The password goes in the query string, so keep the link private.</DialogDescription>
+            <DialogDescription>A GET that returns the user&apos;s alive proxies, one per line. It authenticates with a revocable export token instead of the user&apos;s proxy password.</DialogDescription>
           </DialogHeader>
           {apiLinkUser && (
             <div className="space-y-4">
+              <div className="space-y-1.5">
+                <Label>Export token</Label>
+                {apiLinkToken ? (
+                  <p className="text-muted-foreground text-[0.6875rem] leading-4">
+                    Copy the link now — the token is shown only once. Regenerating it invalidates this one.
+                  </p>
+                ) : apiLinkUser.has_export_token ? (
+                  <p className="text-muted-foreground text-[0.6875rem] leading-4">
+                    A token was issued{apiLinkUser.export_token_created_at ? ` on ${new Date(apiLinkUser.export_token_created_at).toLocaleString()}` : ""}. It can&apos;t be shown again; regenerate to get a new link.
+                  </p>
+                ) : (
+                  <p className="text-muted-foreground text-[0.6875rem] leading-4">No token yet. Generate one to build a working link.</p>
+                )}
+                <div className="flex gap-2">
+                  <Button type="button" variant="outline" size="sm" disabled={tokenBusy} onClick={() => rotateExportToken(apiLinkUser)}>
+                    {apiLinkUser.has_export_token ? "Regenerate token" : "Generate token"}
+                  </Button>
+                  {apiLinkUser.has_export_token && (
+                    <Button type="button" variant="outline" size="sm" disabled={tokenBusy} onClick={() => revokeExportToken(apiLinkUser)}>
+                      Revoke
+                    </Button>
+                  )}
+                </div>
+              </div>
               <div className="space-y-1.5">
                 <Label htmlFor="link-pool">Pool</Label>
                 <Select value={apiLinkPool} onValueChange={setApiLinkPool}>
@@ -473,7 +589,7 @@ export default function UsersPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="default">User&apos;s main pool ({apiLinkUser.main_pool_id ? poolName(apiLinkUser.main_pool_id) : "none"})</SelectItem>
-                    {pools.map((p) => (
+                    {exportablePools(apiLinkUser).map((p) => (
                       <SelectItem key={p.id} value={p.name}>
                         {p.name} <span className="text-muted-foreground">({p.active_proxies} active)</span>
                       </SelectItem>
@@ -499,32 +615,42 @@ export default function UsersPage() {
                   </Select>
                 </div>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="link-url">URL</Label>
-                <div className="flex items-center gap-2">
-                  <Input id="link-url" readOnly value={generateExportUrl(apiLinkUser)} className="font-mono text-[0.75rem] select-all" />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="shrink-0"
-                    onClick={() => {
-                      navigator.clipboard.writeText(generateExportUrl(apiLinkUser))
-                      setCopiedLink(true)
-                      setTimeout(() => setCopiedLink(false), 2000)
-                    }}
-                  >
-                    {copiedLink ? <Check aria-hidden /> : <Copy aria-hidden />}
-                    {copiedLink ? "Copied" : "Copy"}
-                  </Button>
+              {[
+                { id: "link-curl", label: "curl (token in header — preferred)", value: exportCurl() },
+                { id: "link-url", label: "URL (token in query — for tools that only take a URL)", value: generateExportUrl(true) },
+              ].map((field) => (
+                <div key={field.id} className="space-y-1.5">
+                  <Label htmlFor={field.id}>{field.label}</Label>
+                  <div className="flex items-center gap-2">
+                    <Input id={field.id} readOnly value={field.value} className="font-mono text-[0.75rem] select-all" />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="shrink-0"
+                      onClick={() => {
+                        navigator.clipboard.writeText(field.value)
+                        setCopiedLink(field.id)
+                        if (copiedTimer.current) clearTimeout(copiedTimer.current)
+                        copiedTimer.current = setTimeout(() => setCopiedLink(null), 2000)
+                      }}
+                    >
+                      {copiedLink === field.id ? <Check aria-hidden /> : <Copy aria-hidden />}
+                      {copiedLink === field.id ? "Copied" : "Copy"}
+                    </Button>
+                  </div>
                 </div>
-                <p className="text-muted-foreground text-[0.6875rem] leading-4">
-                  Replace <span className="font-mono">YOUR_PASSWORD</span> with the user&apos;s proxy password before use.
-                </p>
-              </div>
+              ))}
+              <p className="text-muted-foreground text-[0.6875rem] leading-4">
+                {apiLinkToken ? (
+                  <>A token in a URL can end up in access logs and shell history; prefer the header form, and revoke the token if a link leaks.</>
+                ) : (
+                  <>Replace <span className="font-mono">YOUR_EXPORT_TOKEN</span> with the user&apos;s export token before use.</>
+                )}
+              </p>
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setApiLinkUser(null)}>Close</Button>
+            <Button variant="outline" onClick={closeApiLinkModal}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -71,7 +71,9 @@
 **👤 Users & routing**
 - `http://user:pass@host:8000` — each user gets a main pool + ordered fallbacks
 - Automatic failover across the chain, fresh proxy on every retry
-- Per-user `requests_per_minute` cap and working-proxy export API
+- Per-user limits: requests per minute, concurrent connections, monthly bandwidth quota
+- Exit country, city and sticky sessions chosen in the username (`alice-country-de-session-x`)
+- HTTP and optional SOCKS5 inbound, working-proxy export API
 - All requests, success rates and response times tracked per proxy
 
 </td>
@@ -129,7 +131,8 @@ server's IP.
 
 > First-boot credentials are seeded once. Leave `ROTA_ADMIN_PASSWORD` unset to
 > get a strong random password (shown in the logs), or set it in `.env` to pick
-> your own. Change it anytime via **Settings → Admin account**.
+> your own. Change it anytime via **Settings → Your account**, and add more
+> accounts under **Access → Accounts**.
 
 `make help` lists the shortcuts: `up`, `build`, `down`, `restart`, `logs`, `ps`,
 `password`, `dev-core`, `dev-dashboard`.
@@ -145,17 +148,62 @@ only to change something. The common knobs:
 | `ROTA_ADMIN_PASSWORD` | _(random)_ | Initial admin password; blank → generated & logged |
 | `ROTA_ADMIN_USER` | `admin` | Initial dashboard username (seeded once) |
 | `JWT_SECRET` | _(generated, stored in DB)_ | Dashboard session signing key. Leave unset; set only to manage rotation yourself (changing it logs everyone out) |
+| `AUDIT_LOG_RETENTION_DAYS` | `365` | How long audit log entries are kept; `0` keeps them forever |
 | `PROXY_PORT` | `8000` | Host port for the proxy your clients connect to |
 | `HTTP_PORT` / `HTTPS_PORT` | `80` / `443` | Web entry ports (Caddy) |
 | `DB_PASSWORD` | `rota_password` | TimescaleDB password |
 | `CORS_ALLOWED_ORIGINS` | `*` | API CORS allowlist (irrelevant behind the proxy) |
 | `TRUST_PROXY_HEADERS` | `true` | Trust `X-Forwarded-For`/`X-Real-IP` for the login rate limiter. Keep `true` behind the bundled Caddy; set `false` if the API is exposed directly |
 | `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `SOCKS_PORT` | _(off)_ | Also serve the proxy over SOCKS5 on this port (see [SOCKS5](#socks5)) |
+| `ROTA_ENCRYPTION_KEY` | _(generated, stored in DB)_ | Key that encrypts upstream proxy passwords at rest. Set it (e.g. `openssl rand -base64 32`) so a database leak alone doesn't expose them — see [Encryption at rest](#encryption-at-rest) |
+| `ROTA_ENCRYPTION_KEYS_PREVIOUS` | _(empty)_ | Comma-separated retired keys, still accepted for decryption during key rotation |
+| `METRICS_TOKEN` | _(empty)_ | Require `Authorization: Bearer <token>` on `/metrics` |
+| `REDIS_URL` | _(off)_ | Redis for limits and sticky sessions shared by all replicas (see [Running several replicas](#running-several-replicas)) |
+| `REDIS_KEY_PREFIX` | `rota:` | Prefix for Rota's keys in a shared Redis |
+| `SHUTDOWN_DRAIN_SECONDS` | `0` | On shutdown, report not ready and keep serving this long before closing listeners |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(off)_ | Export OpenTelemetry traces over OTLP/HTTP (see [Tracing](#tracing)) |
 
 See `.env.example` for the full list including auth brute-force protection.
 
 > **Note**: `ROTA_ADMIN_USER` / `ROTA_ADMIN_PASSWORD` are only used when the
-> database is empty (first start). Afterwards, use **Settings → Admin account**.
+> database is empty (first start). Afterwards, manage accounts under **Access**.
+
+### Encryption at rest
+
+Upstream proxy passwords are stored encrypted (AES-256-GCM). The key comes from
+`ROTA_ENCRYPTION_KEY`; when it is unset, a key is generated on first boot and
+stored in the database. That default still keeps passwords out of table dumps
+and exports, but only a key kept **outside** the database protects them if the
+whole database leaks — set `ROTA_ENCRYPTION_KEY` in production and back it up:
+without it the stored passwords cannot be recovered.
+
+On startup Rota encrypts any plaintext passwords left from older versions and
+re-encrypts values sealed with a retired key. To rotate the key:
+
+```bash
+# .env
+ROTA_ENCRYPTION_KEY=new-key
+ROTA_ENCRYPTION_KEYS_PREVIOUS=old-key   # keep until one restart has completed
+```
+
+Switching from the generated database key to `ROTA_ENCRYPTION_KEY` needs no
+extra step — the stored key is used to read existing values automatically.
+
+If a stored password can't be decrypted with any configured key (for example
+`ROTA_ENCRYPTION_KEY` was removed or mistyped), the core **refuses to start**
+and writes nothing, rather than dialing upstreams without credentials.
+
+**Several core replicas?** Startup re-encrypts immediately, so roll a new key
+out in two deploys: first give every replica the new key as
+`ROTA_ENCRYPTION_KEYS_PREVIOUS` (primary unchanged), then make it the primary
+and move the old key to `ROTA_ENCRYPTION_KEYS_PREVIOUS`.
+
+> **Downgrading** below the release that introduced encryption is not supported
+> without first clearing the passwords: older versions would send the encrypted
+> value to your upstream proxies as the password. Before 3.0.0 there were no
+> roles either: delete viewer and operator accounts before downgrading, or
+> they would become full admins.
 
 ### Production Deployment (HTTPS)
 
@@ -167,6 +215,7 @@ TLS certificate automatically:
 SITE_ADDRESS=rota.example.com
 DB_PASSWORD=a-strong-random-password
 ROTA_ADMIN_PASSWORD=a-strong-password
+ROTA_ENCRYPTION_KEY=output-of-openssl-rand-base64-32
 ```
 
 ```bash
@@ -231,7 +280,7 @@ open http://localhost:8001/docs
 ### From Source
 
 ```bash
-# Prerequisites: Go 1.25.3+, Node.js 20+, pnpm, and TimescaleDB reachable
+# Prerequisites: Go 1.25.14+, Node.js 20+, pnpm, and TimescaleDB reachable
 
 # Clone the repository
 git clone https://github.com/alpkeskin/rota.git
@@ -315,17 +364,76 @@ same-origin behind it. Only the proxy port is exposed separately.
 
 ## 🐳 Deployment
 
-### Production Deployment
-
-#### Using Docker Compose
+### Docker Compose
 
 ```bash
-# Production configuration
-docker compose -f docker-compose.yml up -d
-
-# Enable auto-restart
-docker compose up -d --restart=unless-stopped
+docker compose up -d
 ```
+
+The bundled `docker-compose.yml` runs one core, the dashboard, TimescaleDB and
+Caddy, restarting them automatically. See [Production Deployment
+(HTTPS)](#production-deployment-https) for a domain with automatic TLS.
+
+### Kubernetes (Helm)
+
+A chart lives in [`deploy/helm/rota`](deploy/helm/rota). It runs the core
+(proxy, optional SOCKS5 and API) and the dashboard, with an ingress that
+routes `/api`, `/ws` and `/docs` to the core like the bundled Caddy does.
+PostgreSQL with TimescaleDB is **not** bundled — point it at a managed
+database or one run by an operator.
+
+```bash
+helm install rota ./deploy/helm/rota \
+  --set database.host=timescaledb.db.svc \
+  --set database.existingSecret=rota-db \
+  --set redis.url=redis://redis-master.redis.svc:6379/0 \
+  --set secrets.encryptionKey="$(openssl rand -base64 32)" \
+  --set ingress.enabled=true --set ingress.host=rota.example.com
+```
+
+See the [chart README](deploy/helm/rota/README.md) for every value.
+
+### Running several replicas
+
+Any number of core instances can share one database:
+
+- **Startup** (migrations, key setup, seeding the first admin) runs on one
+  instance at a time, under a Postgres advisory lock.
+- **Background jobs** (fetching sources, pool health checks, alerts, proxy/log/
+  audit cleanup) run on one elected leader. If it stops or loses its database
+  session, another instance takes over within seconds
+  (`rota_cluster_leader` shows which one leads).
+- **Configuration changes** (settings, proxies, proxy users, pools) made on
+  one instance reach the others at once through Postgres `LISTEN/NOTIFY`. If
+  a notification is lost, proxies and users are refreshed within a minute
+  anyway, and each instance checks once a minute whether the settings changed.
+- **Limits and sticky sessions** need Redis (`REDIS_URL`): per-user requests
+  per minute and connection caps, the per-IP proxy rate limit, sticky
+  sessions and login throttling are then enforced across all instances.
+  Without Redis each instance enforces them on its own (a cap of N allows N
+  per instance). If Redis becomes unreachable, instances fall back to their
+  own limits until it's back (`rota_sharedstate_errors_total`). Use a single
+  Redis endpoint (standalone, or a managed service's primary endpoint; Redis
+  Cluster is not supported), version 5 or newer. A user's connection cap
+  costs two Redis round trips per request, made one at a time per user on
+  each instance, so keep Redis close (sub-millisecond) to the core.
+- **Bandwidth quotas** are always kept in the database; users with a quota
+  reload their monthly total every 30 seconds, so usage on other instances
+  counts against it within about half a minute.
+
+Leader election and notifications hold a session on the database, so connect
+directly or through a pooler in **session** mode (PgBouncer in transaction
+mode breaks them). The MaxMind GeoIP database is kept per instance.
+
+### Graceful shutdown
+
+On `SIGTERM` an instance hands off leadership, then reports `503` on
+`/readyz` for `SHUTDOWN_DRAIN_SECONDS` while still serving, so load balancers
+stop sending it new clients; then it stops accepting connections, waits up to
+30 seconds for requests in flight, and closes the remaining tunnels (their
+bytes are counted). A second signal skips the drain. Give the process at least
+drain + 35 seconds (the Helm chart sets `terminationGracePeriodSeconds: 60`
+with a 15 s drain).
 
 ---
 
@@ -438,7 +546,8 @@ Threshold: 9
 1. Create pools for each location/use-case
 2. Go to **Users**, click **Add user**
 3. Set a main pool and optional fallback pools (in priority order)
-4. Configure max retries across the chain and an optional `requests_per_minute` cap
+4. Configure max retries and, optionally, limits: requests per minute, a
+   monthly bandwidth quota and a cap on concurrent connections
 
 Users connect as:
 ```
@@ -450,41 +559,222 @@ http://username:password@your-proxy-host:8000
   <img src="static/routing.png" alt="Flowchart: request on :8000 → with credentials use the user's main pool, fall back to the next pool when none is alive, forward via a proxy, retry with a fresh proxy until it answers; without credentials use global rotation" width="640">
 </picture>
 
-If the main pool has no live IPs the request automatically cascades to the next fallback pool; each retry picks a fresh proxy and skips the ones that already failed.
+If the main pool has no live IPs the request automatically cascades to the next fallback pool; each retry picks a fresh proxy and skips the ones that already failed. A user without any pool uses the global rotation.
+
+#### Choosing the exit: country, city and sticky sessions
+
+Routing options ride in the username, the convention commercial proxy
+networks use — no client changes needed:
+
+```bash
+# Exit from Germany
+curl -x http://alice-country-de:password@proxy-host:8000 https://api.ipify.org
+
+# Exit from New York (use _ for spaces)
+curl -x http://alice-country-us-city-new_york:password@proxy-host:8000 https://api.ipify.org
+
+# Sticky session: the same id keeps the same exit IP, here for 30 minutes
+# (sesstime sets 1-1440 minutes; default 10)
+curl -x http://alice-session-a1b2c3-sesstime-30:password@proxy-host:8000 https://api.ipify.org
+```
+
+| Option | Value | Effect |
+|---|---|---|
+| `country` | ISO 3166-1 alpha-2 (`us`, `de`) | Only proxies geolocated in that country |
+| `city` | city name, `_` for spaces | Only proxies in that city |
+| `session` | 1-64 letters/digits | Pin the exit proxy for the session's lifetime; if it stops working the session moves to another matching proxy and stays there |
+| `sesstime` | minutes, 1-1440 (default 10) | Session lifetime, counted from its first request |
+
+Options apply within the user's pools (main, then fallbacks), so the user
+needs a pool. No match gives `502` with a message saying so; malformed
+options give `400`. Usernames of new proxy users can't have a `-country`,
+`-city`, `-session` or `-sesstime` part (e.g. `alice-country` or
+`team-session-1`), since it would be read as a routing option.
+
+#### Limits and usage
+
+| Limit | Over the limit |
+|---|---|
+| Requests per minute | `429` with `Retry-After` |
+| Concurrent connections (requests + tunnels) | `429` |
+| Monthly bandwidth (up + down, calendar month in UTC) | `429`; open tunnels and downloads in progress are cut within ~10 s |
+
+Usage this month shows in **Users**; it is counted in memory and written to
+the database every 10 seconds (`rota_proxy_bytes_total` has the totals).
+
+#### Circuit breaker
+
+Independently of scheduled health checks, a proxy that can't be reached 5
+times in a row on live traffic is skipped for 30 s (doubling on repeated
+failures, up to 5 min), then gets one trial request. Only failures to reach
+the proxy itself count — not a refused or unreachable destination, which a
+client could otherwise use to take healthy proxies away from other users;
+timeouts and requests the client abandons count neither way. The same rule
+decides when a proxy drops out of a user's pool until its next refresh (3
+failures in a row), and a sticky session only moves when its proxy fails,
+never because of the destination. This applies to every user and the
+global rotation; if every candidate is tripped, Rota still tries one rather
+than failing outright. `rota_proxy_circuit_open` shows how many are out.
+
+#### SOCKS5
+
+Set `SOCKS_PORT` (e.g. `1080`) to also serve the proxy over SOCKS5 with the
+same users, routing options, limits and accounting (username/password auth;
+CONNECT only — no UDP):
+
+```bash
+curl -x socks5h://alice-country-de:password@proxy-host:1080 https://api.ipify.org
+```
+
+With Docker Compose, publish the port in a `docker-compose.override.yml`:
+
+```yaml
+services:
+  rota-core:
+    ports:
+      - "1080:1080"
+```
 
 #### Exporting a user's working proxies
 
-Turn on **Export API** for the user, then fetch the alive proxies of their main pool (or any pool) with the user's own credentials — handy for tools that want a raw list instead of routing through Rota:
+Turn on **Export API** for the user and generate an **export token** (**Users → ⌄ → Export link… → Generate token**). The token is shown once; regenerating it revokes the old one, and **Revoke** disables it. Then fetch the alive proxies of the user's main pool, or of one of its fallback pools — handy for tools that want a raw list instead of routing through Rota:
 
 ```bash
 # One proxy per line; default = the user's main pool, raw address[:user:pass]
-curl "http://localhost/api/v1/proxy-users/export-working-proxies?username=myuser&password=mypassword"
+curl -H "Authorization: Bearer rota_exp_..." \
+  "http://localhost/api/v1/proxy-users/export-working-proxies"
 
-# A specific pool, capped, as protocol://[user:pass@]address
-curl "http://localhost/api/v1/proxy-users/export-working-proxies?username=myuser&password=mypassword&pool=US%20Residential&count=50&format=url"
+# A fallback pool, capped, as protocol://[user:pass@]address
+curl -H "Authorization: Bearer rota_exp_..." \
+  "http://localhost/api/v1/proxy-users/export-working-proxies?pool=US%20Residential&count=50&format=url"
+
+# Tools that only take a URL can pass the token as ?token=rota_exp_...
 ```
 
-The dashboard builds this link for you from the row menu (**Users → ⌄ → Export link**). The password travels in the query string, so keep such links private.
+A user can only export its own pools (main + fallbacks); any other pool returns `404`. The endpoint also accepts the user's proxy credentials via HTTP Basic auth (`curl -u myuser:mypassword ...`). The old `?username=&password=` form still works but is **deprecated** — it puts the password in URLs and access logs — and responses to it carry a `Deprecation: true` header. Failed password attempts are throttled per IP with the same thresholds as the login endpoint (token requests aren't — tokens can't be guessed).
 
 ---
 
-## 🔐 API Authentication
+## 🔐 Access Control
 
-All API endpoints require a JWT bearer token obtained from `POST /api/v1/auth/login`.
+### Accounts and roles
+
+Everyone who signs in to the dashboard or API has an **account** with one role
+(**Access → Accounts**, admins only). Roles are cumulative:
+
+| Role | Can |
+|---|---|
+| `viewer` | Read everything except accounts and the audit log; secrets in configuration (webhook and source URLs past the host, also inside fetch errors; health-check header values; the MaxMind key and download URL) are shown redacted |
+| `operator` | …and change proxies, pools and proxy users (including export tokens), fetch/delete sources, delete alert rules, test proxies. Note that an operator can therefore obtain upstream proxy credentials (a proxy user's working-proxies export lists them) and make the core connect to proxy addresses of their choosing |
+| `admin` | …and change settings, **set source and webhook URLs** (they make the core call an address of the caller's choosing), manage accounts and others' API keys, read the audit log |
+
+Role changes apply to open sessions immediately — including open live views
+(WebSockets), which re-check their credentials every 15 seconds. Disabling an
+account or resetting its password signs it out everywhere, and anyone can
+**Sign out everywhere** from the account menu. At least one enabled admin
+always remains: the last one can't be demoted, disabled or deleted.
+
+> Upgrading from a version without accounts: the existing admin login becomes
+> an `admin` account, and open dashboard sessions must sign in once more.
+
+### Sessions and API keys
+
+Interactive use signs in for a 24-hour session token:
 
 ```bash
-# Login
 TOKEN=$(curl -s -X POST http://localhost/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"yourpassword"}' | jq -r '.token')
 
-# Use token
 curl -H "Authorization: Bearer $TOKEN" http://localhost/api/v1/proxies
 ```
 
+Scripts and integrations should use an **API key** instead (**Access → API
+keys**). A key is shown once, can expire, can be revoked, and acts with its own
+role capped by its owner's current role. Keys can't manage accounts, keys or
+passwords, so a leaked key can't mint new credentials, and creating a key asks
+for your password, so a stolen session token can't either (five wrong
+passwords in a row sign the account out everywhere). Keys are separate
+from sessions: signing out (everywhere) or a password reset doesn't revoke
+them — revoke them explicitly if an account may be compromised; disabling or
+deleting the account stops its keys at once.
+
+```bash
+curl -H "Authorization: Bearer rota_key_..." http://localhost/api/v1/proxies
+```
+
+### Audit log
+
+Every change made through the API — who, what route, which ids, the result and
+the client IP — is recorded, including requests refused for lack of a role or
+with a revoked/invalid credential (API keys are identified by their public
+prefix), sign-in attempts and bulk exports. Attempts the login rate limiter
+turns away before they reach the check are logged by the core, not audited. Admins browse it under **Access → Audit
+log** or `GET /api/v1/audit-log?actor=&action=&from=&to=&page=`. Request bodies
+are never stored. Entries are kept for `AUDIT_LOG_RETENTION_DAYS` (365).
+
 Public endpoints (no token required):
-- `GET /health`
+- `GET /health`, `GET /livez`, `GET /readyz`
 - `POST /api/v1/auth/login`
+- `GET /api/v1/proxy-users/export-working-proxies` (authenticated with an export token, see above)
+
+---
+
+## 📈 Monitoring
+
+The core exposes probes and Prometheus metrics on the API port (`:8001`):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /livez` | Liveness — `200` while the process serves HTTP; never checks dependencies |
+| `GET /readyz` | Readiness — `200` when the database answers a ping, `503` otherwise or while draining on shutdown |
+| `GET /metrics` | Prometheus metrics |
+
+The bundled Caddy does **not** route `/metrics`, `/livez` or `/readyz`, so they are
+only reachable on the internal Docker network (e.g. `http://rota-core:8001/metrics`).
+If you expose `:8001` directly, set `METRICS_TOKEN` and scrape with
+`Authorization: Bearer <token>`.
+
+Useful series:
+
+| Metric | What it tells you |
+|---|---|
+| `rota_proxy_requests_total{kind,outcome}` | Proxy traffic by `http`/`connect`/`socks5` and `success`, `upstream_error`, `internal_error`, `rejected_auth`, `rejected_rate_limit` (a CONNECT counts as `success` once the tunnel is established) |
+| `rota_proxy_tunnels_closed_total{result}` | CONNECT tunnels by how they ended: `clean` or `error` (includes resets during normal teardown — watch the ratio) |
+| `rota_proxy_request_duration_seconds` | Time to upstream response (HTTP) or tunnel establishment (CONNECT, SOCKS5) |
+| `rota_proxy_active_tunnels` | Open CONNECT and SOCKS5 tunnels |
+| `rota_proxy_bytes_total{direction}` | Proxied payload bytes, `up` (client→upstream) and `down` |
+| `rota_proxy_limit_rejections_total{reason}` | Requests refused by per-user limits: `rate_limit`, `concurrency`, `quota` |
+| `rota_proxy_circuit_open` / `rota_proxy_circuit_transitions_total{to}` | Proxies skipped by the circuit breaker, and its state changes |
+| `rota_upstream_proxies{status}` | Upstream inventory by status (read from the DB at scrape time) |
+| `rota_api_requests_total{route,method,status}` / `rota_api_request_duration_seconds` | REST API traffic by route pattern |
+| `rota_log_hook_dropped_total` | Log events dropped because the DB log queue was full |
+| `rota_secrets_decrypt_failures_total` | Stored proxy passwords no configured key could decrypt |
+| `rota_cluster_leader` / `rota_cluster_leader_transitions_total{event}` | Whether this instance runs the background jobs, and leadership changes |
+| `rota_cluster_change_events_total{topic}` | Configuration changes received from other instances |
+| `rota_sharedstate_errors_total{op}` | Redis calls that failed; the instance used its own limits meanwhile |
+
+Plus the standard `go_*` and `process_*` series and `rota_build_info{version}`.
+
+### Tracing
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `http://otel-collector:4318`) to export
+OpenTelemetry traces over OTLP/HTTP. The standard `OTEL_*` variables apply
+(`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`,
+`OTEL_TRACES_SAMPLER`/`_ARG`, `OTEL_SDK_DISABLED`).
+
+- **API requests** get a span named after the route (`GET /api/v1/pools/{id}`),
+  continuing the caller's `traceparent`. Probes, `/metrics` and WebSockets
+  aren't traced.
+- **Proxied requests and tunnels** (HTTP, CONNECT, SOCKS5) get a root span with
+  the user, target host and port, routing options and the request id
+  (`X-Rota-Request-Id`), and a child span per upstream proxy attempt. A CONNECT
+  or SOCKS5 span lasts as long as the tunnel.
+- **Database queries** made while handling a traced request get a span each.
+
+The proxy stays transparent: trace context sent by proxy clients is ignored
+(a client can't join your traces or force sampling), nothing is added to
+forwarded requests, and paths and query strings are never recorded.
 
 ### Brute-Force Protection
 

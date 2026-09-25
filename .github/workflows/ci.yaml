@@ -1,0 +1,205 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  core-test:
+    name: Core — build & test
+    runs-on: ubuntu-latest
+    services:
+      # Integration tests (repository, handlers, proxy stats) run against a
+      # real database when ROTA_TEST_DSN is set; without it they skip.
+      postgres:
+        image: timescale/timescaledb:2.22.1-pg17
+        env:
+          POSTGRES_USER: rota
+          POSTGRES_PASSWORD: rota
+          POSTGRES_DB: rota_test
+          TIMESCALEDB_TELEMETRY: "off"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rota -d rota_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      # Shared-state tests (limits, sticky sessions, login throttling across
+      # instances) run when ROTA_TEST_REDIS is set.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      ROTA_TEST_DSN: postgres://rota:rota@localhost:5432/rota_test?sslmode=disable
+      ROTA_TEST_REDIS: redis://localhost:6379/0
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: Verify go.mod / go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # -p 1: several packages' integration tests share tables in the same
+      # test database, so packages must not run concurrently.
+      - name: Test
+        run: go test -race -p 1 -count=1 -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -n 1
+
+  core-lint:
+    name: Core — lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      # The existing code predates linting, so only issues introduced by the
+      # change under review fail the job. Drop only-new-issues once the
+      # backlog is cleared.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.5.0
+          working-directory: core
+          only-new-issues: true
+
+  core-vulncheck:
+    name: Core — govulncheck
+    runs-on: ubuntu-latest
+    # Report-only for now: known advisories in the pinned toolchain or deps
+    # should be triaged, not block every unrelated PR. Make it blocking once
+    # the first run is clean.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: govulncheck
+        working-directory: core
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  dashboard:
+    name: Dashboard — lint, typecheck & build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm version comes from "packageManager" in dashboard/package.json.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: dashboard/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Build
+        run: pnpm build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  helm:
+    name: Helm chart — lint & validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.18.6
+
+      - name: Lint
+        run: helm lint deploy/helm/rota --set database.host=db,database.password=x
+
+      # Render the main configurations and validate them against the
+      # Kubernetes schemas (ServiceMonitor is a CRD and is skipped).
+      - name: Validate rendered manifests
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+          chart=deploy/helm/rota
+          helm template r $chart --set database.host=db,database.password=x > minimal.yaml
+          helm template r $chart --set database.host=db,database.existingSecret=db,redis.url=redis://r:6379/0,core.socksPort=1080,ingress.enabled=true,core.autoscaling.enabled=true,tracing.otlpEndpoint=http://otel:4318,secrets.metricsToken=t,metrics.serviceMonitor.enabled=true > full.yaml
+          helm template r $chart --set database.host=db,database.existingSecret=db,secrets.existingSecret=app,redis.existingSecret=redis,dashboard.enabled=false > existing.yaml
+          ~/go/bin/kubeconform -strict -summary -kubernetes-version 1.30.0 -skip ServiceMonitor minimal.yaml full.yaml existing.yaml
+
+  docker:
+    name: Docker — build images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            context: ./core
+          - name: dashboard
+            context: ./dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.name }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          cache-from: type=gha,scope=ci-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.name }}

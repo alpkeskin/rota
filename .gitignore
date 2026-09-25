@@ -24,6 +24,8 @@ go.work.sum
 # Other
 .DS_Store
 *.txt
+# The Helm chart's post-install notes are a template, not scratch output.
+!deploy/helm/rota/templates/NOTES.txt
 
 # Logs
 *.log

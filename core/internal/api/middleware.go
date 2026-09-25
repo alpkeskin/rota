@@ -2,12 +2,14 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/alpkeskin/rota/core/internal/metrics"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 // LoggerMiddleware logs HTTP requests
@@ -34,36 +36,39 @@ func LoggerMiddleware(log *logger.Logger) func(next http.Handler) http.Handler {
 	}
 }
 
-// JWTMiddleware validates Bearer tokens on every request in the protected group.
-// Accepts token from:
-//   - Authorization: Bearer <token> header (standard API calls)
-//   - ?token=<token> query param (WebSocket connections)
-//
-// Returns 401 if missing, invalid, or expired.
-func JWTMiddleware(secret string) func(next http.Handler) http.Handler {
-	key := []byte(secret)
+// MetricsMiddleware records per-route request counts and latency. It labels
+// by chi route pattern (e.g. /api/v1/proxies/{id}), never the raw path, so
+// label cardinality stays bounded; unmatched paths share one label.
+func MetricsMiddleware() func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tokenStr := extractToken(r)
-			if tokenStr == "" {
-				w.Header().Set("Content-Type", "application/json")
-				http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
-				return
-			}
+			start := time.Now()
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			next.ServeHTTP(ww, r)
 
-			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, jwt.ErrSignatureInvalid
+			route := "unmatched"
+			if rctx := chi.RouteContext(r.Context()); rctx != nil {
+				if p := rctx.RoutePattern(); p != "" {
+					route = p
 				}
-				return key, nil
-			})
-			if err != nil || !token.Valid {
-				w.Header().Set("Content-Type", "application/json")
-				http.Error(w, `{"error":"invalid or expired token"}`, http.StatusUnauthorized)
-				return
 			}
-
-			next.ServeHTTP(w, r)
+			status := ww.Status()
+			if status == 0 {
+				// Nothing was written through w: either the connection was
+				// hijacked for a WebSocket upgrade, or the handler returned
+				// without writing, which net/http answers with an empty 200.
+				if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+					status = http.StatusSwitchingProtocols
+				} else {
+					status = http.StatusOK
+				}
+			}
+			statusLabel := strconv.Itoa(status)
+			metrics.APIRequests.WithLabelValues(route, metrics.MethodLabel(r.Method), statusLabel).Inc()
+			// Long-lived WebSocket streams would swamp the latency histogram.
+			if !strings.HasPrefix(route, "/ws/") {
+				metrics.APIRequestDuration.WithLabelValues(route, metrics.MethodLabel(r.Method)).Observe(time.Since(start).Seconds())
+			}
 		})
 	}
 }

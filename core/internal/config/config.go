@@ -7,12 +7,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds all application configuration
 type Config struct {
 	ProxyPort int
 	APIPort   int
+	// SOCKSPort, when non-zero, also serves the proxy over SOCKS5. (SOCKS_PORT)
+	SOCKSPort int
 	LogLevel  string
 	Database  DatabaseConfig
 	AdminUser string
@@ -24,6 +27,38 @@ type Config struct {
 	// JWTSecret, when set, signs dashboard tokens instead of the key persisted
 	// in the database — for operators who want to control rotation themselves.
 	JWTSecret string
+
+	// EncryptionKey seals sensitive columns (upstream proxy passwords) at rest.
+	// When empty, a random key is generated once and stored in the database —
+	// that still keeps secrets out of exports and table-level dumps, but only a
+	// key kept outside the database protects against a full database leak.
+	// (ROTA_ENCRYPTION_KEY)
+	EncryptionKey string
+	// EncryptionKeysPrevious are retired keys still accepted for decryption so
+	// the primary key can be rotated; data is re-encrypted with the primary at
+	// startup. (ROTA_ENCRYPTION_KEYS_PREVIOUS, comma-separated)
+	EncryptionKeysPrevious []string
+
+	// AuditLogRetentionDays is how long audit entries are kept; 0 keeps them
+	// forever. (AUDIT_LOG_RETENTION_DAYS, default 365)
+	AuditLogRetentionDays int
+
+	// MetricsToken, when set, requires "Authorization: Bearer <token>" on the
+	// Prometheus /metrics endpoint. (METRICS_TOKEN)
+	MetricsToken string
+
+	// RedisURL, when set, keeps per-user rate and connection limits, per-IP
+	// proxy rate limits, sticky sessions and login throttling in Redis so
+	// every replica enforces the same limits. (REDIS_URL, e.g.
+	// redis://:password@redis:6379/0; rediss:// for TLS)
+	RedisURL string
+	// RedisKeyPrefix namespaces Rota's keys in a shared Redis. (REDIS_KEY_PREFIX)
+	RedisKeyPrefix string
+
+	// ShutdownDrain is how long the instance keeps serving after SIGTERM
+	// while /readyz reports not ready, so load balancers stop sending new
+	// clients before the listeners close. (SHUTDOWN_DRAIN_SECONDS)
+	ShutdownDrain time.Duration
 
 	// CORSAllowedOrigins controls the Access-Control-Allow-Origin values.
 	// Defaults to ["*"]. Behind the bundled reverse proxy the dashboard is
@@ -86,6 +121,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		ProxyPort: getEnvAsInt("PROXY_PORT", 8000),
 		APIPort:   getEnvAsInt("API_PORT", 8001),
+		SOCKSPort: getEnvAsInt("SOCKS_PORT", 0),
 		LogLevel:  getEnv("LOG_LEVEL", "info"),
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
@@ -95,11 +131,18 @@ func Load() (*Config, error) {
 			Name:     getEnv("DB_NAME", "rota"),
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 		},
-		AdminUser:          getEnv("ROTA_ADMIN_USER", "admin"),
-		AdminPass:          adminPass,
-		AdminPassGenerated: adminPassGenerated,
-		JWTSecret:          os.Getenv("JWT_SECRET"),
-		CORSAllowedOrigins: splitAndTrim(getEnv("CORS_ALLOWED_ORIGINS", "*")),
+		AdminUser:              getEnv("ROTA_ADMIN_USER", "admin"),
+		AdminPass:              adminPass,
+		AdminPassGenerated:     adminPassGenerated,
+		JWTSecret:              os.Getenv("JWT_SECRET"),
+		EncryptionKey:          strings.TrimSpace(os.Getenv("ROTA_ENCRYPTION_KEY")),
+		EncryptionKeysPrevious: splitList(os.Getenv("ROTA_ENCRYPTION_KEYS_PREVIOUS")),
+		MetricsToken:           strings.TrimSpace(os.Getenv("METRICS_TOKEN")),
+		RedisURL:               strings.TrimSpace(os.Getenv("REDIS_URL")),
+		RedisKeyPrefix:         getEnv("REDIS_KEY_PREFIX", "rota:"),
+		ShutdownDrain:          time.Duration(getEnvAsInt("SHUTDOWN_DRAIN_SECONDS", 0)) * time.Second,
+		AuditLogRetentionDays:  getEnvAsInt("AUDIT_LOG_RETENTION_DAYS", 365),
+		CORSAllowedOrigins:     splitAndTrim(getEnv("CORS_ALLOWED_ORIGINS", "*")),
 
 		TrustProxyHeaders: getEnvAsBool("TRUST_PROXY_HEADERS", false),
 
@@ -132,6 +175,17 @@ func (c *Config) Validate() error {
 	}
 	if c.ProxyPort == c.APIPort {
 		return fmt.Errorf("proxy port and API port cannot be the same: %d", c.ProxyPort)
+	}
+	if c.ShutdownDrain < 0 || c.ShutdownDrain > 5*time.Minute {
+		return fmt.Errorf("SHUTDOWN_DRAIN_SECONDS must be between 0 and 300")
+	}
+	if c.SOCKSPort != 0 {
+		if c.SOCKSPort < 1 || c.SOCKSPort > 65535 {
+			return fmt.Errorf("invalid SOCKS port: %d", c.SOCKSPort)
+		}
+		if c.SOCKSPort == c.ProxyPort || c.SOCKSPort == c.APIPort {
+			return fmt.Errorf("SOCKS port %d collides with the proxy or API port", c.SOCKSPort)
+		}
 	}
 
 	validLogLevels := map[string]bool{
@@ -206,6 +260,18 @@ func splitAndTrim(value string) []string {
 	}
 	if len(out) == 0 {
 		return []string{"*"}
+	}
+	return out
+}
+
+// splitList splits a comma-separated env value into trimmed, non-empty items.
+// Unlike splitAndTrim it has no wildcard default: empty input yields nil.
+func splitList(value string) []string {
+	var out []string
+	for _, p := range strings.Split(value, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
 	}
 	return out
 }

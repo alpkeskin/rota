@@ -35,6 +35,8 @@ services:
       - "${PROXY_PORT:-8000}:${PROXY_PORT:-8000}"
     environment:
       - PROXY_PORT=${PROXY_PORT:-8000}
+      # Optional SOCKS5 listener; publish the port in docker-compose.override.yml.
+      - SOCKS_PORT=${SOCKS_PORT:-0}
       - API_PORT=8001
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - DB_HOST=${DB_HOST:-timescaledb}
@@ -49,11 +51,29 @@ services:
       - ROTA_ADMIN_PASSWORD=${ROTA_ADMIN_PASSWORD:-}
       # Optional; unset = generated once and persisted in the DB.
       - JWT_SECRET=${JWT_SECRET:-}
+      # Encrypts upstream proxy passwords at rest; unset = key stored in the DB.
+      - ROTA_ENCRYPTION_KEY=${ROTA_ENCRYPTION_KEY:-}
+      - ROTA_ENCRYPTION_KEYS_PREVIOUS=${ROTA_ENCRYPTION_KEYS_PREVIOUS:-}
+      - METRICS_TOKEN=${METRICS_TOKEN:-}
+      # Optional: Redis for shared limits (several core replicas) and OTLP tracing.
+      - REDIS_URL=${REDIS_URL:-}
+      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-rota:}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-}
+      - OTEL_RESOURCE_ATTRIBUTES=${OTEL_RESOURCE_ATTRIBUTES:-}
+      - OTEL_TRACES_SAMPLER=${OTEL_TRACES_SAMPLER:-}
+      - OTEL_TRACES_SAMPLER_ARG=${OTEL_TRACES_SAMPLER_ARG:-}
+      - SHUTDOWN_DRAIN_SECONDS=${SHUTDOWN_DRAIN_SECONDS:-0}
+      - AUDIT_LOG_RETENTION_DAYS=${AUDIT_LOG_RETENTION_DAYS:-365}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-*}
       # The core sits behind Caddy, so trust its X-Forwarded-For for the login
       # rate limiter's per-IP tracking. Set to false only if you expose the API
       # directly without a trusted reverse proxy (AUD-20).
       - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-true}
+    # Shutdown waits up to 30s for requests in flight, after any drain:
+    # raise ROTA_STOP_GRACE to at least SHUTDOWN_DRAIN_SECONDS + 35s.
+    stop_grace_period: ${ROTA_STOP_GRACE:-45s}
     networks:
       - rota-network
     healthcheck:

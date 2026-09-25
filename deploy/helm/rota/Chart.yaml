@@ -1,0 +1,16 @@
+apiVersion: v2
+name: rota
+description: Rota proxy rotation server — core (proxy + API) and dashboard
+type: application
+version: 3.0.0
+# Image tag used when core.image.tag / dashboard.image.tag are empty. Release
+# images are tagged without the "v" (3.0.0); for a release candidate set the
+# tags to e.g. 3.0.0-rc.1.
+appVersion: "3.0.0"
+home: https://github.com/alpkeskin/rota
+sources:
+  - https://github.com/alpkeskin/rota
+keywords:
+  - proxy
+  - rotation
+  - socks5

@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/database"
@@ -19,7 +21,13 @@ type HealthHandler struct {
 	db        *database.DB
 	proxyRepo *repository.ProxyRepository
 	logger    *logger.Logger
+	// draining is set on shutdown: readiness fails so load balancers stop
+	// sending new clients while in-flight work finishes.
+	draining atomic.Bool
 }
+
+// SetDraining makes Readyz report not ready from now on.
+func (h *HealthHandler) SetDraining() { h.draining.Store(true) }
 
 // NewHealthHandler creates a new HealthHandler
 func NewHealthHandler(db *database.DB, proxyRepo *repository.ProxyRepository, log *logger.Logger) *HealthHandler {
@@ -46,6 +54,50 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.jsonResponse(w, http.StatusOK, response)
+}
+
+// Livez reports that the process is up and serving HTTP. It never touches
+// dependencies, so an orchestrator won't restart the process because the
+// database is briefly unavailable.
+//
+//	@Summary		Liveness probe
+//	@Tags			health
+//	@Produce		json
+//	@Success		200	{object}	map[string]interface{}
+//	@Router			/livez [get]
+func (h *HealthHandler) Livez(w http.ResponseWriter, r *http.Request) {
+	h.jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+}
+
+// Readyz reports whether the instance can serve traffic: the database must
+// answer a ping within two seconds. An empty proxy inventory is still ready —
+// a fresh install must be reachable so proxies can be added.
+//
+//	@Summary		Readiness probe
+//	@Tags			health
+//	@Produce		json
+//	@Success		200	{object}	map[string]interface{}
+//	@Failure		503	{object}	map[string]interface{}
+//	@Router			/readyz [get]
+func (h *HealthHandler) Readyz(w http.ResponseWriter, r *http.Request) {
+	if h.draining.Load() {
+		h.jsonResponse(w, http.StatusServiceUnavailable, map[string]interface{}{"status": "draining"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := h.db.Ping(ctx); err != nil {
+		h.logger.Warn("readiness check failed", "check", "database", "error", err)
+		h.jsonResponse(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"status": "not_ready",
+			"checks": map[string]string{"database": "unavailable"},
+		})
+		return
+	}
+	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status": "ready",
+		"checks": map[string]string{"database": "ok"},
+	})
 }
 
 // Status handles detailed status check

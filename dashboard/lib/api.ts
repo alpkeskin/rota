@@ -26,6 +26,15 @@ import {
   ProxyUser,
   CreateProxyUserRequest,
   UpdateProxyUserRequest,
+  ExportTokenResponse,
+  Me,
+  Account,
+  CreateAccountRequest,
+  UpdateAccountRequest,
+  ApiKey,
+  CreateApiKeyRequest,
+  CreateApiKeyResponse,
+  AuditLogResponse,
   PoolAlertRule,
   CreatePoolAlertRuleRequest,
 } from "./types"
@@ -119,8 +128,61 @@ class ApiClient {
     return response
   }
 
-  async getAdminInfo(): Promise<{ username: string }> {
+  async getMe(): Promise<Me> {
     return this.request("/api/v1/auth/me")
+  }
+
+  // Revokes every session of the signed-in account, including this one.
+  async signOutEverywhere(): Promise<void> {
+    await this.request("/api/v1/auth/sign-out-everywhere", { method: "POST" })
+    this.clearToken()
+  }
+
+  // ── Accounts (admin) ──────────────────────────────────────────────────────
+  async getAccounts(): Promise<{ accounts: Account[] }> {
+    return this.request("/api/v1/accounts")
+  }
+
+  async createAccount(req: CreateAccountRequest): Promise<Account> {
+    return this.request("/api/v1/accounts", { method: "POST", body: JSON.stringify(req) })
+  }
+
+  async updateAccount(id: number, req: UpdateAccountRequest): Promise<Account> {
+    return this.request(`/api/v1/accounts/${id}`, { method: "PUT", body: JSON.stringify(req) })
+  }
+
+  async deleteAccount(id: number): Promise<void> {
+    return this.request(`/api/v1/accounts/${id}`, { method: "DELETE" })
+  }
+
+  async revokeAccountSessions(id: number): Promise<Account> {
+    return this.request(`/api/v1/accounts/${id}/revoke-sessions`, { method: "POST" })
+  }
+
+  // ── API keys ──────────────────────────────────────────────────────────────
+  async getApiKeys(all = false): Promise<{ api_keys: ApiKey[] }> {
+    return this.request(`/api/v1/api-keys${all ? "?all=true" : ""}`)
+  }
+
+  // The returned key is shown only once.
+  async createApiKey(req: CreateApiKeyRequest): Promise<CreateApiKeyResponse> {
+    return this.request("/api/v1/api-keys", { method: "POST", body: JSON.stringify(req) })
+  }
+
+  async revokeApiKey(id: number): Promise<ApiKey> {
+    return this.request(`/api/v1/api-keys/${id}`, { method: "DELETE" })
+  }
+
+  // ── Audit log (admin) ─────────────────────────────────────────────────────
+  async getAuditLog(params: { page?: number; limit?: number; actor?: string; actorId?: number; action?: string } = {}): Promise<AuditLogResponse> {
+    const q = new URLSearchParams()
+    if (params.actorId) q.set("actor_id", String(params.actorId))
+    if (params.page) q.set("page", String(params.page))
+    if (params.limit) q.set("limit", String(params.limit))
+    if (params.actor) q.set("actor", params.actor)
+    if (params.action) q.set("action", params.action)
+    const qs = q.toString()
+    return this.request(`/api/v1/audit-log${qs ? `?${qs}` : ""}`)
   }
 
   async changePassword(opts: {
@@ -467,6 +529,15 @@ class ApiClient {
 
   async deleteProxyUser(id: number): Promise<void> {
     return this.request(`/api/v1/proxy-users/${id}`, { method: "DELETE" })
+  }
+
+  // Issues a new export token (revoking the previous one). Shown only once.
+  async rotateProxyUserExportToken(id: number): Promise<ExportTokenResponse> {
+    return this.request(`/api/v1/proxy-users/${id}/export-token`, { method: "POST" })
+  }
+
+  async revokeProxyUserExportToken(id: number): Promise<void> {
+    return this.request(`/api/v1/proxy-users/${id}/export-token`, { method: "DELETE" })
   }
 
   // ── Pool Export ──────────────────────────────────────────────────────────

@@ -558,6 +558,103 @@ var migrations = []Migration{
 		`,
 		Down: `DROP TABLE IF EXISTS system_secrets;`,
 	},
+	{
+		Version:     26,
+		Description: "Add revocable export tokens to proxy_users",
+		Up: `
+			ALTER TABLE proxy_users ADD COLUMN IF NOT EXISTS export_token_hash TEXT;
+			ALTER TABLE proxy_users ADD COLUMN IF NOT EXISTS export_token_created_at TIMESTAMP;
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_users_export_token_hash
+				ON proxy_users(export_token_hash) WHERE export_token_hash IS NOT NULL;
+		`,
+		Down: `
+			DROP INDEX IF EXISTS idx_proxy_users_export_token_hash;
+			ALTER TABLE proxy_users DROP COLUMN IF EXISTS export_token_created_at;
+			ALTER TABLE proxy_users DROP COLUMN IF EXISTS export_token_hash;
+		`,
+	},
+	{
+		Version:     27,
+		Description: "Dashboard accounts with roles, API keys and audit log",
+		Up: `
+			-- The single admin login becomes the first of many role-based accounts.
+			ALTER TABLE admin_credentials RENAME TO accounts;
+			ALTER TABLE accounts ADD COLUMN IF NOT EXISTS role VARCHAR(16) NOT NULL DEFAULT 'admin'
+				CHECK (role IN ('viewer', 'operator', 'admin'));
+			-- 'admin' only backfills the existing login; any later insert that
+			-- omits the role must get the least privilege.
+			ALTER TABLE accounts ALTER COLUMN role SET DEFAULT 'viewer';
+			ALTER TABLE accounts ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT true;
+			-- Bumped to revoke every session token issued before.
+			ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
+			ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+
+			CREATE TABLE IF NOT EXISTS api_keys (
+				id           SERIAL PRIMARY KEY,
+				account_id   INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+				name         VARCHAR(100) NOT NULL,
+				key_hash     TEXT NOT NULL UNIQUE,
+				key_prefix   VARCHAR(32) NOT NULL,
+				role         VARCHAR(16) NOT NULL CHECK (role IN ('viewer', 'operator', 'admin')),
+				created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				expires_at   TIMESTAMPTZ,
+				last_used_at TIMESTAMPTZ,
+				revoked_at   TIMESTAMPTZ
+			);
+			CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);
+
+			CREATE TABLE IF NOT EXISTS audit_log (
+				id          BIGSERIAL PRIMARY KEY,
+				at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				actor_type  VARCHAR(16) NOT NULL,
+				actor_id    INTEGER,
+				actor_name  VARCHAR(255) NOT NULL DEFAULT '',
+				action      VARCHAR(255) NOT NULL,
+				resource    TEXT NOT NULL DEFAULT '',
+				status      INTEGER NOT NULL DEFAULT 0,
+				ip          VARCHAR(64) NOT NULL DEFAULT '',
+				details     JSONB
+			);
+			CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at DESC);
+			CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_name);
+			CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
+		`,
+		Down: `
+			DROP TABLE IF EXISTS audit_log;
+			DROP TABLE IF EXISTS api_keys;
+			ALTER TABLE accounts DROP COLUMN IF EXISTS last_login_at;
+			ALTER TABLE accounts DROP COLUMN IF EXISTS token_version;
+			ALTER TABLE accounts DROP COLUMN IF EXISTS enabled;
+			ALTER TABLE accounts DROP COLUMN IF EXISTS role;
+			ALTER TABLE accounts RENAME TO admin_credentials;
+		`,
+	},
+	{
+		Version:     28,
+		Description: "Per-user bandwidth quotas, connection caps and monthly usage",
+		Up: `
+			-- 0 = unlimited for both.
+			ALTER TABLE proxy_users ADD COLUMN IF NOT EXISTS monthly_bandwidth_limit_bytes BIGINT NOT NULL DEFAULT 0
+				CHECK (monthly_bandwidth_limit_bytes >= 0);
+			ALTER TABLE proxy_users ADD COLUMN IF NOT EXISTS max_concurrent_connections INTEGER NOT NULL DEFAULT 0
+				CHECK (max_concurrent_connections >= 0);
+
+			-- Proxied payload bytes per user per calendar month (UTC).
+			CREATE TABLE IF NOT EXISTS proxy_user_bandwidth (
+				user_id    INTEGER NOT NULL REFERENCES proxy_users(id) ON DELETE CASCADE,
+				month      DATE NOT NULL,
+				bytes_up   BIGINT NOT NULL DEFAULT 0,
+				bytes_down BIGINT NOT NULL DEFAULT 0,
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				PRIMARY KEY (user_id, month)
+			);
+		`,
+		Down: `
+			DROP TABLE IF EXISTS proxy_user_bandwidth;
+			ALTER TABLE proxy_users DROP COLUMN IF EXISTS max_concurrent_connections;
+			ALTER TABLE proxy_users DROP COLUMN IF EXISTS monthly_bandwidth_limit_bytes;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations
@@ -776,4 +873,16 @@ func (db *DB) GetMigrationStatus(ctx context.Context) ([]map[string]interface{},
 	}
 
 	return status, nil
+}
+
+// MigrationUp returns the Up SQL of a migration version. Tests use it to
+// build just the tables they need from the real DDL, since the full chain
+// requires the TimescaleDB extension.
+func MigrationUp(version int) (string, bool) {
+	for _, m := range migrations {
+		if m.Version == version {
+			return m.Up, true
+		}
+	}
+	return "", false
 }
