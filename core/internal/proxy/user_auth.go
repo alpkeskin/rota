@@ -77,6 +77,9 @@ func NewUserAuthMiddleware(
 		rotSettings: rotSettings,
 		logger:      log,
 		cache:       make(map[string]userEntry),
+		// Until the first successful lookup, assume users exist: a database
+		// error at startup must not turn the proxy into an open one.
+		usersConfigured: true,
 	}
 	// background goroutine: refresh all cached chains every 30s
 	go m.refreshLoop()
@@ -309,9 +312,13 @@ func (m *UserAuthMiddleware) hasProxyUsers(ctx context.Context) bool {
 		return cached
 	}
 
+	if m.userRepo == nil {
+		return cached
+	}
 	users, err := m.userRepo.List(ctx)
 	if err != nil {
-		// On error keep the last known value (fail toward the previous decision).
+		// On error keep the last known value (fail toward the previous
+		// decision; "users exist" until a lookup has succeeded).
 		return cached
 	}
 	has := len(users) > 0

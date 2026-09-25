@@ -233,6 +233,22 @@ func TestQuotaCutsOpenTunnelWithoutBlockingFlush(t *testing.T) {
 	if _, err := io.ReadFull(conn, buf[:200]); err != nil {
 		t.Fatal(err)
 	}
+	// Bytes are counted just after they are relayed, so the client can see
+	// the echo a moment before the count lands: wait for it.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		f.acct.mu.Lock()
+		u := f.acct.users[96]
+		counted := u != nil && u.total() >= 100
+		f.acct.mu.Unlock()
+		if counted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tunnel bytes never counted")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	flushed := make(chan struct{})
 	go func() { f.acct.Flush(context.Background()); close(flushed) }()

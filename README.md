@@ -608,7 +608,11 @@ Independently of scheduled health checks, a proxy that can't be reached 5
 times in a row on live traffic is skipped for 30 s (doubling on repeated
 failures, up to 5 min), then gets one trial request. Only failures to reach
 the proxy itself count — not a refused or unreachable destination, which a
-client could otherwise use to take healthy proxies away from other users. This applies to every user and the
+client could otherwise use to take healthy proxies away from other users;
+timeouts and requests the client abandons count neither way. The same rule
+decides when a proxy drops out of a user's pool until its next refresh (3
+failures in a row), and a sticky session only moves when its proxy fails,
+never because of the destination. This applies to every user and the
 global rotation; if every candidate is tripped, Rota still tries one rather
 than failing outright. `rota_proxy_circuit_open` shows how many are out.
 

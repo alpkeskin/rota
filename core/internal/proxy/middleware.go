@@ -172,7 +172,10 @@ func (m *RateLimitMiddleware) UpdateSettings(settings models.RateLimitSettings) 
 
 // HandleRequest validates rate limits for HTTP requests
 func (m *RateLimitMiddleware) HandleRequest(req *http.Request) (*http.Request, *http.Response) {
-	if !m.enabled {
+	m.mu.RLock()
+	enabled := m.enabled
+	m.mu.RUnlock()
+	if !enabled {
 		return req, nil
 	}
 

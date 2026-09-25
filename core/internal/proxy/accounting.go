@@ -40,6 +40,7 @@ const (
 	accountingReloadInterval      = 5 * time.Minute
 	accountingQuotaReloadInterval = 30 * time.Second
 	accountingIdleEvict           = time.Hour
+	accountingFinalFlush          = 10 * time.Second
 )
 
 // reloadInterval is how long a user's loaded total stays fresh.
@@ -474,7 +475,11 @@ func (a *UsageAccountant) Start() {
 		for {
 			select {
 			case <-a.stop:
-				a.Flush(context.Background())
+				// Bounded: a hung database must not hold shutdown for 5s
+				// per user; unflushed bytes are lost, as on a crash.
+				ctx, cancel := context.WithTimeout(context.Background(), accountingFinalFlush)
+				a.Flush(ctx)
+				cancel()
 				return
 			case <-t.C:
 				a.Flush(context.Background())

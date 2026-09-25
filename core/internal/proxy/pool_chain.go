@@ -79,7 +79,8 @@ var stickySessions = NewStickySessions()
 
 // pick chooses the proxy for one attempt: the session's pinned proxy if it
 // is still usable, otherwise a fresh one honouring the request's targeting
-// and the circuit breaker. A new choice is pinned to the session.
+// and the circuit breaker. The caller pins the session once an attempt
+// succeeds.
 func (c *PoolChain) pick(ctx context.Context, preq *ProxyRequest, tried map[int]bool) (*models.Proxy, int, error) {
 	var opts UsernameOptions
 	userID := 0
@@ -113,10 +114,20 @@ func (c *PoolChain) pick(ctx context.Context, preq *ProxyRequest, tried map[int]
 	if err != nil {
 		return nil, -1, err
 	}
-	if opts.Session != "" {
-		stickySessions.Pin(ctx, userID, opts.Session, p.ID, opts.SessionTTL)
-	}
 	return p, idx, nil
+}
+
+// pin binds the request's sticky session to a proxy that just worked, so a
+// failed attempt never moves the session.
+func pin(ctx context.Context, preq *ProxyRequest, proxyID int) {
+	if preq == nil || preq.Opts.Session == "" {
+		return
+	}
+	userID := 0
+	if preq.User != nil {
+		userID = preq.User.ID
+	}
+	stickySessions.Pin(ctx, userID, preq.Opts.Session, proxyID, preq.Opts.SessionTTL)
 }
 
 // pickProxy iterates through pool selectors, using each pool's rotation
@@ -178,11 +189,17 @@ func (c *PoolChain) pickTargeted(t Targeting, tried map[int]bool) (*models.Proxy
 }
 
 // markFailed records a failure for the proxy and only removes it from its pool's
-// in-memory list after chainFailureThreshold consecutive failures, so transient
-// timeouts don't immediately evict a healthy proxy (AUD-11). The shared circuit
-// breaker only counts it if the proxy itself was unreachable.
+// in-memory list after chainFailureThreshold consecutive proxy faults, so a
+// transient failure doesn't immediately evict a healthy proxy (AUD-11).
 func (c *PoolChain) markFailed(selIdx int, proxyID int, err error) {
 	reportOutcome(proxyID, err)
+	// Only the proxy's own failures count toward eviction: a slow or
+	// unreachable target, or a client giving up, says nothing about the
+	// proxy, and letting them count would let a few bad requests empty the
+	// user's pool.
+	if !isProxyFault(err) {
+		return
+	}
 	c.mu.Lock()
 	c.failCounts[proxyID]++
 	count := c.failCounts[proxyID]
@@ -225,10 +242,16 @@ func (c *PoolChain) SendWithRetry(
 
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		selectedProxy, selIdx, err := c.pick(ctx, preq, tried)
 		if err != nil {
 			if errors.Is(err, ErrNoTargetMatch) {
 				return nil, 0, err
+			}
+			if lastErr == nil {
+				lastErr = err
 			}
 			return nil, 0, fmt.Errorf("no proxy available: %w", lastErr)
 		}
@@ -282,6 +305,13 @@ func (c *PoolChain) SendWithRetry(
 			if resp != nil {
 				resp.Body.Close()
 			}
+			if ctx.Err() != nil {
+				// The client gave up: not the proxy's fault, and no one is
+				// waiting for another attempt.
+				breaker.Abandon(selectedProxy.ID)
+				tracing.End(span, err)
+				return nil, 0, ctx.Err()
+			}
 			lastErr = fmt.Errorf("proxy %s attempt %d: %w", selectedProxy.Address, attempt+1, err)
 			log.Warn("pool chain: proxy failed", "proxy", selectedProxy.Address, "err", err)
 			c.markFailed(selIdx, selectedProxy.ID, err)
@@ -297,6 +327,9 @@ func (c *PoolChain) SendWithRetry(
 		}
 		span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
 		tracing.End(span, fault)
+		if fault == nil {
+			pin(ctx, preq, selectedProxy.ID)
+		}
 		log.Info("pool chain: success",
 			"proxy", selectedProxy.Address,
 			"status", resp.StatusCode,
@@ -323,10 +356,16 @@ func (c *PoolChain) ConnectWithRetry(
 
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		selectedProxy, selIdx, err := c.pick(ctx, preq, tried)
 		if err != nil {
 			if errors.Is(err, ErrNoTargetMatch) {
 				return nil, 0, err
+			}
+			if lastErr == nil {
+				lastErr = err
 			}
 			return nil, 0, fmt.Errorf("no proxy available: %w", lastErr)
 		}
@@ -341,6 +380,15 @@ func (c *PoolChain) ConnectWithRetry(
 
 		// Reuse the existing connectViaProxy logic via a temporary handler
 		conn, err := connectViaProxyStandalone(selectedProxy, host, rotationSettings)
+		if err == nil && ctx.Err() != nil {
+			conn.Close() //nolint:errcheck // the client is gone
+			err = ctx.Err()
+		}
+		if err != nil && ctx.Err() != nil {
+			breaker.Abandon(selectedProxy.ID)
+			tracing.End(span, err)
+			return nil, 0, ctx.Err()
+		}
 		if err != nil {
 			lastErr = fmt.Errorf("CONNECT proxy %s attempt %d: %w", selectedProxy.Address, attempt+1, err)
 			log.Warn("pool chain CONNECT: failed", "proxy", selectedProxy.Address, "err", err)
@@ -351,6 +399,7 @@ func (c *PoolChain) ConnectWithRetry(
 
 		c.markSucceeded(selectedProxy.ID)
 		tracing.End(span, nil)
+		pin(ctx, preq, selectedProxy.ID)
 		log.Info("pool chain CONNECT: success", "proxy", selectedProxy.Address, "host", host)
 		return conn, selectedProxy.ID, nil
 	}

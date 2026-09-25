@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -226,7 +227,21 @@ func reportOutcome(proxyID int, err error) {
 		breaker.Success(proxyID)
 	case isProxyFault(err):
 		breaker.Failure(proxyID)
+	case isInconclusive(err):
+		// A timeout or cancellation says nothing about which side failed:
+		// neither trip nor close the circuit.
+		breaker.Abandon(proxyID)
 	default:
 		breaker.Success(proxyID)
 	}
+}
+
+// isInconclusive reports errors that don't show whether the proxy works:
+// timeouts (slow proxy or slow target) and cancellations by the client.
+func isInconclusive(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

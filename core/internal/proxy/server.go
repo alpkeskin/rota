@@ -378,10 +378,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.cleanupTicker != nil {
 		s.cleanupTicker.Stop()
 	}
-	// Flush any buffered usage records before the process exits.
-	if s.tracker != nil {
-		s.tracker.Stop()
-	}
 	if s.socks != nil {
 		s.socks.Close(ctx) //nolint:errcheck
 	}
@@ -389,6 +385,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Hijacked tunnels aren't covered by Shutdown; close them so their final
 	// bytes are metered before the last flush below.
 	s.handler.CloseTunnels(ctx)
+	// Flush buffered usage records only now, so requests and tunnels that
+	// ended during the drain are still recorded in the batch.
+	if s.tracker != nil {
+		s.tracker.Stop()
+	}
 	// Stop metering last, so the final flush includes the tunnels just closed.
 	if s.accountant != nil {
 		s.accountant.Stop()

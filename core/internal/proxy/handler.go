@@ -642,6 +642,9 @@ func (h *UpstreamProxyHandler) sendWithRetry(req *http.Request, ctx context.Cont
 	picker := newGlobalPicker(selector, maxFallbackRetries)
 
 	for fallbackAttempt := 0; fallbackAttempt < maxFallbackRetries; fallbackAttempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err // the client is gone
+		}
 		selectedProxy, err := picker.next(ctx)
 		if err != nil {
 			if lastErr == nil {
@@ -665,6 +668,10 @@ func (h *UpstreamProxyHandler) sendWithRetry(req *http.Request, ctx context.Cont
 			span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
 		}
 		tracing.End(span, fault)
+		if err != nil && ctx.Err() != nil {
+			// The client gave up: don't count it against the proxy.
+			return nil, 0, ctx.Err()
+		}
 		if err != nil {
 			lastErr = fmt.Errorf("proxy %s failed after %d retries: %w", selectedProxy.Address, perProxyRetries, err)
 			h.logger.Warn("proxy failed after all retries",
@@ -772,6 +779,9 @@ func (h *UpstreamProxyHandler) connectThroughProxy(host string, ctx context.Cont
 	picker := newGlobalPicker(selector, maxFallbackRetries)
 
 	for fallbackAttempt := 0; fallbackAttempt < maxFallbackRetries; fallbackAttempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err // the client is gone
+		}
 		selectedProxy, err := picker.next(ctx)
 		if err != nil {
 			if lastErr == nil {
@@ -784,6 +794,14 @@ func (h *UpstreamProxyHandler) connectThroughProxy(host string, ctx context.Cont
 		conn, err := h.tryConnectWithRetries(selectedProxy, host, perProxyRetries)
 		tracing.End(span, err)
 		duration := int(time.Since(startTime).Milliseconds())
+		if ctx.Err() != nil {
+			// The client gave up while we connected.
+			if conn != nil {
+				conn.Close() //nolint:errcheck
+			}
+			breaker.Abandon(selectedProxy.ID)
+			return nil, 0, ctx.Err()
+		}
 
 		reportOutcome(selectedProxy.ID, err)
 		if err != nil {
