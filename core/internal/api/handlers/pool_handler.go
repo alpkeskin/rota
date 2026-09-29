@@ -233,19 +233,58 @@ func (h *PoolHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// GetProxies returns all proxies in a pool
+// GetProxies returns one page of proxies in a pool.
+//
+//	GET /api/v1/pools/{id}/proxies?page=1&limit=50
+//
+// The pool's full membership can be very large, so the list is paginated
+// (page/limit query params, same conventions as /proxies) and the response
+// carries pagination metadata with the total member count. An explicit
+// offset param takes precedence over page, so a client that tracks how many
+// rows it already has can request the next batch without a page number.
 func (h *PoolHandler) GetProxies(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
 		return
 	}
-	proxies, err := h.poolRepo.GetProxies(r.Context(), id)
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := (page - 1) * limit
+	if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o >= 0 {
+		offset = o
+	}
+
+	proxies, total, err := h.poolRepo.GetProxiesPageAt(r.Context(), id, offset, limit)
 	if err != nil {
+		h.logger.Error("failed to get pool proxies", "pool_id", id, "error", err)
 		http.Error(w, `{"error":"failed to get pool proxies"}`, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"proxies": proxies})
+
+	page = offset/limit + 1
+	totalPages := 1
+	if total > 0 {
+		totalPages = (total + limit - 1) / limit
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"proxies": proxies,
+		"pagination": models.PaginationMeta{
+			Page:       page,
+			Limit:      limit,
+			Total:      total,
+			TotalPages: totalPages,
+		},
+	})
 }
 
 // AddProxies adds proxy IDs to a pool
@@ -331,10 +370,10 @@ func (h *PoolHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
-		"job_id":   job.ID,
-		"pool_id":  id,
-		"total":    job.Total,
-		"status":   job.Status,
+		"job_id":  job.ID,
+		"pool_id": id,
+		"total":   job.Total,
+		"status":  job.Status,
 	})
 }
 

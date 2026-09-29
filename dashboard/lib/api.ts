@@ -395,8 +395,15 @@ class ApiClient {
     return this.request(`/api/v1/pools/${id}`, { method: "DELETE" })
   }
 
-  async getPoolProxies(id: number): Promise<{ proxies: PoolProxy[] }> {
-    return this.request(`/api/v1/pools/${id}/proxies`)
+  async getPoolProxies(
+    id: number,
+    offset = 0,
+    limit = 100
+  ): Promise<{
+    proxies: PoolProxy[]
+    pagination: { page: number; limit: number; total: number; total_pages: number }
+  }> {
+    return this.request(`/api/v1/pools/${id}/proxies?offset=${offset}&limit=${limit}`)
   }
 
   async addPoolProxies(id: number, proxyIds: number[]): Promise<{ added: number }> {
