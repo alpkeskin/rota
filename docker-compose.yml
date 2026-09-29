@@ -28,6 +28,12 @@ services:
       dockerfile: Dockerfile
     container_name: rota-core
     restart: unless-stopped
+    volumes:
+      # GeoLite2 .mmdb databases (maxmind provider). Writable on purpose:
+      # the scheduled auto-update rewrites the file in place with the
+      # license key. Without this mount the downloaded DB lives in the
+      # container layer and is lost on every recreate.
+      - ./data:/app/data
     ports:
       # The proxy itself is the product — keep it reachable on the host.
       # The REST API (8001) is internal only; reach it via Caddy at /api.

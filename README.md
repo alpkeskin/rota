@@ -157,6 +157,13 @@ See `.env.example` for the full list including auth brute-force protection.
 > **Note**: `ROTA_ADMIN_USER` / `ROTA_ADMIN_PASSWORD` are only used when the
 > database is empty (first start). Afterwards, use **Settings → Admin account**.
 
+> **Note**: the `./data` directory stores MaxMind `.mmdb` files (GeoIP
+> provider) and must be writable by the core container, which runs as uid
+> 1000. It is committed with a `.gitkeep` so it exists with your ownership
+> before the first `docker compose up`; if you created it manually (or Docker
+> created it as root), fix ownership with `chown 1000:1000 data` — otherwise
+> the MMDB download fails with a permission error.
+
 ### Production Deployment (HTTPS)
 
 Point a domain at the server and set one variable — Caddy obtains and renews a

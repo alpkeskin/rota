@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -153,19 +154,38 @@ type ProxyTester interface {
 	CheckAllProxies(ctx context.Context) ([]models.ProxyTestResult, error)
 }
 
+// geoIdleInterval is how long the geo worker sleeps when both the in-memory
+// queue and the DB backlog are empty, before it polls the DB again. New work
+// (Enqueue) wakes it early via geoWake.
+const geoIdleInterval = 30 * time.Second
+
 // SourceService fetches proxy lists from remote URLs and imports them into the DB.
 type SourceService struct {
 	sourceRepo *repository.SourceRepository
 	proxyRepo  *repository.ProxyRepository
 	poolRepo   *repository.PoolRepository
 	geoSvc     *GeoIPService
+	geoQueue   *geoQueue
 	tester     ProxyTester // optional: auto health-check after import
 	logger     *logger.Logger
 	client     *http.Client
 
+	// syncPoolsFunc, when set, overrides syncAllPools (test hook for
+	// observing the post-geo pool re-sync).
+	syncPoolsFunc func(ctx context.Context)
+
 	mu       sync.Mutex
 	fetching bool // guarded by mu: true while a fetchDueSources batch is running
 	stopCh   chan struct{}
+
+	// geoWake nudges the geo worker out of its idle backoff when new work
+	// is queued. Buffered (1) so wakeGeoWorker never blocks.
+	geoWake chan struct{}
+
+	// geoSyncMu guards geoSyncLast: re-sync of auto pools after a geo batch
+	// is throttled to at most once every 5 minutes.
+	geoSyncMu   sync.Mutex
+	geoSyncLast time.Time
 }
 
 // NewSourceService creates a new SourceService.
@@ -181,9 +201,11 @@ func NewSourceService(
 		proxyRepo:  proxyRepo,
 		poolRepo:   poolRepo,
 		geoSvc:     geoSvc,
+		geoQueue:   newGeoQueue(),
 		logger:     log,
 		client:     &http.Client{Timeout: 30 * time.Second},
 		stopCh:     make(chan struct{}),
+		geoWake:    make(chan struct{}, 1),
 	}
 }
 
@@ -192,7 +214,8 @@ func (s *SourceService) SetHealthChecker(t ProxyTester) {
 	s.tester = t
 }
 
-// Start runs a background goroutine that checks for due sources every minute.
+// Start runs a background goroutine that checks for due sources every
+// minute, plus the geo enrichment worker.
 func (s *SourceService) Start(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
@@ -210,6 +233,199 @@ func (s *SourceService) Start(ctx context.Context) {
 			}
 		}
 	}()
+	s.StartGeoWorker(ctx)
+}
+
+// StartGeoWorker runs the single geo enrichment consumer. Every 300 ms it
+// drains the in-memory queue (falling back to the DB backlog when the queue
+// is empty), resolves geo data via the GeoIPService, and writes the results
+// back to the DB. When both the queue and the backlog are empty it backs off
+// to geoIdleInterval instead of polling the DB every tick; new work wakes it
+// early via geoWake.
+func (s *SourceService) StartGeoWorker(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(300 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+			case <-s.geoWake:
+			case <-ctx.Done():
+				s.logger.Info("geo enrichment worker stopped")
+				return
+			}
+			safeworker.Call(s.logger, "geo_enrich", func() {
+				busy := s.geoWorkerTick(ctx)
+				if !busy {
+					select {
+					case <-time.After(geoIdleInterval):
+					case <-s.geoWake:
+					case <-ctx.Done():
+						return
+					}
+				}
+			})
+		}
+	}()
+}
+
+// wakeGeoWorker nudges the geo worker so it picks up newly queued work
+// immediately instead of waiting out its idle backoff.
+func (s *SourceService) wakeGeoWorker() {
+	select {
+	case s.geoWake <- struct{}{}:
+	default:
+	}
+}
+
+// geoWorkerTick is one pass of the geo enrichment worker. It reports whether
+// it found any work (false = idle, so the caller can back off).
+func (s *SourceService) geoWorkerTick(ctx context.Context) bool {
+	// 1. Collect addresses: in-memory queue first, then the DB backlog.
+	// The drain size is provider-aware: the local MaxMind DB is drained
+	// faster (LocalBatchSize) than the external ip-api (BatchSize).
+	drainSize := s.geoSvc.DrainBatchSize()
+	addresses := s.geoQueue.Drain(drainSize)
+	if len(addresses) == 0 {
+		addresses = s.drainGeoBacklog(ctx, drainSize)
+	}
+
+	// 2. Refresh the queue-state metrics (DB backlog + in-memory depth).
+	dbBacklog := s.countGeoBacklog(ctx)
+	s.geoSvc.SetQueueState(dbBacklog, s.geoQueue.Len())
+
+	if len(addresses) == 0 {
+		return false
+	}
+
+	// 3. Normalize and dedupe by IP (ip -> address). Addresses that cannot
+	// be looked up (unparseable, reserved) are marked processed so they stop
+	// matching the DB backlog query — otherwise they are re-drained every
+	// tick forever.
+	ipToAddr := make(map[string]string, len(addresses))
+	var ips []netip.Addr
+	var skipped []string
+	for _, addr := range addresses {
+		ip, reason := ExtractPublicIP(addr)
+		if reason != "" {
+			skipped = append(skipped, addr)
+			continue
+		}
+		key := ip.String()
+		if _, seen := ipToAddr[key]; !seen {
+			ipToAddr[key] = addr
+			ips = append(ips, ip)
+		}
+	}
+	if len(skipped) > 0 {
+		s.markGeoSkipped(ctx, skipped)
+	}
+	if len(ips) == 0 {
+		// All addresses were stamped skipped — that is work (the backlog
+		// shrank), so keep the fast tick cadence for the remaining rows.
+		return true
+	}
+
+	// 4. Enrich.
+	updated, failures, err := s.geoSvc.EnrichBatch(ctx, ips)
+	if err != nil {
+		s.logger.Warn("geo batch failed", "ips", len(ips), "error", err)
+	}
+
+	// 5. Persist successes (keyed by address).
+	geoByAddr := make(map[string]models.GeoInfo, len(updated))
+	for ip, geo := range updated {
+		if addr, ok := ipToAddr[ip]; ok {
+			geoByAddr[addr] = geo
+		}
+	}
+	if n := s.updateGeo(ctx, geoByAddr); n > 0 {
+		s.geoSvc.RecordIPsUpdated(n)
+		s.scheduleGeoPoolSync(ctx)
+	}
+
+	// Permanent failures (banned, API "fail", 4xx) can never be enriched —
+	// stamp them so they leave the DB backlog instead of being re-drained
+	// (and re-billed) forever. Retryable ones stay and come back on a
+	// later drain.
+	var permanent []string
+	for _, f := range failures {
+		s.logger.Warn("geo enrichment failed for ip",
+			"ip", f.IP, "reason", f.Reason, "retryable", f.Retryable)
+		if !f.Retryable {
+			if addr, ok := ipToAddr[f.IP]; ok {
+				permanent = append(permanent, addr)
+			}
+		}
+	}
+	if len(permanent) > 0 {
+		s.markGeoSkipped(ctx, permanent)
+	}
+
+	s.logger.Info("geo batch processed",
+		"addresses", len(addresses),
+		"ips", len(ips),
+		"updated", len(geoByAddr),
+		"failed", len(failures),
+		"db_backlog", dbBacklog,
+	)
+	return true
+}
+
+// drainGeoBacklog pulls up to limit addresses without geo data from the DB —
+// the restart-safe fallback when the in-memory queue is empty.
+func (s *SourceService) drainGeoBacklog(ctx context.Context, limit int) []string {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
+		`SELECT address FROM proxies
+		 WHERE country_code IS NULL AND geo_updated_at IS NULL
+		 ORDER BY address
+		 LIMIT $1`, limit)
+	if err != nil {
+		s.logger.Warn("geo backlog drain query failed", "error", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var addresses []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			continue
+		}
+		addresses = append(addresses, addr)
+	}
+	return addresses
+}
+
+// countGeoBacklog counts proxies without geo data (the work still to do).
+// Matches the drain query exactly so stamped-skipped rows are not counted;
+// the partial index idx_proxies_geo_backlog serves both.
+func (s *SourceService) countGeoBacklog(ctx context.Context) int {
+	var n int
+	err := s.proxyRepo.GetDB().Pool.QueryRow(ctx,
+		`SELECT COUNT(*)::int FROM proxies
+		 WHERE country_code IS NULL AND geo_updated_at IS NULL`).Scan(&n)
+	if err != nil {
+		s.logger.Warn("failed to count geo backlog", "error", err)
+		return 0
+	}
+	return n
+}
+
+// scheduleGeoPoolSync re-syncs auto pools after a geo batch changed rows,
+// throttled to at most once every 5 minutes.
+func (s *SourceService) scheduleGeoPoolSync(ctx context.Context) {
+	s.geoSyncMu.Lock()
+	if time.Since(s.geoSyncLast) < 5*time.Minute {
+		s.geoSyncMu.Unlock()
+		return
+	}
+	s.geoSyncLast = time.Now()
+	s.geoSyncMu.Unlock()
+	go s.syncAllPools(ctx)
 }
 
 // FetchNow fetches a single source immediately (called from API handler).
@@ -270,6 +486,10 @@ func (s *SourceService) fetchDueSources(ctx context.Context) {
 
 // syncAllPools re-syncs all auto_sync pools — called after a fetch batch completes
 func (s *SourceService) syncAllPools(ctx context.Context) {
+	if s.syncPoolsFunc != nil {
+		s.syncPoolsFunc(ctx)
+		return
+	}
 	synced, err := s.poolRepo.SyncAllAutoSyncPools(ctx)
 	if err != nil {
 		s.logger.Error("auto pool sync after fetch failed", "error", err)
@@ -346,10 +566,51 @@ func (s *SourceService) fetchAndImport(ctx context.Context, src *models.ProxySou
 		}
 	}
 
-	// Enrich geo data in the background
-	go s.enrichGeo(context.Background(), addresses)
+	// Queue geo enrichment only for addresses that have no geo data yet —
+	// re-queueing already-enriched proxies on every refetch would burn the
+	// ip-api quota for no reason. The geo worker drains the queue (and the
+	// DB backlog) in the background under the rate limit.
+	if needGeo := s.addressesNeedingGeo(ctx, addresses); len(needGeo) > 0 {
+		if queued := s.geoQueue.Enqueue(needGeo); queued > 0 {
+			s.logger.Info("geo enrichment queued",
+				"source_id", src.ID, "added", queued, "queue_len", s.geoQueue.Len())
+			s.wakeGeoWorker()
+		}
+	}
 
 	return created, total, nil
+}
+
+// addressesNeedingGeo returns the subset of addresses that have no geo data
+// yet (country_code IS NULL). On a query error it falls back to the full
+// list — the queue and the worker skip what is already enriched, so the
+// worst case is the old (pre-filter) behaviour, not lost work.
+func (s *SourceService) addressesNeedingGeo(ctx context.Context, addresses []string) []string {
+	if len(addresses) == 0 {
+		return nil
+	}
+	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
+		`SELECT address FROM proxies
+		 WHERE address = ANY($1) AND country_code IS NULL`, addresses)
+	if err != nil {
+		s.logger.Warn("geo backlog filter query failed", "error", err)
+		return addresses
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			continue
+		}
+		out = append(out, addr)
+	}
+	if err := rows.Err(); err != nil {
+		s.logger.Warn("geo backlog filter query failed", "error", err)
+		return addresses
+	}
+	return out
 }
 
 // bulkUpsert upserts proxies. Returns (created, failed).
@@ -369,16 +630,14 @@ func (s *SourceService) bulkUpsert(ctx context.Context, proxies []models.CreateP
 	return created, failed
 }
 
-// enrichGeo fetches geo data for the given addresses and updates the DB.
-func (s *SourceService) enrichGeo(ctx context.Context, addresses []string) {
-	if len(addresses) == 0 {
-		return
-	}
-	geos := s.geoSvc.EnrichProxies(ctx, addresses)
+// updateGeo writes geo data for the given addresses to the DB.
+// Returns the number of rows written.
+func (s *SourceService) updateGeo(ctx context.Context, geos map[string]models.GeoInfo) int {
 	if len(geos) == 0 {
-		return
+		return 0
 	}
 
+	updated := 0
 	for addr, geo := range geos {
 		if _, err := s.proxyRepo.GetDB().Pool.Exec(ctx, `
 			UPDATE proxies SET
@@ -395,14 +654,37 @@ func (s *SourceService) enrichGeo(ctx context.Context, addresses []string) {
 			geo.Latitude, geo.Longitude, geo.ISP, addr,
 		); err != nil {
 			s.logger.Warn("failed to update geo for proxy", "address", addr, "error", err)
+		} else {
+			updated++
+		}
+	}
+	return updated
+}
+
+// markGeoSkipped stamps addresses that can never be enriched (unparseable or
+// reserved IPs) with geo_updated_at so they leave the DB backlog.
+func (s *SourceService) markGeoSkipped(ctx context.Context, addresses []string) {
+	for _, addr := range addresses {
+		if _, err := s.proxyRepo.GetDB().Pool.Exec(ctx,
+			`UPDATE proxies SET geo_updated_at = NOW()
+			 WHERE address = $1 AND geo_updated_at IS NULL`, addr,
+		); err != nil {
+			s.logger.Warn("failed to mark geo-skipped proxy", "address", addr, "error", err)
 		}
 	}
 }
 
-// EnrichAll re-runs geo enrichment for all proxies that have no geo data yet.
+// EnrichAll queues geo enrichment for the proxies that have no geo data yet.
+// The read is capped at the queue capacity — queueing more than that is
+// pointless, and the uncapped remainder is picked up by the worker's DB
+// backlog drain. It returns the number of addresses placed in the queue; the
+// geo worker processes them in the background under the ip-api rate limit
+// and re-syncs auto pools as rows get geo data.
 func (s *SourceService) EnrichAll(ctx context.Context) (int, error) {
 	rows, err := s.proxyRepo.GetDB().Pool.Query(ctx,
-		`SELECT address FROM proxies WHERE country_code IS NULL LIMIT 500`)
+		`SELECT address FROM proxies
+		 WHERE country_code IS NULL AND geo_updated_at IS NULL
+		 LIMIT $1`, geoQueueCap)
 	if err != nil {
 		return 0, err
 	}
@@ -416,35 +698,17 @@ func (s *SourceService) EnrichAll(ctx context.Context) (int, error) {
 		}
 		addresses = append(addresses, addr)
 	}
-	rows.Close()
-
-	if len(addresses) == 0 {
-		return 0, nil
+	if err := rows.Err(); err != nil {
+		return 0, err
 	}
 
-	geos := s.geoSvc.EnrichProxies(ctx, addresses)
-	for addr, geo := range geos {
-		if _, err := s.proxyRepo.GetDB().Pool.Exec(ctx, `
-			UPDATE proxies SET
-				country_code   = $1,
-				country_name   = $2,
-				region_name    = $3,
-				city_name      = $4,
-				latitude       = $5,
-				longitude      = $6,
-				isp            = $7,
-				geo_updated_at = NOW()
-			WHERE address = $8
-		`, geo.CountryCode, geo.CountryName, geo.RegionName, geo.CityName,
-			geo.Latitude, geo.Longitude, geo.ISP, addr); err != nil {
-			s.logger.Warn("failed to update geo for proxy (EnrichAll)", "address", addr, "error", err)
-		}
+	queued := s.geoQueue.Enqueue(addresses)
+	if queued > 0 {
+		s.logger.Info("geo enrichment queued from EnrichAll",
+			"queued", queued, "queue_len", s.geoQueue.Len())
+		s.wakeGeoWorker()
 	}
-
-	// Re-sync pools now that geo data has changed
-	go s.syncAllPools(context.Background())
-
-	return len(geos), nil
+	return queued, nil
 }
 
 // Bounds on how much we're willing to read from a single (possibly hostile)

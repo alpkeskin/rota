@@ -1,12 +1,13 @@
 "use client"
 
 import * as React from "react"
+import { Globe } from "lucide-react"
 import { PageHeader, Section, LoadingLine } from "@/components/page-header"
 import { StatStrip, type StatTone } from "@/components/stat-strip"
 import { DefinitionList } from "@/components/definition-list"
 import { UsageBar } from "@/components/usage-bar"
 import { LiveRefresh } from "@/components/controls"
-import { HealthLine } from "@/components/status"
+import { ErrorStatus, HealthLine, OkStatus, Tag } from "@/components/status"
 import { api } from "@/lib/api"
 import { SystemMetrics } from "@/lib/types"
 import { bytes, count, percent } from "@/lib/format"
@@ -38,8 +39,9 @@ export default function MetricsPage() {
 
   if (!metrics) return <LoadingLine />
 
-  const { memory, cpu, disk, runtime } = metrics
+  const { memory, cpu, disk, runtime, geo } = metrics
   const worst = Math.max(memory.percentage, cpu.percentage, disk.percentage)
+  const hasPipelines = Boolean(geo)
   const pressure =
     worst >= 90
       ? { tone: "critical" as const, text: "A resource is above 90% — the core may start refusing work." }
@@ -95,7 +97,7 @@ export default function MetricsPage() {
         </div>
       </Section>
 
-      <Section title="Go runtime" description="Heap and scheduler counters from the process itself." className="border-b-0">
+      <Section title="Go runtime" description="Heap and scheduler counters from the process itself.">
         <DefinitionList
           columns={4}
           items={[
@@ -109,6 +111,75 @@ export default function MetricsPage() {
           ]}
         />
       </Section>
+
+      {hasPipelines && (
+        <Section title="Background pipelines" description="Background jobs: GeoIP enrichment." className="border-b-0">
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+            {geo && <GeoPanel geo={geo} />}
+          </div>
+        </Section>
+      )}
     </>
+  )
+}
+
+// ── Background pipeline panels ─────────────────────────────────────────────
+
+type GeoSection = NonNullable<SystemMetrics["geo"]>
+
+const GEO_QUEUE_CAPACITY = 1000
+
+function queueTone(pct: number): "default" | "warning" | "critical" {
+  if (pct >= 70) return "critical"
+  if (pct >= 30) return "warning"
+  return "default"
+}
+
+const panelHeader = (Icon: typeof Globe, title: React.ReactNode, status: React.ReactNode) => (
+  <div className="flex items-center gap-2">
+    <Icon className="text-muted-foreground size-4" aria-hidden />
+    <h3 className="font-medium">{title}</h3>
+    <span className="ml-auto">{status}</span>
+  </div>
+)
+
+function GeoPanel({ geo }: { geo: GeoSection }) {
+  const queuePct = Math.min(100, (geo.queue_pending / GEO_QUEUE_CAPACITY) * 100)
+  const atLimit = geo.usage_percent_1m >= 70
+  return (
+    <div className="border-border rounded-md p-4">
+      {panelHeader(
+        Globe,
+        <span className="flex items-center gap-1.5">
+          GeoIP Enrichment
+          {geo.provider && <Tag mono>{geo.provider}</Tag>}
+        </span>,
+        atLimit ? <ErrorStatus>at limit</ErrorStatus> : <OkStatus>ok</OkStatus>
+      )}
+      <div className="mt-3 space-y-3">
+        <div>
+          <div className="mb-1 flex items-baseline justify-between text-xs">
+            <span className="text-muted-foreground">Enrichment queue</span>
+            <span className="num">{count(geo.queue_pending)} pending · {count(geo.queued_in_memory)} in memory</span>
+          </div>
+          <UsageBar value={queuePct} tone={queueTone(queuePct)} />
+        </div>
+        <div>
+          <div className="mb-1 flex items-baseline justify-between text-xs">
+            <span className="text-muted-foreground">Batch requests (1m)</span>
+            <span className="num">{geo.batch_requests_limit > 0 ? `${count(geo.batch_requests_last_minute)} / ${count(geo.batch_requests_limit)}` : "—"}</span>
+          </div>
+          <UsageBar value={geo.usage_percent_1m} tone={queueTone(geo.usage_percent_1m)} />
+          <div className="mt-1 flex items-baseline justify-between text-xs">
+            <span className="text-muted-foreground">Rate limit usage</span>
+            <span className="num font-medium">{percent(geo.usage_percent_1m)}</span>
+          </div>
+        </div>
+        <div className="flex items-baseline justify-between text-xs">
+          <span className="text-muted-foreground">IPs updated (10m)</span>
+          <span className="num font-medium">{count(geo.ips_updated_last_10m)}</span>
+        </div>
+      </div>
+    </div>
   )
 }

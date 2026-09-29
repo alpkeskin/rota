@@ -373,7 +373,7 @@ const docTemplate = `{
         },
         "/metrics/system": {
             "get": {
-                "description": "Get current system resource metrics (CPU, memory, disk, runtime)",
+                "description": "Get current system resource metrics (CPU, memory, disk, runtime) plus optional background-pipeline sections (geo)",
                 "produces": [
                     "application/json"
                 ],
@@ -909,6 +909,33 @@ const docTemplate = `{
                         "description": "Internal Server Error",
                         "schema": {
                             "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/sources/enrich-geo": {
+            "post": {
+                "description": "Queue geo enrichment for all proxies without geo data. Returns the number of addresses placed in the queue; lookups run in the background.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sources"
+                ],
+                "summary": "Enrich geo",
+                "responses": {
+                    "200": {
+                        "description": "Number of addresses queued",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Enrichment failed",
+                        "schema": {
+                            "type": "string"
                         }
                     }
                 }
@@ -1523,6 +1550,32 @@ const docTemplate = `{
                 }
             }
         },
+        "internal_api_handlers.GeoMetrics": {
+            "type": "object",
+            "properties": {
+                "batch_requests_last_minute": {
+                    "type": "integer"
+                },
+                "batch_requests_limit": {
+                    "type": "integer"
+                },
+                "ips_updated_last_10m": {
+                    "type": "integer"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "queue_pending": {
+                    "type": "integer"
+                },
+                "queued_in_memory": {
+                    "type": "integer"
+                },
+                "usage_percent_1m": {
+                    "type": "number"
+                }
+            }
+        },
         "internal_api_handlers.SystemMetrics": {
             "type": "object",
             "properties": {
@@ -1531,6 +1584,9 @@ const docTemplate = `{
                 },
                 "disk": {
                     "$ref": "#/definitions/internal_api_handlers.DiskMetrics"
+                },
+                "geo": {
+                    "$ref": "#/definitions/internal_api_handlers.GeoMetrics"
                 },
                 "memory": {
                     "$ref": "#/definitions/internal_api_handlers.MemoryMetrics"

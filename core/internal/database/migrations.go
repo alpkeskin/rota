@@ -558,6 +558,16 @@ var migrations = []Migration{
 		`,
 		Down: `DROP TABLE IF EXISTS system_secrets;`,
 	},
+	{
+		Version:     26,
+		Description: "Partial index for the geo enrichment backlog (un-geotagged proxies)",
+		Up: `
+			CREATE INDEX IF NOT EXISTS idx_proxies_geo_backlog
+				ON proxies (address)
+				WHERE country_code IS NULL AND geo_updated_at IS NULL;
+		`,
+		Down: `DROP INDEX IF EXISTS idx_proxies_geo_backlog;`,
+	},
 }
 
 // Migrate runs all pending migrations

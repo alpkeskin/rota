@@ -74,7 +74,8 @@ func openHandlerTestDB(t *testing.T) *pgxpool.Pool {
 			ADD COLUMN IF NOT EXISTS longitude      DOUBLE PRECISION,
 			ADD COLUMN IF NOT EXISTS isp            VARCHAR(255),
 			ADD COLUMN IF NOT EXISTS geo_updated_at TIMESTAMP,
-			ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
+			ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}',
+			ADD COLUMN IF NOT EXISTS source_id INTEGER;
 	`
 	const createSettings = `
 		CREATE TABLE IF NOT EXISTS settings (

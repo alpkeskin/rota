@@ -14,9 +14,9 @@ import (
 
 // SourceHandler handles proxy source CRUD + manual fetch
 type SourceHandler struct {
-	sourceRepo  *repository.SourceRepository
-	sourceSvc   *services.SourceService
-	logger      *logger.Logger
+	sourceRepo *repository.SourceRepository
+	sourceSvc  *services.SourceService
+	logger     *logger.Logger
 }
 
 // NewSourceHandler creates a new SourceHandler
@@ -132,19 +132,28 @@ func (h *SourceHandler) FetchNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"source":  src,
+		"source":   src,
 		"imported": count,
 	})
 }
 
-// EnrichGeo triggers geo enrichment for all ungeotagged proxies
+// EnrichGeo queues geo enrichment for all ungeotagged proxies. The geo
+// worker processes the queue in the background under the ip-api rate limit.
+//
+//	@Summary		Enrich geo
+//	@Description	Queue geo enrichment for all proxies without geo data. Returns the number of addresses placed in the queue; lookups run in the background.
+//	@Tags			sources
+//	@Produce		json
+//	@Success		200	{object}	map[string]interface{}	"Number of addresses queued"
+//	@Failure		500	{string}	string	"Enrichment failed"
+//	@Router			/sources/enrich-geo [post]
 func (h *SourceHandler) EnrichGeo(w http.ResponseWriter, r *http.Request) {
 	count, err := h.sourceSvc.EnrichAll(r.Context())
 	if err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"enriched": count})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"queued": count})
 }
 
 // writeJSON is a helper to encode JSON responses
