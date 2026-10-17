@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
+	"github.com/alpkeskin/rota/core/pkg/safeworker"
 	"github.com/gorilla/websocket"
 )
 
@@ -92,12 +92,12 @@ func (h *WebSocketHandler) DashboardWebSocket(w http.ResponseWriter, r *http.Req
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// Read client messages in a dedicated goroutine so the periodic ticker
-	// writes below are never blocked by a read. Idle clients send no keep-alive
-	// traffic, so a read timeout is EXPECTED and must not tear down the
-	// connection — only real close/errors cancel the context (issue: idle
-	// dashboard clients disconnected every ~10s).
-	go func() {
+	// Read client messages in a dedicated goroutine to detect disconnects and
+	// handle protocol control frames. Any error (EOF, close) terminates
+	// the connection context — ReadMessage must never be retried after an error
+	// as gorilla/websocket marks the connection as failed and panics on repeated reads.
+	go safeworker.Call(h.logger, "dashboard_ws_reader", func() {
+		defer cancel()
 		for {
 			select {
 			case <-ctx.Done():
@@ -105,24 +105,24 @@ func (h *WebSocketHandler) DashboardWebSocket(w http.ResponseWriter, r *http.Req
 			default:
 			}
 
-			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 			if _, _, err := conn.ReadMessage(); err != nil {
-				// Idle read timeout — keep waiting, this is not an error.
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue
-				}
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					h.logger.Info("dashboard websocket closed normally")
+				} else if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 					h.logger.Warn("dashboard websocket unexpected close", "error", err)
 				}
-				cancel()
 				return
 			}
 		}
-	}()
+	})
 
 	// Send updates every 5 seconds
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+
+	// Ping ticker to keep connection alive across proxies and firewalls
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer pingTicker.Stop()
 
 	// Send initial data immediately
 	if err := h.sendDashboardUpdate(ctx, conn); err != nil {
@@ -139,6 +139,13 @@ func (h *WebSocketHandler) DashboardWebSocket(w http.ResponseWriter, r *http.Req
 				return
 			}
 
+		case <-pingTicker.C:
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				h.logger.Error("failed to send ping", "error", err)
+				return
+			}
+
 		case <-ctx.Done():
 			h.logger.Info("dashboard websocket context cancelled")
 			return
@@ -148,9 +155,13 @@ func (h *WebSocketHandler) DashboardWebSocket(w http.ResponseWriter, r *http.Req
 
 // sendDashboardUpdate sends dashboard statistics to the WebSocket client
 func (h *WebSocketHandler) sendDashboardUpdate(ctx context.Context, conn *websocket.Conn) error {
-	stats, err := h.dashboardRepo.GetStats(ctx)
-	if err != nil {
-		return err
+	var stats interface{}
+	if h.dashboardRepo != nil {
+		s, err := h.dashboardRepo.GetStats(ctx)
+		if err != nil {
+			return err
+		}
+		stats = s
 	}
 
 	message := map[string]interface{}{
@@ -174,9 +185,8 @@ func (h *WebSocketHandler) LogsWebSocket(w http.ResponseWriter, r *http.Request)
 	h.logger.Info("logs websocket connection established", "remote_addr", r.RemoteAddr)
 
 	// Set up ping/pong to keep connection alive
-	conn.SetReadDeadline(time.Time{}) // Remove initial read deadline
+	conn.SetReadDeadline(time.Time{})
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 		return nil
 	})
 
@@ -193,7 +203,7 @@ func (h *WebSocketHandler) LogsWebSocket(w http.ResponseWriter, r *http.Request)
 	filterMutex := &sync.RWMutex{}
 
 	// Goroutine to send messages from channel to WebSocket
-	go func() {
+	go safeworker.Call(h.logger, "logs_ws_writer", func() {
 		for {
 			select {
 			case msg := <-logChan:
@@ -208,11 +218,14 @@ func (h *WebSocketHandler) LogsWebSocket(w http.ResponseWriter, r *http.Request)
 				return
 			}
 		}
-	}()
+	})
 
 	// Goroutine to read client messages (for filter updates)
-	go func() {
-		defer h.logger.Info("reader goroutine stopped")
+	go safeworker.Call(h.logger, "logs_ws_reader", func() {
+		defer func() {
+			h.logger.Info("reader goroutine stopped")
+			cancel()
+		}()
 		for {
 			select {
 			case <-ctx.Done():
@@ -220,24 +233,13 @@ func (h *WebSocketHandler) LogsWebSocket(w http.ResponseWriter, r *http.Request)
 			default:
 			}
 
-			// Set a read deadline - will be updated by pong handler
-			conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				// Timeout means no client message, which is normal
-				if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
-					continue
-				}
-				// Check for normal close or unexpected close
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					h.logger.Info("logs websocket closed normally")
-					cancel()
-					return
-				}
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				} else if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 					h.logger.Warn("logs websocket unexpected close", "error", err)
 				}
-				cancel()
 				return
 			}
 
@@ -257,7 +259,7 @@ func (h *WebSocketHandler) LogsWebSocket(w http.ResponseWriter, r *http.Request)
 				}
 			}
 		}
-	}()
+	})
 
 	// Poll for new logs every 2 seconds
 	ticker := time.NewTicker(2 * time.Second)
@@ -270,23 +272,28 @@ func (h *WebSocketHandler) LogsWebSocket(w http.ResponseWriter, r *http.Request)
 	// Get the current maximum log ID to start streaming from
 	// This ensures we only stream new logs from the moment the connection starts
 	lastLogID := int64(0)
-	currentLogs, _, err := h.logRepo.List(ctx, 1, 1, "", "", filterSource, nil, nil)
-	if err == nil && len(currentLogs) > 0 {
-		lastLogID = currentLogs[0].ID
-		h.logger.Info("starting log stream from current position", "last_log_id", lastLogID)
+	if h.logRepo != nil {
+		currentLogs, _, err := h.logRepo.List(ctx, 1, 1, "", "", filterSource, nil, nil)
+		if err == nil && len(currentLogs) > 0 {
+			lastLogID = currentLogs[0].ID
+			h.logger.Info("starting log stream from current position", "last_log_id", lastLogID)
+		}
 	}
 
 	for {
 		select {
 		case <-pingTicker.C:
-			// Send ping to keep connection alive
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			// Send ping to keep connection alive.
+			// WriteControl is safe to call concurrently with WriteJSON in writer goroutine.
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
 				h.logger.Error("failed to send ping", "error", err)
 				return
 			}
 
 		case <-ticker.C:
+			if h.logRepo == nil {
+				continue
+			}
 			filterMutex.RLock()
 			currentFilterSource := filterSource
 			currentFilterLevels := filterLevels
